@@ -886,19 +886,16 @@ if st.session_state.photo_gallery:
             
         status.text("總稽核 Agent 正在進行全方位分析...")
         
-        # 1. 執行 AI 分析
+        # --- 1. 執行 AI 分析 (翻譯官) ---
         t0 = time.time()
-        # 💡 [修正]：不再重複傳送 full_text_for_search
-        # 既然 full_text_for_search 只是用來找規則，那就不要把它當成參數傳給 agent
+        # 💡 [修正]：不再重複傳送文字量極大的 full_text_for_search，減輕負擔
         res_main = agent_unified_check(combined_input, combined_input, GEMINI_KEY, main_model_name)
         time_main = time.time() - t0
         
         progress_bar.progress(100)
         status.empty()
         
-        total_end = time.time()
-        
-        # --- 1. 成本計算 (完全依照您的版本，原封不動) ---
+        # --- 2. 成本計算 (完全依照您的邏輯) ---
         usage_main = res_main.get("_token_usage", {"input": 0, "output": 0})
         
         def get_model_rate(model_name):
@@ -912,22 +909,22 @@ if st.session_state.photo_gallery:
                 else: return 1.25, 10.00 # Pro
 
         rate_in, rate_out = get_model_rate(main_model_name)
-        
-        cost_usd = (usage_main["input"] / 1_000_000 * rate_in) + (usage_main["output"] / 1_000_000 * rate_out)
+        cost_usd = (usage_main.get("input", 0) / 1_000_000 * rate_in) + (usage_main.get("output", 0) / 1_000_000 * rate_out)
         cost_twd = cost_usd * 32.5
         
-        # --- 2. 啟動 Python 硬核數值稽核 (改在這裡執行一次即可) ---
+        # --- 3. 啟動 Python 硬核數值稽核 ---
+        # 💡 [關鍵對齊]：從 AI 回傳中獲取維度數據
         dim_data = res_main.get("dimension_data", [])
         python_numeric_issues = python_numerical_audit(dim_data)
         
-        # --- 💡 [新增插入] 啟動 Python 會計引擎 (解決 NameError) ---
-        # 這裡會執行您最看重的聚合模式、本體去重與運費核對
+        # --- 4. 啟動 Python 會計引擎 ---
+        # 💡 [關鍵對齊]：傳入數據與 AI 原始回傳值進行對帳
         python_accounting_issues = python_accounting_audit(dim_data, res_main)
         
-        # --- 3. Python 表頭檢查 ---
+        # --- 5. Python 表頭檢查 ---
         python_header_issues, python_debug_data = python_header_check(st.session_state.photo_gallery)
         
-        # --- 4. 合併結果 (正式移交權限) ---
+        # --- 6. 合併結果 (正式移交權限) ---
         ai_raw_issues = res_main.get("issues", [])
         ai_filtered_issues = []
 
@@ -935,30 +932,30 @@ if st.session_state.photo_gallery:
             i['source'] = '🤖 總稽核 AI'
             i_type = i.get("issue_type", "")
             
-            # 只有流程異常、規格提取失敗、表頭、未匹配聽 AI 的
-            # 統計與數量不符現在交給 Python 引擎了，所以排除 AI 原本報的
+            # 保留：AI 擅長的流程、提取警報、表頭檢查
+            # 過濾：統計與數量（因為 Python 算得更準）
             ai_only_tasks = ["流程", "規格提取失敗", "表頭", "未匹配"]
-            
             if any(k in i_type for k in ai_only_tasks):
                 ai_filtered_issues.append(i)
         
         # 最終合併所有稽核籃子
         all_issues = ai_filtered_issues + python_numeric_issues + python_accounting_issues + python_header_issues
         
+        # --- 7. 💡 [修正]：存入快取 (確保 Debug 頁面看得見數據) ---
         st.session_state.analysis_result_cache = {
             "job_no": res_main.get("job_no", "Unknown"),
             "all_issues": all_issues,
-            "total_duration": total_end - total_start,
+            "total_duration": time.time() - total_start,
             "cost_twd": cost_twd,
-            "total_in": usage_main["input"],
-            "total_out": usage_main["output"],
+            "total_in": usage_main.get("input", 0),
+            "total_out": usage_main.get("output", 0),
             "ocr_duration": ocr_duration,
-            "time_eng": time_main, # 這裡借用變數名，實為總時間
-            "time_acc": 0,         # 單一代理無第二時間
-            "full_text_for_search": full_text_for_search,
+            "time_eng": time_main,
+            "full_text_for_search": combined_input,
             "combined_input": combined_input,
             "python_debug_data": python_debug_data,
-            "ai_extracted_data": dim_data
+            # 💡 這裡一定要存 dim_data，那個「查看 AI 抄錄原始數據」才會有東西
+            "ai_extracted_data": dim_data 
         }
 
     if st.session_state.analysis_result_cache:
