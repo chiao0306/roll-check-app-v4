@@ -318,75 +318,40 @@ def python_header_check(photo_gallery):
 
     # --- 5. 總稽核 Agent (整合版 - 強邏輯優化) ---
 def agent_unified_check(combined_input, full_text_for_search, api_key, model_name):
-    # 讀取 Excel 規則
     dynamic_rules = get_dynamic_rules(full_text_for_search)
 
+    # 💡 這裡的大括號已全部校對為雙大括號 {{ }}
     system_prompt = f"""
-    你是一位極度嚴謹的中鋼機械品管【總稽核官】。你必須像「電腦程式」一樣，嚴格執行以下三個層次的任務：
+    你是一位極度嚴謹的中鋼機械品管【總稽核官】。你必須像「電腦程式」一樣，嚴格執行以下三個層次的任務。
     
     {dynamic_rules}
 
     ---
 
     ### 📝 第一階段：感官抄錄任務 (The Transcriber)
-    你的首要任務是「看」並「記錄」，不准進行任何數量計算。
-    
-    1. **規格文字提取 (std_spec)**：
-       - 精確抄錄標題下包含 `mm`、`±`、`~`、`+`、`-`、`至...再生` 的所有文字。
-       - **報警機制**：若規格文字明顯有數字但你提取結果為 0，必須在 issues 回報 `🛑規格提取失敗`。
-    
-    2. **數據精確抄錄 (data)**：
-       - **字串保護**：必須以「雙引號字串」格式抄錄。實測值顯示 `349.90` 必寫 `"349.90"`。
-       - **禁止簡化**：嚴禁將 `349.90` 簡化為 `349.9`。
-       - **格式**：`["RollID", "實測值字串"]`。
-
-    3. **會計指標提取**：
-       - **統計表抄錄**：精確抄錄左上角【統計表】的每一行項目與實交數量。
-       - **規則抄錄**：精確抄錄該項目在 Excel 中的 `Unit_Rule_Local`、`Unit_Rule_Agg`、`Unit_Rule_Freight`。
-       - **項目 PC 數**：提取項目名稱括號內的目標數（如 12PC）。
-
-    ---
+    1. **規格提取**：精確抄錄標題下包含 `mm`、`±`、`~` 的所有文字到 `std_spec`。
+    2. **數據抄錄**：實測值若顯示 `349.90` 必寫 `"349.90"`。格式：`["RollID", "實測值字串"]`。
+    3. **會計指標**：精確抄錄統計表每一行、Unit_Rule 規則文字、以及項目 PC 數。
 
     ### 🧠 第二階段：邏輯編譯任務 (The Interpreter)
-    請將第一階段提取的內容，分類並轉譯為系統後台可運行的指令：
-
-    1. **項目分類決策 (由上至下)**：
-       - LEVEL 1：含「銲補」 -> `min_limit`。
-       - LEVEL 2：含「未再生」。a.含「軸頸」-> `max_limit`；b.不含「軸頸」-> `un_regen`。
-       - LEVEL 3：含「再生/研磨/精加工/車修/組裝/拆裝/真圓度/KEYWAY」 -> `range`。
-
-    2. **規格翻譯 (standard_logic)**：
-       - 請依據 `std_spec` 文字計算出 `ranges_list` (區間) 或 `threshold` (門檻)。
-       - **120mm 護欄**：針對「本體」未再生，門檻絕對不小於 120mm，忽略小數字雜訊。
-
-    ---
+    1. **分類決策**：銲補->`min_limit`；未再生(軸頸)->`max_limit`；未再生(本體)->`un_regen`；其餘->`range`。
+    2. **規格翻譯 (standard_logic)**：根據 `std_spec` 計算出 `ranges_list` (區間) 或 `threshold` (門檻)。本體未再生門檻絕對 >= 120mm。
 
     ### ⚖️ 第三階段：趨勢與位階稽核 (The Auditor)
-    這是你唯一需要執行的「判斷」任務。**嚴禁在此判定數值是否符合 Excel 規格（交給 Python）**：
-
-    1. **尺寸大小邏輯檢查**：
-       - **位階準則**：`未再生車修 < 研磨 < 再生車修 < 銲補`。
-       - **判定要求**：針對同一 Roll ID，跨製程尺寸必須符合此演進邏輯，否則報 `🛑流程異常`。
-    
-    2. **工件流程溯源**：
-       - 只要出現「研磨」或「再生車修」，必須檢索全卷確認是否有前段紀錄。若流程中斷報 `🛑流程異常`。
-       - **允許多重紀錄**：同一編號出現在不同表格屬於正常全流程紀錄，不准報衝突。
+    1. **位階檢查**：`未再生 < 研磨 < 再生 < 銲補`。若後段小於前段報 `🛑流程異常`。
+    2. **流程溯源**：出現「研磨/再生」須檢查前段紀錄。
 
     ---
 
-    ### 📝 輸出規範 (Output Format)
-    必須回傳單一 JSON 物件。
+    ### 📝 輸出規範 (唯一合法格式)
+    必須回傳單一 JSON 物件，嚴禁包含任何對話文字。
 
     {{
       "job_no": "工令編號",
       "summary_rows": [ {{ "title": "項目名稱", "target": 數字 }} ],
       "freight_target": 0,
       "issues": [ 
-         {{
-           "page": "頁碼", "item": "項目", "issue_type": "統計不符 / 🛑流程異常 / 🛑規格提取失敗",
-           "common_reason": "簡短失敗原因",
-           "failures": [] // 統計不符時請逐行拆分來源明細
-         }}
+         {{ "page": "頁碼", "item": "項目", "issue_type": "統計不符 / 🛑流程異常", "common_reason": "原因", "failures": [] }}
       ],
       "dimension_data": [
          {{
@@ -396,7 +361,7 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
            "item_pc_target": 0,
            "accounting_rules": {{ "local": "", "agg": "", "freight": "" }},
            "standard_logic": {{
-              "logic_type": "", 
+              "logic_type": "range / min_limit / un_regen / max_limit", 
               "threshold_list": [], 
               "ranges_list": [],
               "threshold": 0 
@@ -406,67 +371,31 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
          }}
       ]
     }}
-
-    #### 💡 AI 編譯範例：
-    1. range: 如 `XXX±YYY` -> {{ "logic_type": "range", "min": XXX-YYY, "max": XXX+YYY }}
-    2. un_regen: 如 `至 XXXmm 再生` -> {{ "logic_type": "un_regen", "threshold": XXX }}
-    3. min_limit: 如 `XXXmm 以上` -> {{ "logic_type": "min_limit", "min": XXX }}
-    4. max_limit: 如 `XXXmm 以下` -> {{ "logic_type": "max_limit", "max": XXX }}
     """
-    
-    generation_config = {"response_mime_type": "application/json", "temperature": 0.0, "top_k": 1, "top_p": 0.95}
+
+    generation_config = {"response_mime_type": "application/json", "temperature": 0.0}
     
     try:
-        if "gemini" in model_name.lower():
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content([system_prompt, combined_input], generation_config=generation_config)
-            raw_content = response.text
-            usage_meta = response.usage_metadata
-            usage_in = usage_meta.prompt_token_count if usage_meta else 0
-            usage_out = usage_meta.candidates_token_count if usage_meta else 0
-        else:
-            client = OpenAI(api_key=OPENAI_KEY)
-            response = client.chat.completions.create(
-                model=model_name,
-                messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": combined_input}],
-                temperature=0.0
-            )
-            raw_content = response.choices[0].message.content
-            usage_in = response.usage.prompt_tokens
-            usage_out = response.usage.completion_tokens
-
-        # JSON 清洗
-        if "```json" in raw_content:
-            raw_content = raw_content.replace("```json", "").replace("```", "")
-        elif "```" in raw_content:
-            raw_content = raw_content.replace("```", "")
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(model_name)
+        response = model.generate_content([system_prompt, combined_input], generation_config=generation_config)
+        
+        raw_content = response.text
+        # 🛡️ 超級解析器：防止 AI 輸出帶有 Markdown 標籤或廢話
+        import re
+        json_match = re.search(r"\{.*\}", raw_content, re.DOTALL)
+        if json_match:
+            raw_content = json_match.group()
             
-        try:
-            parsed_data = json.loads(raw_content)
-        except:
-            parsed_data = {"job_no": "JSON Error", "issues": []}
-
-        final_response = parsed_data if isinstance(parsed_data, dict) else {"job_no": "Unknown", "issues": []}
-        if "issues" not in final_response: final_response["issues"] = []
-        if "job_no" not in final_response: final_response["job_no"] = "Unknown"
-
-        valid_issues = []
-        for i in final_response["issues"]:
-            if isinstance(i, dict) and i.get("item"):
-                reason = i.get("common_reason", "")
-                i_type = i.get("issue_type", "")
-                if "合格" in reason and "未匹配" not in i_type: continue
-                if "合格" in reason and "未匹配" in i_type: i["issue_type"] = "⚠️未匹配規則"
-                valid_issues.append(i)
-        
-        final_response["issues"] = valid_issues
-        final_response["_token_usage"] = {"input": usage_in, "output": usage_out}
-        
-        return final_response
+        parsed_data = json.loads(raw_content)
+        parsed_data["_token_usage"] = {
+            "input": response.usage_metadata.prompt_token_count, 
+            "output": response.usage_metadata.candidates_token_count
+        }
+        return parsed_data
 
     except Exception as e:
-        return {"job_no": "Error", "issues": [{"item": "System Error", "common_reason": str(e)}], "_token_usage": {"input": 0, "output": 0}}
+        return {"job_no": f"JSON Error: {str(e)}", "issues": [], "dimension_data": []}
         
 # --- 重點：Python 引擎獨立於 agent 函式之外 ---
 def python_numerical_audit(dimension_data):
@@ -886,78 +815,46 @@ if st.session_state.photo_gallery:
             
         status.text("總稽核 Agent 正在進行全方位分析...")
         
-        # --- 1. 執行 AI 分析 (翻譯官) ---
-        t0 = time.time()
-        # 💡 [修正]：不再重複傳送文字量極大的 full_text_for_search，減輕負擔
+        # 1. 執行 AI 
         res_main = agent_unified_check(combined_input, combined_input, GEMINI_KEY, main_model_name)
-        time_main = time.time() - t0
         
-        progress_bar.progress(100)
-        status.empty()
-        
-        # --- 2. 成本計算 (完全依照您的邏輯) ---
-        usage_main = res_main.get("_token_usage", {"input": 0, "output": 0})
-        
-        def get_model_rate(model_name):
-            name = model_name.lower()
-            if "gpt" in name:
-                if "mini" in name: return 0.15, 0.60
-                elif "3.5" in name: return 0.50, 1.50
-                else: return 2.50, 10.00
-            else:
-                if "flash" in name: return 0.5, 3.00
-                else: return 1.25, 10.00 # Pro
-
-        rate_in, rate_out = get_model_rate(main_model_name)
-        cost_usd = (usage_main.get("input", 0) / 1_000_000 * rate_in) + (usage_main.get("output", 0) / 1_000_000 * rate_out)
-        cost_twd = cost_usd * 32.5
-        
-        # --- 3. 啟動 Python 硬核數值稽核 ---
-        # 💡 [關鍵對齊]：從 AI 回傳中獲取維度數據
+        # 💡 [重大修正]：從 AI 回傳中抓取維度數據 (確保 Key 名稱 100% 對齊)
         dim_data = res_main.get("dimension_data", [])
-        python_numeric_issues = python_numerical_audit(dim_data)
         
-        # --- 4. 啟動 Python 會計引擎 ---
-        # 💡 [關鍵對齊]：傳入數據與 AI 原始回傳值進行對帳
+        # 2. 執行兩個 Python 引擎
+        python_numeric_issues = python_numerical_audit(dim_data)
         python_accounting_issues = python_accounting_audit(dim_data, res_main)
         
-        # --- 5. Python 表頭檢查 ---
-        python_header_issues, python_debug_data = python_header_check(st.session_state.photo_gallery)
-        
-        # --- 6. 合併結果 (正式移交權限) ---
-        ai_raw_issues = res_main.get("issues", [])
-        ai_filtered_issues = []
-
-        for i in ai_raw_issues:
+        # 3. 過濾 AI 報錯
+        ai_reported = res_main.get("issues", [])
+        ai_filtered = []
+        for i in ai_reported:
             i['source'] = '🤖 總稽核 AI'
-            i_type = i.get("issue_type", "")
-            
-            # 保留：AI 擅長的流程、提取警報、表頭檢查
-            # 過濾：統計與數量（因為 Python 算得更準）
-            ai_only_tasks = ["流程", "規格提取失敗", "表頭", "未匹配"]
-            if any(k in i_type for k in ai_only_tasks):
-                ai_filtered_issues.append(i)
+            # 保留流程、規格提取失敗、未匹配
+            if any(k in i.get("issue_type", "") for k in ["流程", "規格提取失敗", "未匹配"]):
+                ai_filtered.append(i)
+
+        # 4. 合併所有籃子
+        python_header_issues, python_debug_data = python_header_check(st.session_state.photo_gallery)
+        all_issues = ai_filtered + python_numeric_issues + python_accounting_issues + python_header_issues
         
-        # 最終合併所有稽核籃子
-        all_issues = ai_filtered_issues + python_numeric_issues + python_accounting_issues + python_header_issues
-        
-        # --- 7. 💡 [修正]：存入快取 (確保 Debug 頁面看得見數據) ---
+        # 5. 存入快取 (這是 Debug 頁面能顯示數據的唯一關鍵)
         st.session_state.analysis_result_cache = {
             "job_no": res_main.get("job_no", "Unknown"),
             "all_issues": all_issues,
             "total_duration": time.time() - total_start,
-            "cost_twd": cost_twd,
-            "total_in": usage_main.get("input", 0),
-            "total_out": usage_main.get("output", 0),
+            "cost_twd": (res_main.get("_token_usage",{}).get("input",0)*0.5 + res_main.get("_token_usage",{}).get("output",0)*3.0)/1000000*32.5,
+            "total_in": res_main.get("_token_usage",{}).get("input", 0),
+            "total_out": res_main.get("_token_usage",{}).get("output", 0),
             "ocr_duration": ocr_duration,
-            "time_eng": time_main,
+            "time_eng": time.time() - total_start - ocr_duration,
             "full_text_for_search": combined_input,
             "combined_input": combined_input,
             "python_debug_data": python_debug_data,
-            # 💡 這裡一定要存 dim_data，那個「查看 AI 抄錄原始數據」才會有東西
+            # ✅ 這行沒加，Debug 頁面就是空的！
             "ai_extracted_data": dim_data 
         }
-
+        
     if st.session_state.analysis_result_cache:
         cache = st.session_state.analysis_result_cache
         all_issues = cache['all_issues']
