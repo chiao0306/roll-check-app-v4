@@ -327,48 +327,38 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
 
     ---
 
-    ### 🚀 執行程序 (Execution Procedure)
+    #### ⚔️ 模組 A：工程尺寸數據提取 (AI 任務：抄錄)
+    1. **規格抄錄 (std_spec)**：精確抄錄標題中含 `mm`、`±`、`+`、`-` 的原始文字。
+    2. **數據抄錄 (ds)**：格式 `"ID:值|ID:值"`。禁止簡化，`349.90` 必寫 `"349.90"`。
+    3. **分類識別 (category)**：[未再生本體, 軸頸未再生, 銲補, 精加工再生]。
+    4. **⚠️ [保命禁令]**：嚴禁在 JSON 內文中使用雙引號 `"` (例如英吋符號)。請將所有英吋符號 `"` 替換為 `'` 或 `inch`，否則系統會崩潰。
 
-    #### ⚔️ 模組 A：數據抄錄與規格翻譯 (AI 任務)
-    1. **規格抄錄 (std_spec)**：精確抄錄標題中含 `mm`、`±`、`+`、`-` 的規格文字。
-    2. **數據抄錄 (ds - 極速壓縮格式)**：
-       - **格式**：使用一個字串代表全頁數據，格式為 `"ID:值|ID:值|ID:值"`。
-       - **字串保護**：禁止簡化數字。`349.90` 必寫 `"349.90"`。禁止寫成 `349.9`。
-    3. **分類識別 (category)**：[未再生本體, 軸頸未再生, 銲補, 精加工再生] (請按 LEVEL 1-3 順序判定)。
-    4. **規格編譯 (sl)**：提取標題中看到的 `threshold` (門檻，本體門檻絕對 >= 120)。
+    #### 💰 模組 B：會計指標提取 (AI 任務：抄錄)
+    1. **統計表**：抄錄統計表每一行名稱與實交數量到 `summary_rows`。
+    2. **運費與指標**：提取運費項次與標題括號內的 PC 數。你不需抄錄規則文字。
 
-    #### 💰 模組 B：會計指標提取 (AI 任務)
-    1. **傳票提取**：抄錄統計表每一行的名稱與數量到 `summary_rows`。提取運費項次到 `freight_target`。
-    2. **項目 PC 數**：提取項目標題括號內的數字（如 12PC）到 `item_pc_target`。
-    3. **🛑 禁令**：你不需抄錄 Excel 規則文字，也不准在 `issues` 報數值大小問題。
-
-    #### ⚖️ 模組 C：趨勢稽核 (AI 判定)
-    1. **物理位階演進**：`未再生 < 研磨 < 再生 < 銲補`。跨頁面後段尺寸小於前段（銲補除外），報 `🛑流程異常`。
+    #### ⚖️ 模組 C：流程稽核 (AI 任務：判定)
+    1. **位階檢查**：`未再生 < 研磨 < 再生 < 銲補`。若跨頁面後段尺寸小於前段（銲補除外），報 `🛑流程異常`。
 
     ---
 
     ### 📝 輸出規範 (Output Format)
-    必須回傳單一 JSON。數據部分請嚴格遵守 `ds` 與 `sl` 壓縮標籤。
-    - **禁止雙引號**：在 `item_title` 或 `std_spec` 中，嚴禁出現雙引號 `"`。
-    - **替換規則**：若遇到英吋符號，請一律改寫為 `'` (單引號) 或 `inch`。
-    - **範例**：`8" ROLL` 必須寫成 `8' ROLL`。
+    必須回傳單一 JSON。統計不符時必須「逐行拆分」來源明細。
 
     {{
       "job_no": "工令",
-      "summary_rows": [ {{ "title": "名稱", "target": 數字 }} ],
+      "summary_rows": [ {{ "title": "名", "target": 數字 }} ],
       "freight_target": 0,
       "issues": [ 
-         {{ "page": "頁碼", "item": "項目", "issue_type": "🛑流程異常 / 🛑規格提取失敗", "common_reason": "原因", "failures": [] }}
+         {{ "page": "頁碼", "item": "項目", "issue_type": "統計不符 / 🛑流程異常", "common_reason": "原因", "failures": [] }}
       ],
       "dimension_data": [
          {{
-           "page": 數字,
-           "item_title": "標題",
-           "category": "分類標籤",
-           "item_pc_target": 數字,
-           "sl": {{ "lt": "分類標籤", "t": 0 }}, # lt: logic_type, t: threshold
+           "page": 數字, "item_title": "標題", "category": "分類名稱", "item_pc_target": 0,
+           "accounting_rules": {{ "local": "", "agg": "", "freight": "" }},
+           "sl": {{ "lt": "分類標籤", "t": 0 }},
            "std_spec": "原始規格文字",
-           "ds": "ID:值|ID:值|ID:值" 
+           "ds": "ID:值|ID:值" 
          }}
       ]
     }}
@@ -443,100 +433,80 @@ def python_numerical_audit(dimension_data):
     if not dimension_data: return []
 
     for item in dimension_data:
-        raw_data_list = item.get("data", [])
+        raw_data_list = []
+        ds = item.get("ds", "")
+        if ds:
+            raw_data_list = [pair.split(":") for pair in ds.split("|") if ":" in pair]
+        
         title = item.get("item_title", "")
         cat = str(item.get("category", "")).strip()
         page_num = item.get("page", "?")
         raw_spec = str(item.get("std_spec", ""))
         
-        logic = item.get("sl", {})
-        l_type = str(logic.get("lt", "")).lower()
-        s_list = [float(n) for n in logic.get("tl", []) if n is not None]
-        s_threshold = logic.get("t", 0)
-
-        # --- 🛡️ 數據清洗：萬用公差/區間解析 (解決 203.22 +0.3, +0.8 問題) ---
+        # 💡 [公差解析強化版] 支援雙正、雙負、正負
         s_ranges = []
-        # 1. 抓取基底數字 (mm之前的數字)
-        mm_match = re.search(r"(\d+\.?\d*)\s*mm", raw_spec)
-        base_val = float(mm_match.group(1)) if mm_match else None
+        mm_nums = [float(n) for n in re.findall(r"(\d+\.?\d*)\s*mm", raw_spec)]
+        base_val = mm_nums[0] if mm_nums else None
         
-        # 2. 抓取所有偏移量 (如 +0.3, +0.8 或 +0, -0.14)
-        offsets = re.findall(r"([+-]\s*\d+\.?\d*)", raw_spec)
-        
+        # 找出所有帶符號的偏差 (例如 +0.3, +0.8)
+        offsets = re.findall(r"([+-]\d+\.?\d*)", raw_spec)
         if base_val and len(offsets) >= 2:
-            # 💡 [計算核心]：基底加偏移，取最大最小值
-            calc_nums = [base_val + float(o.replace(" ", "")) for o in offsets]
+            calc_nums = [base_val + float(o) for o in offsets]
             s_ranges = [[min(calc_nums), max(calc_nums)]]
         elif base_val and len(offsets) == 1:
-            val_off = base_val + float(offsets[0].replace(" ", ""))
+            val_off = base_val + float(offsets[0])
             s_ranges = [[val_off, 9999.0]] if "+" in offsets[0] else [[0.0, val_off]]
-        
-        # 3. 雜訊過濾
-        all_nums = [float(n) for n in re.findall(r"(\d+\.?\d*)", raw_spec)]
-        noise = [350.0, 300.0, 200.0, 145.0, 130.0]
+
+        # 雜訊過濾
+        all_nums = [float(n) for n in re.findall(r"\d+\.?\d*", raw_spec)]
+        noise = [350.0, 300.0, 200.0, 145.0, 130.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
         clean_std = [n for n in all_nums if (base_val and n == base_val) or (n not in noise and n > 5)]
 
         for entry in raw_data_list:
-            if not isinstance(entry, list) or len(entry) < 2: continue
+            if len(entry) < 2: continue
             rid, val_raw = str(entry[0]).strip(), str(entry[1]).strip()
-            if not val_raw or val_raw in ["N/A", "nan", "M10"]: continue
-
+            
+            # 💡 過濾手寫並保護 349.90
+            val_match = re.findall(r"\d+\.?\d*", val_raw)
+            val_str = val_match[0] if val_match else val_raw
+            
             try:
-                # 只取第一個數字，過濾手寫
-                v_match = re.findall(r"\d+\.?\d*", val_raw)
-                val_str = v_match[0] if v_match else val_raw
                 val = float(val_str)
                 is_two_dec = "." in val_str and len(val_str.split(".")[-1]) == 2
                 is_pure_int = "." not in val_str
-                is_passed, reason, t_used, e_label = True, "", "N/A", "未知"
+                is_passed, reason, t_used, engine_label = True, "", "N/A", "未知"
 
-                # --- 💡 判定優先序整合 ---
-                
-                # A. 銲補
-                if "min_limit" in l_type or "銲補" in (cat + title):
-                    e_label = "銲補(下限)"
-                    if not is_pure_int: is_passed, reason = False, "銲補格式錯誤: 應為純整數"
+                # 💡 重新定義的判定邏輯：以標題關鍵字優先
+                if "銲補" in (cat + title):
+                    engine_label = "銲補"
+                    if not is_pure_int: is_passed, reason = False, "應為純整數"
                     elif clean_std:
                         t_used = min(clean_std, key=lambda x: abs(x - val))
-                        if val < t_used: is_passed, reason = False, f"銲補不足: 實測 {val} < {t_used}"
+                        if val < t_used: is_passed, reason = False, "數值不足"
+                
+                elif "未再生" in (cat + title):
+                    engine_label = "未再生"
+                    # 120mm 護欄
+                    candidates = [n for n in clean_std if n >= 120.0]
+                    target = max(candidates) if candidates else 196.0
+                    t_used = target
+                    if val <= target:
+                        if not is_pure_int: is_passed, reason = False, "應為整數"
+                    elif not is_two_dec: is_passed, reason = False, "應填兩位小數"
 
-                # B. 未再生 (本體/軸頸)
-                elif "un_regen" in l_type or "max_limit" in l_type or "未再生" in (cat + title):
-                    if "軸頸" in (cat + title):
-                        e_label = "軸頸(上限)"
-                        candidates = [float(n) for n in (clean_std + s_list)]
-                        if s_threshold: candidates.append(float(s_threshold))
-                        target = max(candidates) if candidates else 0
-                        t_used = target
-                        if target > 0:
-                            if not is_pure_int: is_passed, reason = False, "應為純整數"
-                            elif val > target: is_passed, reason = False, f"超過上限 {target}"
-                    else:
-                        e_label = "未再生(本體)"
-                        candidates = [n for n in clean_std if n >= 120.0]
-                        target = max(candidates) if candidates else 196.0
-                        t_used = target
-                        if val <= target:
-                            if not is_pure_int: is_passed, reason = False, "應為整數"
-                        elif not is_two_dec: is_passed, reason = False, "應填兩位小數"
-
-                # C. 精加工再生類 / 再生車修 (Page 2 項目 5 走這裡)
-                elif "range" in l_type or "精加工" in cat or any(x in (cat + title) for x in ["再生", "研磨", "車修", "組裝", "拆裝", "真圓度"]):
-                    e_label = "精加工(區間)"
-                    if not is_two_dec:
-                        is_passed, reason = False, "格式錯誤: 應填兩位小數(如.90)"
+                elif any(x in (cat + title) for x in ["再生", "精加工", "研磨", "車修", "組裝", "真圓度"]):
+                    engine_label = "精加工"
+                    if not is_two_dec: is_passed, reason = False, "應填兩位小數"
                     elif s_ranges:
-                        # 💡 關鍵：這裡會用到 [203.52, 204.02]
                         t_used = str(s_ranges)
                         is_passed = any(r[0] <= val <= r[1] for r in s_ranges)
                         if not is_passed: reason = f"尺寸不在區間 {t_used} 內"
 
                 if not is_passed:
                     key = (page_num, title, reason)
-                    if error_key := key: # 修正 key 名稱
-                        if error_key not in grouped_errors:
-                            grouped_errors[error_key] = {"page": page_num, "item": title, "issue_type": f"數值異常({e_label})", "common_reason": reason, "failures": []}
-                        grouped_errors[error_key]["failures"].append({"id": rid, "val": val_str, "target": f"基準:{t_used}", "calc": f"⚖️ {e_label} 引擎"})
+                    if key not in grouped_errors:
+                        grouped_errors[key] = {"page": page_num, "item": title, "issue_type": f"數值異常({engine_label})", "common_reason": reason, "failures": []}
+                    grouped_errors[key]["failures"].append({"id": rid, "val": val_str, "target": f"基準:{t_used}", "calc": f"⚖️ {engine_label}"})
             except: continue
     return list(grouped_errors.values())
     
