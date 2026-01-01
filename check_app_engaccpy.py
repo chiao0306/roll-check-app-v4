@@ -843,18 +843,34 @@ if st.session_state.photo_gallery:
         python_numeric_issues = python_numerical_audit(dim_data)
         python_accounting_issues = python_accounting_audit(dim_data, res_main)
         
-        # 3. 過濾 AI 報錯
-        ai_reported = res_main.get("issues", [])
-        ai_filtered = []
-        for i in ai_reported:
-            i['source'] = '🤖 總稽核 AI'
-            # 保留流程、規格提取失敗、未匹配
-            if any(k in i.get("issue_type", "") for k in ["流程", "規格提取失敗", "未匹配"]):
-                ai_filtered.append(i)
+        # 3. 合併結果 (帶有防呆檢查，防止 i['source'] 報錯) ---
+        ai_raw_issues = res_main.get("issues", [])
+        ai_filtered_issues = []
+
+        if isinstance(ai_raw_issues, list): # 確保 issues 是一個清單
+            for i in ai_raw_issues:
+                # 💡 [關鍵修正]：確保 i 是字典格式，才去執行欄位賦值
+                if isinstance(i, dict):
+                    i['source'] = '🤖 總稽核 AI'
+                    i_type = str(i.get("issue_type", ""))
+                    
+                    # 只有流程、規格提取失敗、表頭、未匹配聽 AI 的
+                    ai_only_tasks = ["流程", "規格提取失敗", "表頭", "未匹配"]
+                    if any(k in i_type for k in ai_only_tasks):
+                        ai_filtered_issues.append(i)
+                else:
+                    # 如果 AI 回傳的是字串而不是字典，我們把它包裝成一個警告
+                    ai_filtered_issues.append({
+                        "page": "?",
+                        "item": "AI 格式異常",
+                        "issue_type": "⚠️格式錯誤",
+                        "common_reason": f"AI 回傳了非預期的文字內容: {str(i)}",
+                        "source": "🤖 總稽核 AI"
+                    })
 
         # 4. 合併所有籃子
         python_header_issues, python_debug_data = python_header_check(st.session_state.photo_gallery)
-        all_issues = ai_filtered + python_numeric_issues + python_accounting_issues + python_header_issues
+        all_issues = ai_filtered_issues + python_numeric_issues + python_accounting_issues + python_header_issues
         
         # 5. 存入快取 (這是 Debug 頁面能顯示數據的唯一關鍵)
         st.session_state.analysis_result_cache = {
