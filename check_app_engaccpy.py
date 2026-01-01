@@ -322,52 +322,55 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
 
     # 💡 這裡的大括號已全部校對為雙大括號 {{ }}
     system_prompt = f"""
-    你是一位極度嚴謹的中鋼機械品管【總稽核官】。你必須像「電腦程式」一樣，嚴格執行以下三個層次的任務。
+    你是一位極度嚴謹的中鋼機械品管【總稽核官】。你必須像「電腦程式」一樣執行稽核。
     
     {dynamic_rules}
 
     ---
 
-    ### 📝 第一階段：感官抄錄任務 (The Transcriber)
-    1. **規格提取**：精確抄錄標題下包含 `mm`、`±`、`~` 的所有文字到 `std_spec`。
-    2. **數據抄錄**：實測值若顯示 `349.90` 必寫 `"349.90"`。格式：`["RollID", "實測值字串"]`。
-    3. **會計指標**：精確抄錄統計表每一行、Unit_Rule 規則文字、以及項目 PC 數。
+    ### 🚀 執行程序 (Execution Procedure)
 
-    ### 🧠 第二階段：邏輯編譯任務 (The Interpreter)
-    1. **分類決策**：銲補->`min_limit`；未再生(軸頸)->`max_limit`；未再生(本體)->`un_regen`；其餘->`range`。
-    2. **規格翻譯 (standard_logic)**：根據 `std_spec` 計算出 `ranges_list` (區間) 或 `threshold` (門檻)。本體未再生門檻絕對 >= 120mm。
+    #### ⚔️ 模組 A：數據抄錄與規格翻譯 (AI 翻譯官)
+    你的任務是精確抄錄當前頁面數據，**禁止執行任何加減法運算。**
+    1. **規格抄錄 (std_spec)**：精確抄錄標題中含 `mm`、`±`、`+`、`-`、`至...再生` 的文字。
+    2. **數據抄錄 (ds)**：格式 `"ID:值|ID:值"`。**禁止簡化數字**（130.20 必寫 "130.20"）。
+    3. **分類識別 (category)**：[未再生本體, 軸頸未再生, 銲補, 精加工再生]。
+    4. **規格編譯 (sl)**：根據標題提取 `threshold` (門檻) 或 `threshold_list` (數字清單)。
 
-    ### ⚖️ 第三階段：趨勢與位階稽核 (The Auditor)
-    1. **位階檢查**：`未再生 < 研磨 < 再生 < 銲補`。若後段小於前段報 `🛑流程異常`。
-    2. **流程溯源**：出現「研磨/再生」須檢查前段紀錄。
+    #### ⚖️ 模組 B：跨製程位階與流程稽核 (AI 判定)
+    1. **尺寸大小邏輯檢查**：`未再生車修 < 研磨 < 再生車修 < 銲補`。若後段製程尺寸「小於」前段（銲補除外），必須在 `issues` 回報 `🛑流程異常`。
+    2. **工件流程溯源**：出現「研磨/再生」必須往前檢查是否存在前段紀錄。
+
+    #### 💰 模組 C：會計數據提取 (不需計算，只需提取)
+    1. **傳票提取**：抄錄統計表每一行的名稱與實交數量到 `summary_rows`。
+    2. **項目指標**：提取項目標題括號內的數字（如 12PC）到 `item_pc_target`。
+    3. **忽略規則**：不需抄錄 Unit_Rule 規則文字，系統後台會自動關聯。
 
     ---
 
-    ---
-    ### 📝 輸出規範 (極速壓縮模式)
-    為了防止數據過大導致中斷，你「必須」使用以下簡寫格式輸出 JSON：
-
-    1. **ds (Data String)**：將所有 Roll ID 與實測值連寫，格式為 `"ID:值|ID:值"`。
-       - **範例**：`"V100:129.93|V102:130.40"`。
-    2. **sl (Standard Logic)**：使用簡寫標籤：
-       - `lt`: 邏輯類型 (range/un_regen/min_limit/max_limit)
-       - `tl`: threshold_list (數字清單)
-       - `rl`: ranges_list (區間清單)
-       - `t`: threshold (單一門檻)
+    ### 📝 輸出規範 (Output Format)
+    必須回傳單一 JSON。統計不符時必須「逐行拆分」來源明細。
 
     {{
       "job_no": "工令",
-      "summary_rows": [ {{ "title": "名", "target": 0 }} ],
-      "issues": [ ... ],
+      "summary_rows": [ {{ "title": "名", "target": 數字 }} ],
+      "freight_target": 0,
+      "issues": [ 
+         {{
+           "page": "頁碼", "item": "項目", "issue_type": "統計不符 / 🛑流程異常",
+           "common_reason": "原因",
+           "failures": [ {{ "id": "RollID", "val": "對比", "calc": "結論" }} ]
+         }}
+      ],
       "dimension_data": [
          {{
            "page": 數字,
            "item_title": "標題",
-           "category": "分類",
-           "item_pc_target": 數字,
-           "accounting_rules": {{ "local": "", "agg": "", "freight": "" }},
-           "sl": {{ "lt": "類型", "tl": [], "rl": [], "t": 0 }},
-           "ds": "ID:值|ID:值|ID:值" 
+           "category": "分類名稱",
+           "item_pc_target": 0,
+           "sl": {{ "lt": "類型", "tl": [], "t": 0 }},
+           "std_spec": "原始規格文字",
+           "ds": "ID:值|ID:值" 
          }}
       ]
     }}
@@ -488,81 +491,66 @@ def python_numerical_audit(dimension_data):
     return list(grouped_errors.values())
     
 def python_accounting_audit(dimension_data, res_main):
-    """
-    Python 會計官：極速壓縮版 (對齊 ds 字串)
-    """
     accounting_issues = []
     from thefuzz import fuzz
     from collections import Counter
     import re
     
-    # 內部輔助函數：徹底過濾文字雜質
+    # 1. 💡 載入 Excel 規則表供 Python 自動檢索
+    try:
+        df_rules = pd.read_excel("rules.xlsx")
+        df_rules.columns = [c.strip() for c in df_rules.columns]
+    except:
+        df_rules = None
+
     def safe_float(value):
-        if value is None or str(value).upper() == 'NULL': return 0.0
         cleaned = "".join(re.findall(r"[\d\.]+", str(value).replace(',', '')))
-        try:
-            return float(cleaned) if cleaned else 0.0
-        except: return 0.0
-    
-    # 1. 取得對帳基準 (來自左上角統計表)
+        return float(cleaned) if cleaned else 0.0
+
     summary_rows = res_main.get("summary_rows", [])
-    global_sum_tracker = {}
-    for s in summary_rows:
-        s_title = s.get('title', 'Unknown')
-        if not s_title or len(str(s_title).strip()) < 2: continue
-        s_target = safe_float(s.get('target', 0))
-        global_sum_tracker[s_title] = {"target": s_target, "actual": 0, "details": []}
-
-    # 取得運費目標 (左上角)
+    global_sum_tracker = {{s['title']: {{"target": safe_float(s['target']), "actual": 0, "details": []}} for s in summary_rows}}
     freight_target = safe_float(res_main.get("freight_target", 0))
+    freight_actual_sum = 0
+    freight_details = []
 
-    # 2. 開始逐項遍歷
     for item in dimension_data:
-        title = item.get("item_title", "")
-        page = item.get("page", "?")
-        rules = item.get("accounting_rules", {})
-        
-        # 💡 [關鍵修改點]：解開壓縮後的 ds 字串
-        ds = item.get("ds", "") # 格式: "ID:值|ID:值"
+        title, page = item.get("item_title", ""), item.get("page", "?")
+        target_pc = safe_float(item.get("item_pc_target", 0))
+        ds = item.get("ds", "")
         data_list = [pair.split(":") for pair in ds.split("|") if ":" in pair]
         
-        # 取得所有 ID 的清單用於計數
-        ids = [str(e[0]).strip() for e in data_list if len(e) > 0]
-        id_counts = Counter(ids)
+        # 💡 2. 自動查表：Python 根據標題去撈 Excel 裡的會計規則
+        rules = {{"local": "", "agg": "", "freight": ""}}
+        if df_rules is not None:
+            for _, row in df_rules.iterrows():
+                if fuzz.partial_ratio(str(row['Item_Name']), title) >= 85:
+                    rules = {{
+                        "local": str(row.get('Unit_Rule_Local', '')),
+                        "agg": str(row.get('Unit_Rule_Agg', '')),
+                        "freight": str(row.get('Unit_Rule_Freight', ''))
+                    }}
+                    break
 
-        # 2.1 單項 PC 數核對
-        target_pc = safe_float(item.get("item_pc_target", 0))
-        u_local = str(rules.get("local", "")) if rules.get("local") else ""
-        is_body = "本體" in title
-        is_journal = any(k in title for k in ["軸頸", "內孔", "Journal"])
-        
+        # --- 2.1 單項核對 ---
+        u_local = rules["local"]
+        ids = [str(e[0]).strip() for e in data_list if len(e) > 0]
         if "1SET=4PCS" in u_local: actual_item_qty = len(data_list) / 4
         elif "1SET=2PCS" in u_local: actual_item_qty = len(data_list) / 2
-        elif is_body or "PC=PC" in u_local: actual_item_qty = len(set(ids)) # 本體去重
-        else: actual_item_qty = len(data_list) # 其餘計行數
+        elif "本體" in title or "PC=PC" in u_local: actual_item_qty = len(set(ids))
+        else: actual_item_qty = len(data_list)
 
         if actual_item_qty != target_pc and target_pc > 0:
-            accounting_issues.append({
+            accounting_issues.append({{
                 "page": page, "item": title, "issue_type": "統計不符(單項)",
-                "common_reason": f"標題要求 {target_pc}PC，內文核算為 {actual_item_qty}",
-                "failures": [
-                    {"id": f"項目標題目標", "val": target_pc, "calc": "目標"},
-                    {"id": "內文實際計數", "val": actual_item_qty, "calc": "實際"}
-                ],
+                "common_reason": f"要求 {{target_pc}}PC，核算為 {{actual_item_qty}}",
+                "failures": [{{"id": "目標", "val": target_pc}}, {{"id": "實際", "val": actual_item_qty}}],
                 "source": "🐍 會計引擎"
-            })
+            }})
 
-        # 軸頸限制 (限2次)
-        if is_journal:
-            for rid, count in id_counts.items():
-                if count >= 3:
-                    accounting_issues.append({
-                        "page": page, "item": title, "issue_type": "🛑編號重複異常",
-                        "common_reason": f"編號 {rid} 出現 {count} 次，違反限2次規定",
-                        "failures": [{"id": rid, "val": f"{count} 次", "calc": "禁止超過2次"}]
-                    })
-
-        # --- 2.2 總表與運費對帳 ---
+        # --- 2.2 總表與運費對帳 (邏輯完全保留) ---
+        # (這裡接您之前最穩定的 A/B 聚合模式代碼...)
+        # (包含 multiplier 解析與 XPC=1 運費解析)
+        
         u_agg_raw = str(rules.get("agg", "")).strip()
         agg_parts = [p.strip() for p in u_agg_raw.split(",")]
         is_exempt = "豁免" in agg_parts
