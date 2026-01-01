@@ -484,11 +484,17 @@ def python_numerical_audit(dimension_data):
                         t_used = min(clean_std, key=lambda x: abs(x - val))
                         if val < t_used: is_passed, reason = False, "數值不足"
                 
-                elif "未再生" in (cat + title):
-                    engine_label = "未再生"
-                    # 120mm 護欄
+                # --- 1. 未再生本體 (核心修正) ---
+                if engine_label == "未再生(本體)":
                     candidates = [n for n in clean_std if n >= 120.0]
-                    target = max(candidates) if candidates else 196.0
+                    if s_threshold and float(s_threshold) >= 120.0: candidates.append(float(s_threshold))
+                    
+                    # 💡 [重大修正]：如果沒抓到 120 以上的數字，直接跳過，不准預設 196
+                    if not candidates:
+                        is_passed = True 
+                        continue 
+
+                    target = max(candidates)
                     t_used = target
                     if val <= target:
                         if not is_pure_int: is_passed, reason = False, "應為整數"
@@ -585,22 +591,27 @@ def python_accounting_audit(dimension_data, res_main):
         agg_parts = [p.strip() for p in u_agg_raw.split(",")]
         is_exempt = "豁免" in agg_parts # 檢查是否有豁免大籃子的標籤
 
+        # --- 2.2 總表對帳 (三色籃子分流邏輯) ---
+        # 💡 [優化] 先把標題與總表名稱去空格，防止「拆 裝」這種空格干擾
+        clean_title = title.replace(" ", "")
+        
         for s_title, data in global_sum_tracker.items():
-            # A. 識別總表標題的類型 (聚合籃子)
-            is_rep_basket = any(k in s_title for k in ["車修", "再生", "REGEN"])
-            is_weld_basket = any(k in s_title for k in ["銲補", "銲接", "WELD"])
-            is_assem_basket = any(k in s_title for k in ["拆裝", "組裝", "裝配", "ASSEM"])
+            clean_s_title = s_title.replace(" ", "")
+            
+            # A. 識別總表標題類型 (依照您的要求精簡)
+            is_rep_basket  = "再生" in clean_s_title # 💡 只留再生，去掉車修
+            is_weld_basket = "銲補" in clean_s_title # 💡 只留銲補
+            is_assem_basket = any(k in clean_s_title for k in ["拆裝", "組裝", "裝配", "ASSEM"])
             
             match = False
-            # 💡 [判定 1]：A模式 - 聚合籃子 (受豁免標籤控制)
+            # A模式：聚合籃子
             if not is_exempt:
-                if is_rep_basket and any(k in title for k in ["未再生", "再生", "研磨", "車修"]): match = True
-                elif is_weld_basket and any(k in title for k in ["銲補", "銲接"]): match = True
-                elif is_assem_basket and any(k in title for k in ["拆裝", "組裝", "裝配", "真圓度"]): match = True
+                if is_rep_basket and any(k in clean_title for k in ["未再生", "再生", "研磨", "車修"]): match = True
+                elif is_weld_basket and any(k in clean_title for k in ["銲補", "銲接"]): match = True
+                elif is_assem_basket and any(k in clean_title for k in ["拆裝", "組裝", "裝配", "真圓度"]): match = True
             
-            # 💡 [判定 2]：B模式 - 精確名字對帳 (不受豁免控制，只要名字對上就加)
-            # 提高門檻到 90 分，防止「熱處理」誤加到「攻牙」
-            if not match and fuzz.ratio(s_title.upper(), title.upper()) > 90:
+            # B模式：一般對帳 (完全匹配)
+            if not match and fuzz.ratio(clean_s_title.upper(), clean_title.upper()) > 90:
                 match = True
 
             if match:
