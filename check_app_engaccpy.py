@@ -343,31 +343,31 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
 
     ---
 
-    ### 📝 輸出規範 (唯一合法格式)
-    必須回傳單一 JSON 物件，嚴禁包含任何對話文字。
+    ---
+    ### 📝 輸出規範 (極速壓縮模式)
+    為了防止數據過大導致中斷，你「必須」使用以下簡寫格式輸出 JSON：
+
+    1. **ds (Data String)**：將所有 Roll ID 與實測值連寫，格式為 `"ID:值|ID:值"`。
+       - **範例**：`"V100:129.93|V102:130.40"`。
+    2. **sl (Standard Logic)**：使用簡寫標籤：
+       - `lt`: 邏輯類型 (range/un_regen/min_limit/max_limit)
+       - `tl`: threshold_list (數字清單)
+       - `rl`: ranges_list (區間清單)
+       - `t`: threshold (單一門檻)
 
     {{
-      "job_no": "工令編號",
-      "summary_rows": [ {{ "title": "項目名稱", "target": 數字 }} ],
-      "freight_target": 0,
-      "issues": [ 
-         {{ "page": "頁碼", "item": "項目", "issue_type": "統計不符 / 🛑流程異常", "common_reason": "原因", "failures": [] }}
-      ],
+      "job_no": "工令",
+      "summary_rows": [ {{ "title": "名", "target": 0 }} ],
+      "issues": [ ... ],
       "dimension_data": [
          {{
-           "page": "數字",
-           "item_title": "名稱",
-           "category": "分類名稱",
-           "item_pc_target": 0,
+           "page": 數字,
+           "item_title": "標題",
+           "category": "分類",
+           "item_pc_target": 數字,
            "accounting_rules": {{ "local": "", "agg": "", "freight": "" }},
-           "standard_logic": {{
-              "logic_type": "range / min_limit / un_regen / max_limit", 
-              "threshold_list": [], 
-              "ranges_list": [],
-              "threshold": 0 
-           }},
-           "std_spec": "原始規格文字",
-           "data": [ ["RollID", "實測值字串"] ]
+           "sl": {{ "lt": "類型", "tl": [], "rl": [], "t": 0 }},
+           "ds": "ID:值|ID:值|ID:值" 
          }}
       ]
     }}
@@ -401,20 +401,26 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
 def python_numerical_audit(dimension_data):
     grouped_errors = {}
     import re
-    if not dimension_data: return [] 
+    if not dimension_data: return []
 
     for item in dimension_data:
-        raw_data_list = item.get("data", [])
+        # 1. 💡 [關鍵修改] 讀取壓縮字串 "ds"，並用 | 與 : 拆解
+        ds = item.get("ds", "")
+        if not ds: continue
+        # 轉換回原本的列表格式 [["ID", "Val"], ...]
+        raw_data_list = [pair.split(":") for pair in ds.split("|") if ":" in pair]
+        
         title = item.get("item_title", "")
         cat = str(item.get("category", "")).strip()
         page_num = item.get("page", "?")
         raw_spec = str(item.get("std_spec", ""))
         
-        logic = item.get("standard_logic", {})
-        l_type = logic.get("logic_type")
-        s_list = [float(n) for n in logic.get("threshold_list", []) if n is not None]
-        s_ranges = logic.get("ranges_list", [])
-        s_threshold = logic.get("threshold")
+        # 2. 💡 [關鍵修改] 讀取縮寫版的邏輯包 "sl"
+        logic = item.get("sl", {})
+        l_type = logic.get("lt", "")          # lt = logic_type
+        s_list = logic.get("tl", [])          # tl = threshold_list
+        s_ranges = logic.get("rl", [])        # rl = ranges_list
+        s_threshold = logic.get("t", 0)       # t  = threshold
 
         # 🛡️ 數據清洗與 mm 定位
         mm_base_nums = [float(n) for n in re.findall(r"(\d+\.?\d*)\s*mm", raw_spec)]
@@ -482,6 +488,9 @@ def python_numerical_audit(dimension_data):
     return list(grouped_errors.values())
     
 def python_accounting_audit(dimension_data, res_main):
+    """
+    Python 會計官：極速壓縮版 (對齊 ds 字串)
+    """
     accounting_issues = []
     from thefuzz import fuzz
     from collections import Counter
@@ -495,6 +504,7 @@ def python_accounting_audit(dimension_data, res_main):
             return float(cleaned) if cleaned else 0.0
         except: return 0.0
     
+    # 1. 取得對帳基準 (來自左上角統計表)
     summary_rows = res_main.get("summary_rows", [])
     global_sum_tracker = {}
     for s in summary_rows:
@@ -503,29 +513,33 @@ def python_accounting_audit(dimension_data, res_main):
         s_target = safe_float(s.get('target', 0))
         global_sum_tracker[s_title] = {"target": s_target, "actual": 0, "details": []}
 
-    # 取得運費目標
+    # 取得運費目標 (左上角)
     freight_target = safe_float(res_main.get("freight_target", 0))
 
+    # 2. 開始逐項遍歷
     for item in dimension_data:
         title = item.get("item_title", "")
         page = item.get("page", "?")
         rules = item.get("accounting_rules", {})
-        data_list = item.get("data", [])
         
-        ids = [str(e[0]).strip() for e in data_list if e and len(e) > 0]
+        # 💡 [關鍵修改點]：解開壓縮後的 ds 字串
+        ds = item.get("ds", "") # 格式: "ID:值|ID:值"
+        data_list = [pair.split(":") for pair in ds.split("|") if ":" in pair]
+        
+        # 取得所有 ID 的清單用於計數
+        ids = [str(e[0]).strip() for e in data_list if len(e) > 0]
         id_counts = Counter(ids)
 
-        # 💡 [關鍵修正]：使用 safe_float 統一處理 (PC/SET) 雜訊
+        # 2.1 單項 PC 數核對
         target_pc = safe_float(item.get("item_pc_target", 0))
-            
         u_local = str(rules.get("local", "")) if rules.get("local") else ""
         is_body = "本體" in title
         is_journal = any(k in title for k in ["軸頸", "內孔", "Journal"])
         
         if "1SET=4PCS" in u_local: actual_item_qty = len(data_list) / 4
         elif "1SET=2PCS" in u_local: actual_item_qty = len(data_list) / 2
-        elif is_body or "PC=PC" in u_local: actual_item_qty = len(set(ids))
-        else: actual_item_qty = len(data_list)
+        elif is_body or "PC=PC" in u_local: actual_item_qty = len(set(ids)) # 本體去重
+        else: actual_item_qty = len(data_list) # 其餘計行數
 
         if actual_item_qty != target_pc and target_pc > 0:
             accounting_issues.append({
@@ -538,7 +552,7 @@ def python_accounting_audit(dimension_data, res_main):
                 "source": "🐍 會計引擎"
             })
 
-        # 軸頸限制
+        # 軸頸限制 (限2次)
         if is_journal:
             for rid, count in id_counts.items():
                 if count >= 3:
@@ -548,7 +562,7 @@ def python_accounting_audit(dimension_data, res_main):
                         "failures": [{"id": rid, "val": f"{count} 次", "calc": "禁止超過2次"}]
                     })
 
-        # 總表與運費
+        # --- 2.2 總表與運費對帳 ---
         u_agg_raw = str(rules.get("agg", "")).strip()
         agg_parts = [p.strip() for p in u_agg_raw.split(",")]
         is_exempt = "豁免" in agg_parts
@@ -565,12 +579,15 @@ def python_accounting_audit(dimension_data, res_main):
             current_add_val = actual_item_qty
             
             if is_fr_row:
+                # 運費邏輯
                 if "豁免" in u_fr: continue
-                elif "計入" in u_fr or (is_body and "未再生" in title): match = True
+                elif "計入" in u_fr or ("未再生" in title and "本體" in title): match = True
                 if match:
-                    conv = re.search(r"(\d+)PC=1", u_fr)
-                    if conv: current_add_val = actual_item_qty / int(conv.group(1))
+                    # 動態換算 XPC=1
+                    conv_fr = re.search(r"(\d+)PC=1", u_fr)
+                    if conv_fr: current_add_val = actual_item_qty / int(conv_fr.group(1))
             else:
+                # 總表聚合邏輯
                 is_rep = any(k in s_title for k in ["ROLL車修", "再生"])
                 is_weld = "銲補" in s_title
                 is_assem = any(k in s_title for k in ["拆裝", "組裝", "裝配"])
@@ -586,7 +603,7 @@ def python_accounting_audit(dimension_data, res_main):
                 label = "計入運費" if is_fr_row else "計入總帳"
                 data["details"].append({"id": f"{title} (P.{page})", "val": current_add_val, "calc": label})
 
-    # 結算
+    # 3. 最終對帳結算
     for s_title, data in global_sum_tracker.items():
         if abs(data["actual"] - data["target"]) > 0.01 and data["target"] > 0:
             icon = "🚚" if "運費" in s_title else "🔍"
@@ -596,6 +613,7 @@ def python_accounting_audit(dimension_data, res_main):
                 "failures": [{"id": f"{icon} 統計基準", "val": data["target"], "calc": "目標"}] + data["details"] + [{"id": "🧮 實際總計", "val": data["actual"], "calc": "計算"}],
                 "source": "🐍 會計引擎"
             })
+            
     return accounting_issues
     
 # --- 6. 手機版 UI 與 核心執行邏輯 ---
