@@ -404,13 +404,12 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
 def python_numerical_audit(dimension_data):
     grouped_errors = {}
     import re
-    if not dimension_data: return []
+    if not dimension_data: return [] # 確保回傳空清單防止後續合併報錯
 
     for item in dimension_data:
-        # 1. 💡 [關鍵修改] 讀取壓縮字串 "ds"，並用 | 與 : 拆解
+        # 💡 [解壓縮數據]
         ds = item.get("ds", "")
         if not ds: continue
-        # 轉換回原本的列表格式 [["ID", "Val"], ...]
         raw_data_list = [pair.split(":") for pair in ds.split("|") if ":" in pair]
         
         title = item.get("item_title", "")
@@ -418,21 +417,35 @@ def python_numerical_audit(dimension_data):
         page_num = item.get("page", "?")
         raw_spec = str(item.get("std_spec", ""))
         
-        # 2. 💡 [關鍵修改] 讀取縮寫版的邏輯包 "sl"
+        # 💡 [模式解析] 讀取 AI 翻譯好的邏輯
         logic = item.get("sl", {})
         l_type = logic.get("lt", "")          # lt = logic_type
         s_list = logic.get("tl", [])          # tl = threshold_list
         s_ranges = logic.get("rl", [])        # rl = ranges_list
         s_threshold = logic.get("t", 0)       # t  = threshold
 
-        # 🛡️ 數據清洗與 mm 定位
-        mm_base_nums = [float(n) for n in re.findall(r"(\d+\.?\d*)\s*mm", raw_spec)]
+        # --- 🛡️ 數據清洗與「模式優先」預解析 ---
+        trusted_stds = [] 
+        
+        # 1. 💡 [關鍵補回] 抓取緊貼 "mm" 的數字 (權威性最高)
+        mm_nums = [float(n) for n in re.findall(r"(\d+\.?\d*)\s*mm", raw_spec)]
+        trusted_stds.extend(mm_nums)
+
+        # 2. 解析 ± 或偏差結構 (自動補償 AI 沒算對的情況)
+        pm_match = re.findall(r"(\d+\.?\d*)\s*[±]\s*(\d+\.?\d*)", raw_spec)
+        for base, offset in pm_match:
+            b, o = float(base), float(offset)
+            s_ranges.append([b - o, b + o])
+            trusted_stds.extend([b, b-o, b+o])
+
+        # 3. 執行雜訊過濾
         all_nums = [float(n) for n in re.findall(r"(\d+\.?\d*)", raw_spec)]
         noise = [350.0, 300.0, 200.0, 145.0, 130.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+        # 💡 過濾條件：大於 5 且 (在信任名列中 或 不在黑名單中)
         clean_std = [n for n in all_nums if (n in mm_nums) or (n not in noise and n > 5)]
 
         for entry in raw_data_list:
-            if not isinstance(entry, list) or len(entry) < 2: continue
+            if len(entry) < 2: continue
             rid, val_raw = str(entry[0]).strip(), str(entry[1]).strip()
             if not val_raw or val_raw in ["N/A", "nan", "M10"]: continue
 
@@ -441,23 +454,27 @@ def python_numerical_audit(dimension_data):
                 val_match = re.findall(r"\d+\.?\d*", val_raw)
                 val_str = val_match[0] if val_match else val_raw
                 val = float(val_str)
+                
+                # 💡 精確檢查：必須含小數點且後綴長度為 2 (解決 349.90 的結尾 0)
                 is_two_dec = "." in val_str and len(val_str.split(".")[-1]) == 2
                 is_pure_int = "." not in val_str
                 is_passed, reason, t_used, engine_label = True, "", "N/A", "未知"
 
-                # --- 判定邏輯 ---
+                # --- 四大判定邏輯 (優先序排列) ---
+                
+                # A. 銲補
                 if l_type == "min_limit" or "銲補" in (cat + title):
                     engine_label = "銲補(下限)"
                     if not is_pure_int: is_passed, reason = False, "銲補格式錯誤: 應為純整數"
                     elif clean_std:
                         t_used = min(clean_std, key=lambda x: abs(x - val))
                         if val < t_used: is_passed, reason = False, f"銲補不足: 實測 {val} < 基準 {t_used}"
-                
+
+                # B. 未再生 (本體與軸頸)
                 elif l_type in ["un_regen", "max_limit"] or "未再生" in (cat + title):
                     if "軸頸" in (cat + title):
                         engine_label = "軸頸(上限)"
-                        candidates = [float(n) for n in (clean_std + s_list)]
-                        if s_threshold: candidates.append(float(s_threshold))
+                        candidates = [float(n) for n in (clean_std + s_list + ([float(s_threshold)] if s_threshold else []))]
                         target = max(candidates) if candidates else 0
                         t_used = target
                         if target > 0:
@@ -465,7 +482,7 @@ def python_numerical_audit(dimension_data):
                             elif val > target: is_passed, reason = False, f"超過上限 {target}"
                     else:
                         engine_label = "未再生(本體)"
-                        candidates = [float(n) for n in (clean_std + s_list) if float(n) >= 120.0]
+                        candidates = [float(n) for n in (clean_std + s_list) if n >= 120.0]
                         if s_threshold and float(s_threshold) >= 120.0: candidates.append(float(s_threshold))
                         if not candidates: continue 
                         target = max(candidates)
@@ -474,13 +491,19 @@ def python_numerical_audit(dimension_data):
                             if not is_pure_int: is_passed, reason = False, f"未再生(<=標準{target}): 應為整數"
                         elif not is_two_dec: is_passed, reason = False, f"未再生(>標準{target}): 應填兩位小數(含末尾0)"
 
-                elif any(x in (cat + title) for x in ["再生", "精加工", "研磨", "車修", "組裝", "拆裝", "真圓度"]):
+                # C. 精加工類
+                elif any(x in (cat + title) for x in ["再生", "精加工", "研磨", "車修", "組裝", "拆裝", "真圓度", "KEYWAY"]):
                     engine_label = "精加工(區間)"
-                    if not is_two_dec: is_passed, reason = False, "格式錯誤: 應填兩位小數(如.90)"
+                    if not is_two_dec:
+                        is_passed, reason = False, "格式錯誤: 應填兩位小數(如.90)"
                     elif s_ranges:
                         t_used = str(s_ranges)
                         is_passed = any(r[0] <= val <= r[1] for r in s_ranges if len(r)==2)
                         if not is_passed: reason = f"尺寸不在區間 {t_used} 內"
+                    elif clean_std:
+                        s_min, s_max = min(clean_std), max(clean_std)
+                        t_used = f"{s_min}~{s_max}"
+                        if not (s_min <= val <= s_max): is_passed, reason = False, f"不在範圍內 {t_used}"
 
                 if not is_passed:
                     key = (page_num, title, reason)
@@ -488,6 +511,7 @@ def python_numerical_audit(dimension_data):
                         grouped_errors[key] = {"page": page_num, "item": title, "issue_type": f"數值異常({engine_label})", "common_reason": reason, "failures": []}
                     grouped_errors[key]["failures"].append({"id": rid, "val": val_str, "target": f"基準:{t_used}", "calc": f"⚖️ {engine_label} 引擎"})
             except: continue
+            
     return list(grouped_errors.values())
     
 def python_accounting_audit(dimension_data, res_main):
