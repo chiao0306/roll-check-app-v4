@@ -1,0 +1,8 @@
+streamlit
+azure-ai-documentintelligence
+azure-core
+google-generativeai
+pandas
+openpyxl
+thefuzz
+openai
