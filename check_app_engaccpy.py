@@ -442,41 +442,37 @@ def python_numerical_audit(dimension_data):
     for item in dimension_data:
         raw_data_list = item.get("data", [])
         title = item.get("item_title", "")
+        cat = str(item.get("category", "")).strip()
         page_num = item.get("page", "?")
         raw_spec = str(item.get("std_spec", ""))
-        cat = str(item.get("category", "")).strip()
         
         logic = item.get("sl", {})
-        # 💡 [修正] 取得 AI 傳來的類型，並統一轉小寫比對
+        # 💡 [修正] 統一轉小寫比對，並相容中文標籤
         l_type = str(logic.get("lt", "")).lower()
         s_list = [float(n) for n in logic.get("tl", []) if n is not None]
         s_threshold = logic.get("t", 0)
 
-        # --- 🛡️ 核心改動：超強規格解析器 (支援雙正/雙負公差) ---
+        # --- 🛡️ 核心強化：萬用公差解析 (支援雙正、雙負、正負公差) ---
         s_ranges = []
-        # A. 抓取 mm 數字作為基底
+        # 1. 找到基準值 (緊貼 mm 的數字)
         mm_match = re.search(r"(\d+\.?\d*)\s*mm", raw_spec)
         base_val = float(mm_match.group(1)) if mm_match else None
         
-        # B. 抓取所有帶符號的偏移量 (例如 +0.3, +0.8 或 +0, -0.14)
-        offsets = re.findall(r"([+-]\d+\.?\d*)", raw_spec)
+        # 2. 找到所有偏移量 (如 +0.3, +0.8)
+        offsets = re.findall(r"([+-]\s*\d+\.?\d*)", raw_spec)
+        
         if base_val and len(offsets) >= 2:
-            # 將所有偏移量加到基底上，取出最小與最大作為區間
-            calc_nums = [base_val + float(o) for o in offsets]
-            s_ranges.append([min(calc_nums), max(calc_nums)])
+            # 💡 [計算邏輯]：將所有偏差值加到基準值上，取出真正的範圍
+            calc_range = [base_val + float(o.replace(" ", "")) for o in offsets]
+            s_ranges = [[min(calc_range), max(calc_range)]]
         elif base_val and len(offsets) == 1:
-            # 只有一個偏移量 (如 303mm以上)
-            val_with_off = base_val + float(offsets[0])
-            if "+" in offsets[0]: s_ranges.append([val_with_off, 9999.0])
-            else: s_ranges.append([0.0, val_with_off])
-
-        # 保底：若上面沒算出，才拿 AI 給的 ranges_list
-        if not s_ranges:
-            s_ranges = logic.get("rl", [])
-
-        # 雜訊過濾基準
+            # 單一偏差處理 (如 303mm以上)
+            val_off = base_val + float(offsets[0].replace(" ", ""))
+            s_ranges = [[val_off, 9999.0]] if "+" in offsets[0] else [[0.0, val_off]]
+        
+        # 3. 雜訊過濾
         all_nums = [float(n) for n in re.findall(r"(\d+\.?\d*)", raw_spec)]
-        noise = [350.0, 300.0, 200.0, 145.0, 130.0]
+        noise = [350.0, 300.0, 200.0, 145.0, 130.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
         clean_std = [n for n in all_nums if (base_val and n == base_val) or (n not in noise and n > 5)]
 
         for entry in raw_data_list:
@@ -485,58 +481,58 @@ def python_numerical_audit(dimension_data):
             if not val_raw or val_raw in ["N/A", "nan", "M10"]: continue
 
             try:
-                # 數據清洗 (取第一個數字)
-                v_match = re.findall(r"\d+\.?\d*", val_raw)
-                val_str = v_match[0] if v_match else val_raw
+                # 數據清洗 (取第一個數字過濾手寫)
+                val_match = re.findall(r"\d+\.?\d*", val_raw)
+                val_str = val_match[0] if val_match else val_raw
                 val = float(val_str)
                 is_two_dec = "." in val_str and len(val_str.split(".")[-1]) == 2
                 is_pure_int = "." not in val_str
-                is_passed, reason, t_used, e_label = True, "", "N/A", "未知"
+                is_passed, reason, t_used, engine_label = True, "", "N/A", "未知"
 
-                # --- 判定邏輯優先序 ---
+                # --- 💡 判定優先序 ---
                 
-                # 1. 銲補
+                # A. 銲補
                 if "min_limit" in l_type or "銲補" in (cat + title):
-                    e_label = "銲補(下限)"
+                    engine_label = "銲補(下限)"
                     if not is_pure_int: is_passed, reason = False, "銲補格式錯誤: 應為純整數"
                     elif clean_std:
                         t_used = min(clean_std, key=lambda x: abs(x - val))
-                        if val < t_used: is_passed, reason = False, f"銲補不足: 實測 {val} < {t_used}"
+                        if val < t_used: is_passed, reason = False, f"銲補不足: {val} < {t_used}"
 
-                # 2. 未再生 (本體/軸頸)
+                # B. 未再生 (本體/軸頸)
                 elif "un_regen" in l_type or "max_limit" in l_type or "未再生" in (cat + title):
                     if "軸頸" in (cat + title):
-                        e_label = "軸頸(上限)"
-                        target = max(clean_std + s_list) if (clean_std + s_list) else 0
+                        engine_label = "軸頸(上限)"
+                        target = max(clean_std + s_list + [float(s_threshold)])
                         t_used = target
                         if target > 0:
-                            if not is_pure_int: is_passed, reason = False, "應為純整數"
+                            if not is_pure_int: is_passed, reason = False, "格式錯誤: 應為純整數"
                             elif val > target: is_passed, reason = False, f"超過上限 {target}"
                     else:
-                        e_label = "未再生(本體)"
+                        engine_label = "未再生(本體)"
                         candidates = [n for n in clean_std if n >= 120.0]
                         target = max(candidates) if candidates else 196.0
                         t_used = target
                         if val <= target:
-                            if not is_pure_int: is_passed, reason = False, "應為整數"
-                        elif not is_two_dec: is_passed, reason = False, "應填兩位小數"
+                            if not is_pure_int: is_passed, reason = False, f"未再生(<=標準{target}): 應為整數"
+                        elif not is_two_dec: is_passed, reason = False, f"未再生(>標準{target}): 應填兩位小數"
 
-                # 3. 精加工 / 再生 / 研磨 (Page 2 項目 5 會進這裡)
-                elif "range" in l_type or any(x in (cat + title) for x in ["再生", "精加工", "研磨", "車修", "組裝", "拆裝", "真圓度"]):
-                    e_label = "精加工(區間)"
+                # C. 精加工再生類 / 再生車修 (Page 2 項目 5 走這裡)
+                elif "range" in l_type or "精加工" in cat or any(x in (cat + title) for x in ["再生", "研磨", "車修", "組裝", "真圓度"]):
+                    engine_label = "精加工(區間)"
                     if not is_two_dec:
                         is_passed, reason = False, "格式錯誤: 應填兩位小數(如.90)"
                     elif s_ranges:
-                        # 💡 這裡會用到我們剛剛精準算出的 [[203.52, 204.02]]
+                        # 💡 這裡會用到精準算出的 [[203.52, 204.02]]
                         t_used = str(s_ranges)
-                        is_passed = any(r[0] <= val <= r[1] for r in s_ranges)
+                        is_passed = any(r[0] <= val <= r[1] for r in s_ranges if len(r)==2)
                         if not is_passed: reason = f"尺寸不在區間 {t_used} 內"
 
                 if not is_passed:
                     key = (page_num, title, reason)
                     if key not in grouped_errors:
-                        grouped_errors[key] = {"page": page_num, "item": title, "issue_type": f"數值異常({e_label})", "common_reason": reason, "failures": []}
-                    grouped_errors[key]["failures"].append({"id": rid, "val": val_str, "target": f"基準:{t_used}", "calc": f"⚖️ {e_label} 引擎"})
+                        grouped_errors[key] = {"page": page_num, "item": title, "issue_type": f"數值異常({engine_label})", "common_reason": reason, "failures": []}
+                    grouped_errors[key]["failures"].append({"id": rid, "val": val_str, "target": f"基準:{t_used}", "calc": f"⚖️ {engine_label} 引擎"})
             except: continue
     return list(grouped_errors.values())
     
