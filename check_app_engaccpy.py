@@ -322,53 +322,36 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
 
     # 💡 這裡的大括號已全部校對為雙大括號 {{ }}
     system_prompt = f"""
-    你是一位極度嚴謹的中鋼機械品管【總稽核官】。你必須像「電腦程式」一樣執行稽核。
+    你是一位極速抄錄員。你的任務是精確提取圖片數據並分類，**禁止執行數學運算，嚴禁執行跨頁面比對。**
     
     {dynamic_rules}
 
     ---
 
-    ### 🚀 執行程序 (Execution Procedure)
+    #### ⚔️ 任務 A：工程尺寸數據抄錄 (AI 翻譯官)
+    1. **規格抄錄 (std_spec)**：精確抄錄標題中含 `mm`、`±`、`~` 的文字。
+    2. **數據抄錄 (ds)**：格式 `"ID:值|ID:值"`。**禁止簡化數字** (如 349.90 必寫 "349.90")。
+    3. **分類識別 (category)**：根據標題分類 [未再生本體, 軸頸未再生, 銲補, 精加工再生]。
 
-    #### ⚔️ 模組 A：數據抄錄與規格翻譯 (AI 翻譯官)
-    你的任務是精確抄錄當前頁面數據，**禁止執行任何加減法運算。**
-    1. **規格抄錄 (std_spec)**：精確抄錄標題中含 `mm`、`±`、`+`、`-`、`至...再生` 的文字。
-    2. **數據抄錄 (ds)**：格式 `"ID:值|ID:值"`。**禁止簡化數字**（130.20 必寫 "130.20"）。
-    3. **分類識別 (category)**：[未再生本體, 軸頸未再生, 銲補, 精加工再生]。
-    4. **規格編譯 (sl)**：根據標題提取 `threshold` (門檻) 或 `threshold_list` (數字清單)。
-
-    #### ⚖️ 模組 B：跨製程位階與流程稽核 (AI 判定)
-    1. **尺寸大小邏輯檢查**：`未再生車修 < 研磨 < 再生車修 < 銲補`。若後段製程尺寸「小於」前段（銲補除外），必須在 `issues` 回報 `🛑流程異常`。
-    2. **工件流程溯源**：出現「研磨/再生」必須往前檢查是否存在前段紀錄。
-
-    #### 💰 模組 C：會計數據提取 (不需計算，只需提取)
-    1. **傳票提取**：抄錄統計表每一行的名稱與實交數量到 `summary_rows`。
-    2. **項目指標**：提取項目標題括號內的數字（如 12PC）到 `item_pc_target`。
-    3. **忽略規則**：不需抄錄 Unit_Rule 規則文字，系統後台會自動關聯。
+    #### 💰 任務 B：會計指標提取 (AI 任務)
+    1. **總表提取**：精確抄錄左上角統計表的每一行項目與數量到 `summary_rows`。
+    2. **運費與PC數**：提取左上角運費項次與項目名稱括號內的 PC 數。
+    3. **物理位階 (僅限本頁)**：若本頁數據明顯違反 `未再生 < 研磨 < 再生` 的大小順序，報 `🛑流程異常`。
+    **💡 注意：不需執行跨頁面搜索，不需執行加總計算。**
 
     ---
 
-    ### 📝 輸出規範 (Output Format)
-    必須回傳單一 JSON。統計不符時必須「逐行拆分」來源明細。
-
+    ### 📝 輸出規範 (JSON)
     {{
       "job_no": "工令",
-      "summary_rows": [ {{ "title": "名", "target": 數字 }} ],
+      "summary_rows": [ {{ "title": "名", "target": 0 }} ],
       "freight_target": 0,
-      "issues": [ 
-         {{
-           "page": "頁碼", "item": "項目", "issue_type": "統計不符 / 🛑流程異常",
-           "common_reason": "原因",
-           "failures": [ {{ "id": "RollID", "val": "對比", "calc": "結論" }} ]
-         }}
-      ],
+      "issues": [ ... ], 
       "dimension_data": [
          {{
-           "page": 數字,
-           "item_title": "標題",
-           "category": "分類名稱",
-           "item_pc_target": 0,
-           "sl": {{ "lt": "類型", "tl": [], "t": 0 }},
+           "page": 數字, "item_title": "標題", "category": "分類", "item_pc_target": 0,
+           "accounting_rules": {{ "local": "", "agg": "", "freight": "" }},
+           "sl": {{ "lt": "類型", "t": "抄錄標題中的基準數字" }},
            "std_spec": "原始規格文字",
            "ds": "ID:值|ID:值" 
          }}
@@ -401,6 +384,54 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
         return {"job_no": f"JSON Error: {str(e)}", "issues": [], "dimension_data": []}
         
 # --- 重點：Python 引擎獨立於 agent 函式之外 ---
+
+def python_process_audit(dimension_data):
+    """
+    Python 流程稽核員：負責跨頁面檢查物理位階（研磨 < 再生）與 溯源檢查
+    """
+    process_issues = []
+    roll_history = {} # 格式： { "RollID": [{"process": "銲補", "val": 356, "page": 1}, ...] }
+    
+    # 1. 建立工件履歷資料庫
+    for item in dimension_data:
+        p_num = item.get("page", "?")
+        ds = item.get("ds", "")
+        cat = item.get("category", "")
+        # 解析數據
+        pairs = [p.split(":") for p in ds.split("|") if ":" in p]
+        for rid, val_str in pairs:
+            try:
+                val = float(val_str)
+                if rid not in roll_history: roll_history[rid] = []
+                roll_history[rid].append({"process": cat, "val": val, "page": p_num})
+            except: continue
+
+    # 2. 執行物理規則判定
+    # 定義權重：數字越小代表加工越前段
+    weights = {"未再生本體": 1, "軸頸未再生": 1, "精加工再生": 2, "銲補": 3}
+    
+    for rid, records in roll_history.items():
+        if len(records) < 2: continue # 只有一筆紀錄沒法比
+        
+        # 按頁碼排序
+        records.sort(key=lambda x: x['page'])
+        
+        for i in range(len(records) - 1):
+            curr = records[i]
+            next_rec = records[i+1]
+            
+            # 💡 檢查物理位階尺寸邏輯
+            # 規則：後段尺寸 (如再生) 不應小於前段尺寸 (如未再生) -> 這裡根據您的未再生 < 再生定義
+            if curr['process'] == "未再生本體" and next_rec['process'] == "精加工再生":
+                if next_rec['val'] < curr['val']:
+                    process_issues.append({
+                        "page": next_rec['page'], "item": f"編號 {rid} 流程檢查",
+                        "issue_type": "🛑流程異常",
+                        "common_reason": "物理位階錯誤：再生尺寸小於未再生",
+                        "failures": [{"id": rid, "val": f"再生:{next_rec['val']} < 未再生:{curr['val']}", "calc": "尺寸演進不合理"}]
+                    })
+    return process_issues
+
 def python_numerical_audit(dimension_data):
     grouped_errors = {}
     import re
@@ -867,44 +898,46 @@ if st.session_state.photo_gallery:
             
         status.text("總稽核 Agent 正在進行全方位分析...")
         
-        # 1. 執行 AI 
+     # 1. 執行 AI 
         res_main = agent_unified_check(combined_input, combined_input, GEMINI_KEY, main_model_name)
         
-        # 💡 [重大修正]：從 AI 回傳中抓取維度數據 (確保 Key 名稱 100% 對齊)
+        # 💡 [重大修正]：從 AI 回傳中抓取維度數據
         dim_data = res_main.get("dimension_data", [])
         
-        # 2. 執行兩個 Python 引擎
+        # 2. 執行三個 Python 引擎 (數值、會計、流程)
         python_numeric_issues = python_numerical_audit(dim_data)
         python_accounting_issues = python_accounting_audit(dim_data, res_main)
         
-        # 3. 合併結果 (帶有防呆檢查，防止 i['source'] 報錯) ---
+        # 💡 [新增]：啟動 Python 流程稽核引擎
+        python_process_issues = python_process_audit(dim_data)
+        
+        # 3. 合併結果 (帶有防呆檢查)
         ai_raw_issues = res_main.get("issues", [])
         ai_filtered_issues = []
 
-        if isinstance(ai_raw_issues, list): # 確保 issues 是一個清單
+        if isinstance(ai_raw_issues, list):
             for i in ai_raw_issues:
-                # 💡 [關鍵修正]：確保 i 是字典格式，才去執行欄位賦值
                 if isinstance(i, dict):
                     i['source'] = '🤖 總稽核 AI'
                     i_type = str(i.get("issue_type", ""))
                     
-                    # 只有流程、規格提取失敗、表頭、未匹配聽 AI 的
-                    ai_only_tasks = ["流程", "規格提取失敗", "表頭", "未匹配"]
+                    # 💡 [修改過濾條件]：
+                    # 只有「規格提取失敗」和「未匹配」才聽 AI 的。
+                    # 因為「流程」和「統計」現在通通交給 Python 了！
+                    ai_only_tasks = ["規格提取失敗", "未匹配"]
                     if any(k in i_type for k in ai_only_tasks):
                         ai_filtered_issues.append(i)
                 else:
-                    # 如果 AI 回傳的是字串而不是字典，我們把它包裝成一個警告
                     ai_filtered_issues.append({
-                        "page": "?",
-                        "item": "AI 格式異常",
-                        "issue_type": "⚠️格式錯誤",
-                        "common_reason": f"AI 回傳了非預期的文字內容: {str(i)}",
-                        "source": "🤖 總稽核 AI"
+                        "page": "?", "item": "AI 格式異常", "issue_type": "⚠️格式錯誤",
+                        "common_reason": f"內容: {str(i)}", "source": "🤖 總稽核 AI"
                     })
 
-        # 4. 合併所有籃子
+        # 4. 合併所有籃子 (加入 python_process_issues)
         python_header_issues, python_debug_data = python_header_check(st.session_state.photo_gallery)
-        all_issues = ai_filtered_issues + python_numeric_issues + python_accounting_issues + python_header_issues
+        
+        # 最終合併總表
+        all_issues = ai_filtered_issues + python_numeric_issues + python_accounting_issues + python_process_issues + python_header_issues
         
         # 5. 存入快取 (這是 Debug 頁面能顯示數據的唯一關鍵)
         st.session_state.analysis_result_cache = {
