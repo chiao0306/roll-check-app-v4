@@ -649,11 +649,6 @@ def python_accounting_audit(dimension_data, res_main):
     from collections import Counter
     import re
     
-    def python_accounting_audit(dimension_data, res_main):
-    # ... 原有的 import ...
-    import re
-    from collections import Counter
-    
     def safe_float(value):
         if value is None: return 0.0
         # 只保留數字、小數點和負號，過濾掉 "PC", "SET", "噸" 等文字
