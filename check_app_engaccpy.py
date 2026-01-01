@@ -649,6 +649,20 @@ def python_accounting_audit(dimension_data, res_main):
     from collections import Counter
     import re
     
+    def python_accounting_audit(dimension_data, res_main):
+    # ... 原有的 import ...
+    import re
+    from collections import Counter
+    
+    def safe_float(value):
+        if value is None: return 0.0
+        # 只保留數字、小數點和負號，過濾掉 "PC", "SET", "噸" 等文字
+        cleaned = "".join(re.findall(r"[\d\.]+", str(value).replace(',', '')))
+        try:
+            return float(cleaned) if cleaned else 0.0
+        except:
+            return 0.0
+    
     # --- 1. 取得對帳基準 (來自左上角統計表) ---
     summary_rows = res_main.get("summary_rows", [])
     # 💡 關鍵修正：建立總表追蹤器，並執行「字串轉數字」安全過濾
@@ -661,6 +675,15 @@ def python_accounting_audit(dimension_data, res_main):
             s_target = float(str(s_target_raw).replace(',', '').strip())
         except:
             s_target = 0
+            
+        # 【插入：修正 3】過濾無效行
+        # 如果標題是空的，或者只有空格，或者長度太短，直接跳過不加入對帳清單
+        if not s_title or len(str(s_title).strip()) < 2:
+            continue
+
+        # 這裡同步使用修正 2 的函數
+        s_target = safe_float(s.get('target', 0))
+        
         global_sum_tracker[s_title] = {"target": s_target, "actual": 0, "details": []}
 
     # 💡 取得運費基準數字
@@ -682,6 +705,10 @@ def python_accounting_audit(dimension_data, res_main):
         id_counts = Counter(ids)
 
         # 💡 [2.1 單項 PC 數核對] 
+        
+        # 修改這裡，使用剛剛定義的 safe_float
+        target_pc = safe_float(item.get("item_pc_target", 0))
+
         try:
             target_pc = float(str(item.get("item_pc_target", 0)))
         except:
