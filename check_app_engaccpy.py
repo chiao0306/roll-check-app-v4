@@ -316,50 +316,42 @@ def python_header_check(photo_gallery):
                 
     return issues, extracted_data
 
-    # --- 5. 總稽核 Agent (整合版 - 強邏輯優化) ---
-def agent_unified_check(combined_input, full_text_for_search, api_key, model_name):
+   def agent_unified_check(combined_input, full_text_for_search, api_key, model_name):
+    # 讀取 Python 規則 (給 Python 用，不給 AI 用，節省 AI 腦力)
     dynamic_rules = get_dynamic_rules(full_text_for_search)
 
+    # 1. 告訴 AI 規則 (Prompt) - ⚡️ 極速瘦身版
+    # 我們移除了 accounting_rules 和 sl 的輸出要求，讓 AI 專注於抄寫數據
     system_prompt = f"""
-    你是一位極度嚴謹的中鋼機械品管【數據抄錄員】。你必須像「電腦程式」一樣執行提取任務。
+    你是一位極度嚴謹的中鋼機械品管【數據抄錄員】。
     
     {dynamic_rules}
 
     ---
+    #### 任務指令：
+    1. **規格抄錄 (std_spec)**：抄錄 mm, ±, +, - 等原始文字。
+    2. **數據抄錄 (ds)**：格式為 "ID:值|ID:值"。
+       - 遇到無法辨識的模糊字跡，請標記為 [!]。
+    3. **分類 (category)**：
+       - 銲補 -> min_limit
+       - 未再生 -> un_regen (若含軸頸則為 max_limit)
+       - 再生/研磨 -> range
 
-    #### ⚔️ 模組 A：數據抄錄與分類 (AI 翻譯官)
-    1. **規格抄錄 (std_spec)**：精確抄錄標題中含 `mm`、`±`、`+`、`-`、`至...再生` 的文字。
-       - **🚫 禁令**：嚴禁執行加減法運算，保持 std_ranges 為空，將原始文字抄錄到 std_spec 即可。
-    2. **數據抄錄 (ds)**：採用壓縮格式 `"ID:值|ID:值"`。
-       - **字串保護**：實測值顯示 `349.90` 必寫 `"349.90"`。禁止簡化數字。
-       - **壞軌標記 [!]**：若儲存格辨識不良（汙點/遮擋/黏連），嚴禁腦補，直接標記為 `[!]`。
-    3. **分類識別 (category) 決策流**：
-       - LEVEL 1：含「銲補」 -> `min_limit`。
-       - LEVEL 2：含「未再生」。a.含「軸頸」-> `max_limit`；b.不含「軸頸」-> `un_regen`。
-       - LEVEL 3：含「再生/研磨/精加工/車修/組裝/拆裝/真圓度」 -> `range`。
-
-    #### 💰 模組 B：會計指標提取 (由 AI 抄錄傳票)
-    1. **總表提取**：抄錄左上角統計表每一行的名稱與實交數量到 `summary_rows`。
-    2. **指標提取**：提取運費項次到 `freight_target`，提取項目括號內的數字到 `item_pc_target`。
-    3. **⚖️ 流程稽核**：檢查物理位階 `未再生 < 研磨 < 再生 < 銲補`。若跨頁面後段尺寸小於前段（銲補除外），報 `🛑流程異常`。
-
-    ---
+    #### 輸出格式：
+    請務必回傳單一合法的 JSON 物件。
+    ⚠️ 注意：為了節省空間，請【不要】回傳 accounting_rules 和 sl 欄位，只需回傳以下核心欄位：
     
-    ### 📝 輸出規範 (Output Format)
-    必須回傳單一 JSON。統計不符時必須「逐行拆分」來源明細。
-
     {{
       "job_no": "工令",
       "summary_rows": [ {{ "title": "名", "target": 數字 }} ],
       "freight_target": 0,
-      "issues": [ 
-         {{ "page": "頁碼", "item": "項目", "issue_type": "統計不符 / 🛑流程異常", "common_reason": "原因", "failures": [] }}
-      ],
+      "issues": [],
       "dimension_data": [
          {{
-           "page": 數字, "item_title": "標題", "category": "分類名稱", "item_pc_target": 0,
-           "accounting_rules": {{ "local": "", "agg": "", "freight": "" }},
-           "sl": {{ "lt": "分類標籤", "t": 0 }},
+           "page": 數字, 
+           "item_title": "標題", 
+           "category": "分類名稱", 
+           "item_pc_target": 0,
            "std_spec": "原始規格文字",
            "ds": "ID:值|ID:值" 
          }}
@@ -367,24 +359,16 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
     }}
     """
     
-    # 修改後的建議配置
-    generation_config = {
-    "temperature": 0.0,             # ⚡️ 設為 0：最快且最穩定，不讓 AI 多想
-    "max_output_tokens": 4096,      # ⚡️ 先降回 4096：通常 4 頁資料這個長度就夠了，減少 AI 廢話
-    # "response_mime_type": "application/json" # ⚡️ 暫時註解掉這行！
-    }
-
-    
     try:
         genai.configure(api_key=api_key)
         
-        # 2. 設定 AI (開啟 JSON 模式以確保成功率)
+        # 2. 設定 AI
         model = genai.GenerativeModel(
             model_name=model_name,
             generation_config={
-                "temperature": 0.0,            # 最穩定
-                "max_output_tokens": 8192,     # 給予足夠長度寫完大表
-                "response_mime_type": "application/json" # ⚡️ 強制 JSON 模式 (避免解析失敗)
+                "temperature": 0.0,            
+                "max_output_tokens": 65536,    # ⚡️【火力全開】直接設為 Flash 模型的最大上限 (原本是 8192)
+                "response_mime_type": "application/json" 
             },
             safety_settings={
                 "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
@@ -394,24 +378,22 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
             }
         )
         
-        # 3. 呼叫 AI (這裡會跑 20-40 秒是正常的)
-        with st.spinner('🤖 AI 正在全力抄寫數據中...'):
+        # 3. 呼叫 AI
+        with st.spinner('🤖 AI 正在全力抄寫數據中... (限制已解除，請耐心等待)'):
             response = model.generate_content([system_prompt, combined_input])
         
-        # 4. 檢查是否有內容
+        # 4. 檢查內容
         raw_content = response.text.strip()
         
-        # 移除可能的多餘標記 (雙重保險)
         if raw_content.startswith("```json"):
             raw_content = raw_content[7:]
         if raw_content.endswith("```"):
             raw_content = raw_content[:-3]
         raw_content = raw_content.strip()
 
-        # 5. 解析 JSON
+        # 5. 解析
         parsed_data = json.loads(raw_content)
         
-        # 記錄 Token
         parsed_data["_token_usage"] = {
             "input": response.usage_metadata.prompt_token_count, 
             "output": response.usage_metadata.candidates_token_count
@@ -419,22 +401,18 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
         return parsed_data
 
     except json.JSONDecodeError as e:
-        # 🚨 這裡就是抓出「為什麼跑了29秒卻失敗」的關鍵
         st.error("❌ JSON 解析失敗！請查看下方 AI 的原始回應：")
         with st.expander("👀 點擊查看 AI 到底回傳了什麼"):
-            # 如果 AI 有回傳東西，印出來看
             if 'raw_content' in locals():
                 st.code(raw_content)
             elif 'response' in locals():
                 st.code(response.text)
-        # 回傳錯誤結構，避免程式當機
         return {"job_no": "JSON Error", "issues": [], "dimension_data": []}
 
     except Exception as e:
-        # 其他錯誤 (例如網路中斷、API 錯誤)
         st.error(f"❌ 系統發生錯誤: {str(e)}")
         return {"job_no": f"Error: {str(e)}", "issues": [], "dimension_data": []}
-    
+
 # --- 重點：Python 引擎獨立於 agent 函式之外 ---
 
 def python_numerical_audit(dimension_data):
