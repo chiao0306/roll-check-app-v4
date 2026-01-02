@@ -377,13 +377,13 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
     try:
         genai.configure(api_key=api_key)
         
-        # 1. 輕量化配置：移除強制 JSON 模式以提升速度
+        # ⚡️ 平衡配置：移除強制 JSON 模式以提升速度，改用 Python 手動解析
         gen_config = {
-            "temperature": 0.0,          # 絕對穩定
-            "max_output_tokens": 5000,   # 適中的長度
+            "temperature": 0.0,
+            "max_output_tokens": 6000, 
         }
 
-        # 2. 保留安全設定：防止 OCR 誤判攔截
+        # ⚡️ 解除安全攔截：防止 OCR 誤判 "中國販賣" 等字眼
         safety = {
             "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
             "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
@@ -397,10 +397,15 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
             safety_settings=safety
         )
         
-        # 3. 呼叫 AI
-        response = model.generate_content([system_prompt, combined_input])
+        # 呼叫 AI
+        with st.spinner('🤖 AI 正在全力抄寫數據中...'):
+            response = model.generate_content([system_prompt, combined_input])
         
-        # ⚡️ 手動清洗 JSON 標記 (因為關閉了強制模式，AI 可能會加 ```json)
+        # 檢查 AI 是否被阻擋 (Prompt Feedback)
+        if response.prompt_feedback and response.prompt_feedback.block_reason:
+            return {"job_no": "Safety Blocked", "issues": [{"page": "N/A", "item": "安全性攔截", "issue_type": "攔截", "common_reason": f"原因: {response.prompt_feedback.block_reason}", "failures": []}], "dimension_data": []}
+
+        # 清洗內容：移除 Markdown 標記
         raw_content = response.text.strip()
         if "```json" in raw_content:
             raw_content = raw_content.split("```json")[1].split("```")[0].strip()
@@ -408,6 +413,8 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
             raw_content = raw_content.split("```")[1].split("```")[0].strip()
 
         parsed_data = json.loads(raw_content)
+        
+        # 記錄 Token 使用量
         parsed_data["_token_usage"] = {
             "input": response.usage_metadata.prompt_token_count, 
             "output": response.usage_metadata.candidates_token_count
@@ -415,10 +422,9 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
         return parsed_data
 
     except Exception as e:
-        # 發生錯誤時至少回傳一個帶有錯誤訊息的結構
+        # 發生錯誤時，回傳完整的錯誤訊息以便 Debug
+        st.error(f"AI 模組發生錯誤: {str(e)}")
         return {"job_no": f"Error: {str(e)}", "issues": [], "dimension_data": []}
-
-        raw_content = response.text
         
         with st.spinner('🤖 AI 正在全力抄寫數據中... (數據量大時可能需要 30-60 秒)'):
             # 這裡把 system_prompt 和 user content 放在一起傳送
