@@ -913,6 +913,7 @@ if st.session_state.photo_gallery:
             dim_data = res_main.get("dimension_data", [])
             python_numeric_issues = python_numerical_audit(dim_data)
             python_accounting_issues = python_accounting_audit(dim_data, res_main)
+            python_process_issues = python_process_audit(dim_data)
             python_header_issues, python_debug_data = python_header_check(st.session_state.photo_gallery)
 
             ai_filtered_issues = []
@@ -924,7 +925,8 @@ if st.session_state.photo_gallery:
                         if any(k in i.get("issue_type", "") for k in ["流程", "規格提取失敗", "未匹配"]):
                             ai_filtered_issues.append(i)
 
-            all_issues = ai_filtered_issues + python_numeric_issues + python_accounting_issues + python_header_issues
+            # 最終合併所有籃子
+            all_issues = ai_filtered_issues + python_numeric_issues + python_accounting_issues + python_process_issues + python_header_issues
             
             # 存入快取
             usage = res_main.get("_token_usage", {"input": 0, "output": 0})
