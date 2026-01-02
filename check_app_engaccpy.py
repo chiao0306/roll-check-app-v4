@@ -322,8 +322,7 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
     # 讀取 Excel 規則 (供 Python 後端查表使用)
     dynamic_rules = get_dynamic_rules(full_text_for_search)
 
-    # 1. 整合您的【工程級精密 Prompt】
-    # 💡 移除 redundant 欄位 (accounting_rules, sl) 以求生成過程的極致穩定
+    # 1. 整合您的【工程級精密 Prompt】 - 🔇 靜音版 (移除 AI 判斷功能)
     system_prompt = f"""
     你是一位極度嚴謹的中鋼機械品管【數據抄錄員】。你必須像「電腦程式」一樣執行任務。
     
@@ -331,7 +330,7 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
 
     ---
 
-    #### ⚔️ 模組 A：工程尺寸數據提取 (AI 任務：抄錄)
+    #### ⚔️ 模組 A：工程尺寸數據提取 (AI 任務：純抄錄)
     1. **規格抄錄 (std_spec)**：精確抄錄標題中含 `mm`、`±`、`+`、`-` 的原始文字。
     2. **數據抄錄 (ds)**：格式為 `"ID:值|ID:值"`。
        - **字串保護模式**：禁止簡化數字。實測值若顯示 `349.90`，必須輸出 `"349.90"`。
@@ -346,28 +345,24 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
           * 標題含「未再生」三字時：
             a. 含「軸頸」 -> `max_limit`。
             b. 不含「軸頸」(本體) -> `un_regen`。
-          * (💡 注意：此類項目即便包含「車修」字眼，也必須鎖定在 LEVEL 2，嚴禁進入下層)。
+          * (💡 注意：此類項目即便包含「車修」字眼，也必須鎖定在 LEVEL 2)。
         - **LEVEL 3：精加工判定**
           * 標題不含「未再生」，且包含「再生」、「研磨」、「精加工」、「車修加工」、「KEYWAY」 -> `range`。
 
-    #### 💰 模組 B：會計指標提取 (AI 任務：抄錄)
+    #### 💰 模組 B：會計指標提取 (AI 任務：純抄錄)
     1. **統計表**：抄錄左上角統計表每一行名稱與實交數量到 `summary_rows`。
-    2. **指標提取**：提取運費項次與標題括號內的 PC 數。你不需抄錄規則文字。
-
-    #### ⚖️ 模組 C：流程稽核 (AI 任務：判定)
-    1. **位階檢查**：`未再生 < 研磨 < 再生 < 銲補`。若跨頁面後段尺寸小於前段（銲補除外），報 `🛑流程異常`。
+    2. **指標提取**：提取運費項次與標題括號內的 PC 數。
 
     ---
     #### 📝 輸出規範 (極簡 JSON Format)
-    必須回傳單一合法 JSON。請【不要】輸出 accounting_rules 和 sl 欄位。
+    必須回傳單一合法 JSON。
+    ⚠️ 絕對禁止回傳 accounting_rules, sl 以及 issues 欄位。
+    
     格式如下：
     {{
       "job_no": "工令",
       "summary_rows": [ {{ "title": "名稱", "target": 數字 }} ],
       "freight_target": 數字,
-      "issues": [ 
-         {{ "page": "頁碼", "item": "項目", "issue_type": "統計不符 / 🛑流程異常", "common_reason": "原因", "failures": [] }}
-      ],
       "dimension_data": [
          {{
            "page": 數字, "item_title": "標題", "category": "分類名稱", 
@@ -380,7 +375,6 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
     try:
         genai.configure(api_key=api_key)
         
-        # ⚡️ 依照要求移除 safety_settings 區塊
         model = genai.GenerativeModel(
             model_name=model_name,
             generation_config={
@@ -390,12 +384,12 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
             }
         )
         
-        with st.spinner('🤖 總稽核 Agent 正在套用精密規則進行分析...'):
+        with st.spinner('🤖 總稽核 Agent 正在進行數據轉錄 (不進行邏輯判斷)...'):
             response = model.generate_content([system_prompt, combined_input])
         
         raw_content = response.text.strip()
         
-        # 🛡️ 強化解析：確保只抓取 JSON 結構
+        # 🛡️ 強化解析
         json_match = re.search(r"\{.*\}", raw_content, re.DOTALL)
         if json_match:
             raw_content = json_match.group()
@@ -410,8 +404,7 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
         return parsed_data
 
     except json.JSONDecodeError as e:
-        # ⚡️ 資訊卡留存：如果 AI 斷頭或格式錯誤，顯示原始內容供 Debug
-        st.error(f"❌ JSON 解析失敗！(AI 回傳內容不完整或格式異常)")
+        st.error(f"❌ JSON 解析失敗！")
         with st.expander("👀 查看導致錯誤的 AI 原始回應"):
             if 'raw_content' in locals():
                 st.code(raw_content)
@@ -420,9 +413,7 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
         return {"job_no": "JSON Error", "issues": [], "dimension_data": []}
 
     except Exception as e:
-        # ⚡️ 資訊卡留存：顯示系統報錯或 API 攔截資訊
         st.error(f"❌ 系統發生錯誤: {str(e)}")
-        # 若發生 Safety Block，API 通常會回報錯誤訊息於此
         return {"job_no": f"Error: {str(e)}", "issues": [], "dimension_data": []}
 
 # --- 重點：Python 引擎獨立於 agent 函式之外 ---
