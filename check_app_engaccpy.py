@@ -321,63 +321,31 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
     dynamic_rules = get_dynamic_rules(full_text_for_search)
 
     system_prompt = f"""
-    你是一位極度嚴謹的中鋼機械品管【數據抄錄員】。你必須像「電腦程式」一樣執行任務。
+    你是一位極速數據抄錄員。請將圖片中的表格數據精確轉化為簡化 JSON。
     
     {dynamic_rules}
 
     ---
-
-    #### ⚔️ 模組 A：工程尺寸數據提取 (AI 任務：抄錄)
-    1. **規格抄錄 (std_spec)**：精確抄錄標題中含 `mm`、`±`、`+`、`-` 的原始文字。
-    2. **數據抄錄 (ds)**：格式 `"ID:值|ID:值"`。禁止簡化，`349.90` 必寫 `"349.90"`。
-    3. **項目分類決策流程 (由上至下執行，命中即停止)**：
-        - **LEVEL 1：銲補與裝配判定 (最高優先)**
-          * 標題含「銲補」、「銲接」 -> `min_limit`。
-          * 標題含「組裝」、「拆裝」、「裝配」、「真圓度」 -> `range`。
-         
-        - **LEVEL 2：未再生判定 (含車修)**
-          * 標題含「未再生」三字時：
-            a. 含「軸頸」 -> `max_limit`。
-            b. 不含「軸頸」(本體) -> `un_regen`。
-          * (💡 注意：此類項目即使包含「車修」字眼，也必須鎖定在 LEVEL 2，嚴禁進入下一個層級)。
-         
-        - **LEVEL 3：精加工判定**
-          * 標題不含「未再生」，且包含「再生」、「研磨」、「精加工」、「車修加工」、「KEYWAY」 -> `range`。
-
-    4. **數據抄錄 (字串保護模式)**：
-       - **禁止簡化**：實測值若顯示 `349.90`，必須輸出 `"349.90"`。
-       - **格式**：所有實測值必須包裹成雙引號字串。`["RollID", "實測值字串"]`。
-       - **🚫 遇到干擾不鑽牛角尖**：若儲存格內的數值因手寫塗改、圓圈遮擋、污點、字跡黏連或光線反光，導致你無法「100% 確定」原始打印數字時，**嚴禁腦補或猜測**。
-       - **壞軌標記 [BAD]**：請將該筆數值直接標記為 `[!]`。
-       - **範例**：若 ID 清楚但數值模糊 -> `"V100:[!]"`；若整個儲存格都看不清 -> `"[!] : [!]"`。
-       - **跳過策略**：一旦標記為 `[!]`，請立即跳到下一格，不要浪費 Token 描述雜訊。
-
-    #### 💰 模組 B：會計指標提取 (AI 任務：抄錄)
-    1. **統計表**：抄錄統計表每一行名稱與實交數量到 `summary_rows`。
-    2. **運費與指標**：提取運費項次與標題括號內的 PC 數。你不需抄錄規則文字。
-
-    #### ⚖️ 模組 C：流程稽核 (AI 任務：判定)
-    1. **位階檢查**：`未再生 < 研磨 < 再生 < 銲補`。若跨頁面後段尺寸小於前段（銲補除外），報 `🛑流程異常`。
-
-    ---
-
-    ### 📝 輸出規範 (Output Format)
-    必須回傳單一 JSON。統計不符時必須「逐行拆分」來源明細。
-
+    #### 📋 抄錄規則：
+    1. **summary_rows**: 抄錄左上角統計表中每一行的項目名與實交數量。
+    2. **freight_target**: 抄錄左上角「運費」項次的數字。
+    3. **dimension_data**:
+       - **item_title**: 原始完整標題。
+       - **std_spec**: 原樣抄錄標題下的規格文字（含 mm, ±, + 等）。
+       - **ds**: 數據字串。格式 `"編號:值|編號:值"`。
+       - **⚠️ 禁止事項**：不准計算公差、不准判斷對錯、不准簡化末尾的 0。
+       - **壞軌處理**：若該格辨識不清，寫 `[!]`。
+    
     {{
       "job_no": "工令",
-      "summary_rows": [ {{ "title": "名", "target": 數字 }} ],
-      "freight_target": 0,
-      "issues": [ 
-         {{ "page": "頁碼", "item": "項目", "issue_type": "統計不符 / 🛑流程異常", "common_reason": "原因", "failures": [] }}
-      ],
+      "summary_rows": [ {{"title": "名", "target": "值"}} ],
+      "freight_target": "值",
       "dimension_data": [
          {{
-           "page": 數字, "item_title": "標題", "category": "分類名稱", "item_pc_target": 0,
-           "accounting_rules": {{ "local": "", "agg": "", "freight": "" }},
-           "sl": {{ "lt": "分類標籤", "t": 0 }},
-           "std_spec": "原始規格文字",
-           "ds": "ID:值|ID:值" 
+           "page": 數字,
+           "item_title": "標題",
+           "std_spec": "規格文字",
+           "ds": "ID:Val|ID:Val" 
          }}
       ]
     }}
@@ -446,127 +414,83 @@ def python_process_audit(dimension_data):
                 })
     return process_issues
     
+# ==========================================
+# ⚔️ 模組一：Python 數值規格引擎 (Engineering)
+# 負責：尺寸比對、格式檢查、公差解析、壞軌偵測
+# ==========================================
+    
 def python_numerical_audit(dimension_data):
     grouped_errors = {}
     import re
-    if not dimension_data: return []
+    if not dimension_data: return [] 
 
     for item in dimension_data:
-        # 1. 取得數據 (DS 格式)
-        ds = str(item.get("ds", ""))
-        if not ds: continue
-        raw_entries = [p.split(":") for p in ds.split("|") if ":" in p]
-        
+        raw_data_list = item.get("data", [])
         title = str(item.get("item_title", "")).replace(" ", "").replace('"', "")
         cat = str(item.get("category", "")).strip()
         page_num = item.get("page", "?")
         raw_spec = str(item.get("std_spec", "")).replace('"', "")
         
-        # 2. 🛡️ 數據清洗與 mm 定位
+        # --- 🛡️ 數據清洗與「模式優先」預解析 ---
+        trusted_stds = [] 
         mm_nums = [float(n) for n in re.findall(r"(\d+\.?\d*)\s*mm", raw_spec)]
-        all_nums = [float(n) for n in re.findall(r"(\d+\.?\d*)", raw_spec)]
+        trusted_stds.extend(mm_nums)
+
+        # 💡 [功能 A]：Python 自動解析公差 (±, ~, +/-)
+        s_ranges = []
+        clean_part = raw_spec.replace(" ", "")
+        pm_match = re.search(r"(\d+\.?\d*)?±(\d+\.?\d*)", clean_part)
+        tilde_match = re.search(r"(\d+\.?\d*)[~～-](\d+\.?\d*)", clean_part)
+        dev_match = re.findall(r"([+-]\d+\.?\d*)", clean_part)
+
+        if pm_match:
+            b = float(pm_match.group(1)) if pm_match.group(1) else 0.0
+            o = float(pm_match.group(2))
+            s_ranges.append([round(b - o, 4), round(b + o, 4)])
+        elif tilde_match:
+            n1, n2 = float(tilde_match.group(1)), float(tilde_match.group(2))
+            s_ranges.append([round(min(n1, n2), 4), round(max(n1, n2), 4)])
+        elif base_val := (mm_nums[0] if mm_nums else None):
+            if len(dev_match) >= 2:
+                calc_nums = [base_val + float(o) for o in dev_match]
+                s_ranges.append([round(min(calc_nums), 4), round(max(calc_nums), 4)])
+
+        all_nums = [float(n) for n in re.findall(r"\d+\.?\d*", raw_spec)]
         noise = [350.0, 300.0, 200.0, 145.0, 130.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
-        # 免死金牌：緊貼 mm 的數字不准過濾
         clean_std = [n for n in all_nums if (n in mm_nums) or (n not in noise and n > 5)]
 
-        # 3. 💡 多重區間自動預算 (終極全兼容版：處理 ±, ~, +/- 偏差及無 mm 情況)
-        s_ranges = []
-        spec_parts = re.split(r"[一二三四五六]|[（(]\d+[)）]|[;；]", raw_spec)
-        
-        for part in spec_parts:
-            # 暴力去空格、去換行
-            clean_part = part.replace(" ", "").replace("\n", "").strip()
-            if not clean_part: continue
-            
-            # --- 邏輯 A：優先處理 ± (如 300±0.1 或 只有±0.1) ---
-            pm_match = re.search(r"(\d+\.?\d*)?±(\d+\.?\d*)", clean_part)
-            if pm_match:
-                base_str, offset_str = pm_match.group(1), pm_match.group(2)
-                b = float(base_str) if base_str else 0.0
-                o = float(offset_str)
-                s_ranges.append([round(b - o, 4), round(b + o, 4)])
-                continue # 處理完畢，跳過此段落後續判定
-
-            # --- 邏輯 B：處理波浪號區間 (如 101.64~101.66) ---
-            tilde_match = re.search(r"(\d+\.?\d*)[~～-](\d+\.?\d*)", clean_part)
-            if tilde_match:
-                n1, n2 = float(tilde_match.group(1)), float(tilde_match.group(2))
-                s_ranges.append([round(min(n1, n2), 4), round(max(n1, n2), 4)])
-                continue
-
-            # --- 邏輯 C：萬用偏移量解析 (處理 300 -0.34, +0.15 等所有情況) ---
-            # 1. 找出這段文字裡所有的數字 (包含小數)
-            all_numbers = re.findall(r"[-+]?\d+\.?\d*", clean_part)
-            if not all_numbers: continue
-
-            # 2. 判斷誰是「基底」。第一個沒有帶正負號的數字，或第一個帶 mm 的數字是基底。
-            # 我們採用最穩的做法：第一筆數字是基底，後續帶有 [+-] 的是偏移量
-            try:
-                base_val = float(all_numbers[0])
-                # 找出所有明確寫出 + 或 - 的偏移量
-                offsets = re.findall(r"([+-]\d+\.?\d*)", clean_part)
-                
-                if offsets:
-                    # 計算所有可能的端點
-                    endpoints = [round(base_val + float(o), 4) for o in offsets]
-                    # 有偏差時，基準值本身往往也是其中一個端點 (例如 +0.5)
-                    # 如果只有一個偏移量，補上基準值自己
-                    if len(endpoints) == 1: endpoints.append(base_val)
-                    s_ranges.append([min(endpoints), max(endpoints)])
-                else:
-                    # 只有單一數字 (如 160mm)
-                    if base_val > 10: # 過濾掉太小的雜訊數字
-                        s_ranges.append([base_val, base_val])
-            except: continue
-                    
-        # 4. 💡 預算基準 (移出循環)
         logic = item.get("sl", {})
         l_type = logic.get("lt", "")
         s_threshold = logic.get("t", 0)
-        
         un_regen_target = None
-        # 💡 增加 "未再生" 字串判斷，確保 AI 傳回中文標籤也能正確觸發
         if l_type in ["un_regen", "未再生"] or ("未再生" in (cat + title) and "軸頸" not in (cat + title)):
             cands = [n for n in clean_std if n >= 120.0]
             if s_threshold and float(s_threshold) >= 120.0: cands.append(float(s_threshold))
             if cands: un_regen_target = max(cands)
 
-        # --- 5. 開始逐一判定 (💡 注意：這裡開始必須正確縮排在 for 裡面) ---
-        for entry in raw_entries:
+        for entry in raw_data_list:
             if len(entry) < 2: continue
-            # 💡 同時去首尾空白與中間空格
-            rid = str(entry[0]).strip().replace(" ", "")
-            val_raw = str(entry[1]).strip().replace(" ", "")
-            
+            rid, val_raw = str(entry[0]).strip(), str(entry[1]).strip()
             if not val_raw or val_raw in ["N/A", "nan", "M10"]: continue
 
             try:
-                # 1. 💡 先定義基礎狀態
-                is_passed, reason, t_used, engine_label = True, "", "N/A", "未知"
-
-                # 2. 💡 [新增：磁碟壞軌偵測] 
-                # 優先檢查 AI 是否標記了 [!] (辨識不良)
+                # 💡 [功能]：壞軌偵測
                 if "[!]" in val_raw:
-                    is_passed = False
-                    reason = "🛑數據損壞(壞軌)：圖片該處辨識不良(汙點/遮擋/黏連)"
-                    val_str = "[!]"
-                    val = -999.0 # 給予一個不干擾計算的 dummy 值
+                    is_passed, reason, val_str, val = False, "🛑數據損壞(壞軌)", "[!]", -999.0
                 else:
-                    # 原本的正常取字與轉型邏輯
                     v_m = re.findall(r"\d+\.?\d*", val_raw)
                     val_str = v_m[0] if v_m else val_raw
                     val = float(val_str)
 
-                # 3. 💡 格式判定 (只有非壞軌數據才需要檢查)
                 if val_str != "[!]":
                     is_two_dec = "." in val_str and len(val_str.split(".")[-1]) == 2
                     is_pure_int = "." not in val_str
                 else:
-                    # 壞軌數據直接跳過格式檢查
                     is_two_dec, is_pure_int = True, True 
 
-                # --- 判定邏輯分流 ---
-                # A. 銲補
+                is_passed, reason, t_used, engine_label = True, "", "N/A", "未知"
+
+                # 💡 [功能 B]：由標題決定優先序
                 if "min_limit" in l_type or "銲補" in (cat + title):
                     engine_label = "銲補"
                     if not is_pure_int: is_passed, reason = False, "應為純整數"
@@ -574,215 +498,179 @@ def python_numerical_audit(dimension_data):
                         t_used = min(clean_std, key=lambda x: abs(x - val))
                         if val < t_used: is_passed, reason = False, "數值不足"
                 
-                # B. 未再生本體 (已整合 120mm 護欄)
-                elif un_regen_target is not None:
-                    engine_label = "未再生"
-                    t_used = un_regen_target
-                    if val <= t_used:
-                        if not is_pure_int: is_passed, reason = False, "應為整數"
-                    elif not is_two_dec: 
-                        is_passed, reason = False, "應填兩位小數"
+                elif l_type in ["un_regen", "max_limit"] or "未再生" in (cat + title):
+                    if "軸頸" in (cat + title):
+                        engine_label = "軸頸(上限)"
+                        candidates = [float(n) for n in (clean_std + [float(s_threshold) if s_threshold else 0])]
+                        target = max(candidates) if candidates else 0
+                        t_used = target
+                        if target > 0 and val > target: is_passed, reason = False, f"超過上限 {target}"
+                        if target > 0 and not is_pure_int: is_passed, reason = False, "應為純整數"
+                    else:
+                        engine_label = "未再生"
+                        if un_regen_target:
+                            t_used = un_regen_target
+                            if val <= un_regen_target:
+                                if not is_pure_int: is_passed, reason = False, "應為整數"
+                            elif not is_two_dec: is_passed, reason = False, "應填兩位小數"
 
-                # C. 軸頸上限
-                # 💡 確保不管是英文標籤還是中文標籤，只要有「軸頸」且有「未再生」就進來
-                elif l_type == "max_limit" or (("軸頸" in (cat + title)) and ("未再生" in (cat + title))):
-                    engine_label = "軸頸(上限)"
-                    candidates = [float(n) for n in (clean_std + [float(s_threshold) if s_threshold else 0])]
-                    target = max(candidates) if candidates else 0
-                    t_used = target
-                    if target > 0:
-                        if not is_pure_int: is_passed, reason = False, "應為純整數"
-                        elif val > target: is_passed, reason = False, f"超過上限 {target}"
-
-                # D. 精加工/區間
-                # 💡 只有在「完全沒有未再生」字眼時，才允許進入精加工判定
-                elif any(x in (cat + title) for x in ["再生", "精加工", "研磨", "車修", "組裝", "拆裝", "真圓度"]) and "未再生" not in (cat + title):
+                elif any(x in (cat + title) for x in ["再生", "精加工", "研磨", "車修", "組裝", "拆裝", "真圓度"]):
                     engine_label = "精加工"
-                    if not is_two_dec:
-                        is_passed, reason = False, "應填兩位小數"
+                    if not is_two_dec: is_passed, reason = False, "應填兩位小數"
                     elif s_ranges:
                         t_used = str(s_ranges)
-                        if not any(r[0] <= val <= r[1] for r in s_ranges): is_passed, reason = False, "不在區間內"
+                        is_passed = any(r[0] <= val <= r[1] for r in s_ranges)
+                        if not is_passed: reason = "不在區間內"
 
-                # --- 異常收集 ---
                 if not is_passed:
                     key = (page_num, title, reason)
                     if key not in grouped_errors:
-                        grouped_errors[key] = {
-                            "page": page_num, "item": title, 
-                            "issue_type": f"異常({engine_label})", 
-                            "common_reason": reason, "failures": []
-                        }
+                        grouped_errors[key] = {"page": page_num, "item": title, "issue_type": f"異常({engine_label})", "common_reason": reason, "failures": []}
                     grouped_errors[key]["failures"].append({"id": rid, "val": val_str, "target": f"基準:{t_used}"})
-            except: 
-                continue
-                
+            except: continue
     return list(grouped_errors.values())
     
+
+# ==========================================
+# 💰 模組二：Python 會計稽核引擎 (Accounting)
+# 負責：單項計數、軸頸限次、聚合對帳、運費精算
+# ==========================================
 def python_accounting_audit(dimension_data, res_main):
-    """
-    Python 會計官：執行單項核對、軸頸限次檢查、雙模式對帳、運費精算
-    """
     accounting_issues = []
     from thefuzz import fuzz
     from collections import Counter
     import re
 
-    # 💡 [輔助工具：安全轉型數字] 
+    # 💡 內部輔助函數：徹底過濾文字雜質，並識別壞軌 [!]
     def safe_float(value):
         if value is None or str(value).upper() == 'NULL': return 0.0
-        # 💡 [新增] 識別壞軌標記
-        if "[!]" in str(value): return "BAD_DATA" 
-        
-        cleaned = "".join(re.findall(r"[\d\.]+", str(value).replace(',', '')))
+        val_str = str(value).strip()
+        if "[!]" in val_str: return "DATA_DAMAGED" # 統一損毀標籤
+        cleaned = "".join(re.findall(r"[\d\.]+", val_str.replace(',', '')))
         try: return float(cleaned) if cleaned else 0.0
         except: return 0.0
 
-    # 1. 取得對帳基準 (來自左上角統計表)
+    # 1. 取得總表基準 (來自左上角統計表)
     summary_rows = res_main.get("summary_rows", [])
-    # 使用 safe_float 確保 target 是數字
     global_sum_tracker = {
         s['title']: {"target": safe_float(s['target']), "actual": 0, "details": []} 
         for s in summary_rows if s.get('title')
     }
     
-    # 💡 取得運費目標 (使用 safe_float 清洗)
+    # 取得運費目標 (清洗文字如 PC/項)
     freight_target = safe_float(res_main.get("freight_target", 0))
     freight_actual_sum = 0
     freight_details = []
 
-    # 2. 開始逐項過帳
+    # 2. 開始逐項遍歷
     for item in dimension_data:
         title = item.get("item_title", "")
         page = item.get("page", "?")
-        # 💡 [關鍵修正]：這裡改用 safe_float，AI 如果多寫了 "PC" 也不會出錯
         target_pc = safe_float(item.get("item_pc_target", 0)) 
         rules = item.get("accounting_rules", {})
         
-        # 💡 解開壓縮數據 ds
+        # 解開數據字串 ds
         ds = str(item.get("ds", ""))
         data_list = [pair.split(":") for pair in ds.split("|") if ":" in pair]
         if not data_list: continue
         
-        # 準備編號清單用於計數與重複檢查
         ids = [str(e[0]).strip() for e in data_list if len(e) > 0]
         id_counts = Counter(ids)
 
-        # --- 2.1 單項 PC 數核對 (含壞軌相容邏輯) ---
+        # --- 2.1 單項 PC 數核對 ---
         u_local = str(rules.get("local", ""))
         is_body = "本體" in title
         is_journal = any(k in title for k in ["軸頸", "內孔", "Journal"])
         
-        # 💡 [關鍵：判斷是否為重量計件 (KG)]
+        # 判斷是否為「重量模式 (KG)」
         is_weight_mode = "KG" in title.upper() or target_pc > 100
 
         if is_weight_mode:
-            # ⚖️ 重量模式：執行加總，並偵測是否有壞軌
+            # ⚖️ 重量模式：累加數值，偵測壞軌
             current_sum = 0
             has_bad_sector = False
             for e in data_list:
                 temp_val = safe_float(e[1])
-                if temp_val == "DATA_DAMAGED":
-                    has_bad_sector = True
-                else:
-                    current_sum += temp_val
-            
+                if temp_val == "DATA_DAMAGED": has_bad_sector = True
+                else: current_sum += temp_val
             actual_item_qty = current_sum
-            
             if has_bad_sector:
-                accounting_issues.append({
-                    "page": page, "item": title, "issue_type": "⚠️數據損毀",
-                    "common_reason": "包含無法辨識的重量數據，總重無法精確計算",
-                    "failures": [{"id": "警告", "val": "[!]", "calc": "數據損毀"}]
-                })
+                accounting_issues.append({"page": page, "item": title, "issue_type": "⚠️數據損毀", "common_reason": "包含無法辨識的重量數據"})
         else:
-            # 🔢 數量模式 (PC/SET)：正常點人頭，即使數據是 [!] 也算 1 支
-            if "1SET=4PCS" in u_local: 
-                actual_item_qty = len(data_list) / 4
-            elif "1SET=2PCS" in u_local: 
-                actual_item_qty = len(data_list) / 2
-            elif is_body or "PC=PC" in u_local: 
-                # 即使實測值是 [!]，只要 ID 還在，就會被納入去重計數
-                actual_item_qty = len(set(ids)) 
-            else: 
-                actual_item_qty = len(data_list)
+            # 🔢 數量模式 (PC/SET)
+            if "1SET=4PCS" in u_local: actual_item_qty = len(data_list) / 4
+            elif "1SET=2PCS" in u_local: actual_item_qty = len(data_list) / 2
+            elif is_body or "PC=PC" in u_local: actual_item_qty = len(set(ids)) # 本體去重
+            else: actual_item_qty = len(data_list)
 
-        # 執行單項數量比對
-        if actual_item_qty != target_pc and target_pc > 0:
+        # 單項數量報錯
+        if actual_item_qty != target_pc and target_pc > 0 and not is_weight_mode:
             accounting_issues.append({
                 "page": page, "item": title, "issue_type": "統計不符(單項)",
-                "common_reason": f"標題要求 {target_pc}PC，內文核算為 {actual_item_qty}",
-                "failures": [
-                    {"id": "項目標題目標", "val": target_pc, "calc": "目標"},
-                    {"id": "內文實際計數", "val": actual_item_qty, "calc": "實際"}
-                ],
-                "source": "🐍 會計引擎"
+                "common_reason": f"要求 {target_pc}PC，內文數到 {actual_item_qty}",
+                "failures": [{"id": "目標", "val": target_pc, "calc": "目標"}, {"id": "實際", "val": actual_item_qty, "calc": "實際"}]
             })
 
-        # --- 2.2 軸頸重複性檢查 ---
+        # --- 2.2 軸頸重複性檢查 (限2次) ---
         if is_journal:
             for rid, count in id_counts.items():
                 if count >= 3:
                     accounting_issues.append({
                         "page": page, "item": title, "issue_type": "🛑編號重複異常",
-                        "common_reason": f"編號 {rid} 出現 {count} 次，軸頸限 2 次",
+                        "common_reason": f"編號 {rid} 出現 {count} 次，違反限2次規定",
                         "failures": [{"id": rid, "val": count, "calc": "禁止超過2次"}]
                     })
 
         # --- 2.3 總表對帳 (A聚合/B一般) ---
         u_agg_raw = str(rules.get("agg", ""))
+        agg_parts = [p.strip() for p in u_agg_raw.split(",")]
+        is_exempt_from_basket = "豁免" in agg_parts
+        
         agg_multiplier = 1.0
-        conv = re.search(r"(\d+)SET=1PC", u_agg_raw)
-        if conv: agg_multiplier = 1.0 / float(conv.group(1))
+        for p in agg_parts:
+            conv = re.search(r"(\d+)SET=1PC", p)
+            if conv: agg_multiplier = 1.0 / float(conv.group(1))
 
         for s_title, data in global_sum_tracker.items():
-            # 聚合模式關鍵字
-            is_rep = any(k in s_title for k in ["ROLL車修"])
-            is_weld = "ROLL銲補" in s_title
-            is_assem = any(k in s_title for k in ["ROLL拆裝"])
+            # 聚合籃子定義
+            is_rep = any(k in s_title for k in ["ROLL車修", "再生"])
+            is_weld = "銲補" in s_title
+            is_assem = any(k in s_title for k in ["拆裝", "組裝"])
             
             match = False
-            if (is_rep or is_weld or is_assem) and "豁免" not in u_agg_raw:
-                if is_rep and any(k in title for k in ["未再生", "再生"]): match = True
+            # A 模式 (受豁免標籤影響)
+            if (is_rep or is_weld or is_assem) and not is_exempt_from_basket:
+                if is_rep and any(k in title for k in ["未再生", "再生", "研磨", "車修"]): match = True
                 elif is_weld and "銲補" in title: match = True
                 elif is_assem and any(k in title for k in ["拆裝", "組裝", "真圓度"]): match = True
-            
-            if not match and fuzz.partial_ratio(s_title, title) > 90: match = True
+            # B 模式 (名字對上即加，不受豁免影響)
+            if not match and fuzz.partial_ratio(s_title, title) > 85: match = True
 
             if match:
-                val_for_agg = actual_item_qty * agg_multiplier
-                data["actual"] += val_for_agg
-                data["details"].append({"id": f"{title} (P.{page})", "val": val_for_agg, "calc": "計入總帳"})
+                val_for_summary = actual_item_qty * agg_multiplier
+                data["actual"] += val_for_summary
+                data["details"].append({"id": f"{title} (P.{page})", "val": val_for_summary, "calc": "計入總帳"})
 
-        # --- 2.4 運費核對 ---
+        # --- 2.4 運費核對 (動態解析 XPC=1) ---
         u_fr = str(rules.get("freight", ""))
-        if "計入" in u_fr or ("本體" in title and "未再生" in title):
-            if "豁免" not in u_fr:
-                # 運費動態解析 XPC=1
-                fr_divisor = 1
-                fr_match = re.search(r"(\d+)PC=1", u_fr)
-                if fr_match: fr_divisor = int(fr_match.group(1))
-                
-                val_for_fr = actual_item_qty / fr_divisor
-                freight_actual_sum += val_for_fr
-                freight_details.append({"id": f"{title} (P.{page})", "val": val_for_fr, "calc": "計入運費"})
+        if ("計入" in u_fr or (is_body and "未再生" in title)) and "豁免" not in u_fr:
+            fr_div = 1.0
+            fr_match = re.search(r"(\d+)PC=1", u_fr)
+            if fr_match: fr_div = float(fr_match.group(1))
+            
+            val_for_fr = actual_item_qty / fr_div
+            freight_actual_sum += val_for_fr
+            freight_details.append({"id": f"{title} (P.{page})", "val": val_for_fr, "calc": "計入運費"})
 
-    # 3. 結算異常報告
+    # 3. 最終結算結報
     for s_title, data in global_sum_tracker.items():
         if abs(data["actual"] - data["target"]) > 0.01 and data["target"] > 0:
+            icon = "🚚" if "運費" in s_title else "🔍"
             accounting_issues.append({
-                "page": "總表", "item": s_title, "issue_type": "統計不符(總帳)",
-                "common_reason": f"標註 {data['target']} != 實際 {data['actual']}",
-                "failures": [{"id": "🔍 統計基準", "val": data["target"]}] + data["details"] + [{"id": "🧮 實際總計", "val": data["actual"]}]
+                "page": "總表", "item": s_title, "issue_type": "統計不符",
+                "common_reason": f"標註 {data['target']} != 加總 {data['actual']}",
+                "failures": [{"id": f"{icon} 基準", "val": data["target"]}] + data["details"] + [{"id": "🧮 總計", "val": data["actual"]}]
             })
-
-    if abs(freight_actual_sum - freight_target) > 0.01 and freight_target > 0:
-        accounting_issues.append({
-            "page": "總表", "item": "運費核對", "issue_type": "統計不符(運費)",
-            "common_reason": f"運費基準 {freight_target} != 實際 {freight_actual_sum}",
-            "failures": [{"id": "🚚 運費基準", "val": freight_target}] + freight_details + [{"id": "🧮 運費總計", "val": freight_actual_sum}]
-        })
-        
     return accounting_issues
     
 # --- 6. 手機版 UI 與 核心執行邏輯 ---
