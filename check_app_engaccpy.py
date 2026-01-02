@@ -374,108 +374,66 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
     # "response_mime_type": "application/json" # ⚡️ 暫時註解掉這行！
     }
 
+    
     try:
         genai.configure(api_key=api_key)
         
-        # ⚡️ 平衡配置：移除強制 JSON 模式以提升速度，改用 Python 手動解析
-        gen_config = {
-            "temperature": 0.0,
-            "max_output_tokens": 6000, 
-        }
-
-        # ⚡️ 解除安全攔截：防止 OCR 誤判 "中國販賣" 等字眼
-        safety = {
-            "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
-            "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
-            "HARM_CATEGORY_SEXUALLY_EXPLICIT": "BLOCK_NONE",
-            "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
-        }
-
+        # 2. 設定 AI (開啟 JSON 模式以確保成功率)
         model = genai.GenerativeModel(
             model_name=model_name,
-            generation_config=gen_config,
-            safety_settings=safety
+            generation_config={
+                "temperature": 0.0,            # 最穩定
+                "max_output_tokens": 8192,     # 給予足夠長度寫完大表
+                "response_mime_type": "application/json" # ⚡️ 強制 JSON 模式 (避免解析失敗)
+            },
+            safety_settings={
+                "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
+                "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
+                "HARM_CATEGORY_SEXUALLY_EXPLICIT": "BLOCK_NONE",
+                "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
+            }
         )
         
-        # 呼叫 AI
+        # 3. 呼叫 AI (這裡會跑 20-40 秒是正常的)
         with st.spinner('🤖 AI 正在全力抄寫數據中...'):
             response = model.generate_content([system_prompt, combined_input])
         
-        # 檢查 AI 是否被阻擋 (Prompt Feedback)
-        if response.prompt_feedback and response.prompt_feedback.block_reason:
-            return {"job_no": "Safety Blocked", "issues": [{"page": "N/A", "item": "安全性攔截", "issue_type": "攔截", "common_reason": f"原因: {response.prompt_feedback.block_reason}", "failures": []}], "dimension_data": []}
-
-        # 清洗內容：移除 Markdown 標記
+        # 4. 檢查是否有內容
         raw_content = response.text.strip()
-        if "```json" in raw_content:
-            raw_content = raw_content.split("```json")[1].split("```")[0].strip()
-        elif "```" in raw_content:
-            raw_content = raw_content.split("```")[1].split("```")[0].strip()
+        
+        # 移除可能的多餘標記 (雙重保險)
+        if raw_content.startswith("```json"):
+            raw_content = raw_content[7:]
+        if raw_content.endswith("```"):
+            raw_content = raw_content[:-3]
+        raw_content = raw_content.strip()
 
+        # 5. 解析 JSON
         parsed_data = json.loads(raw_content)
         
-        # 記錄 Token 使用量
+        # 記錄 Token
         parsed_data["_token_usage"] = {
             "input": response.usage_metadata.prompt_token_count, 
             "output": response.usage_metadata.candidates_token_count
         }
         return parsed_data
 
-    except Exception as e:
-        # 發生錯誤時，回傳完整的錯誤訊息以便 Debug
-        st.error(f"AI 模組發生錯誤: {str(e)}")
-        return {"job_no": f"Error: {str(e)}", "issues": [], "dimension_data": []}
-        
-        with st.spinner('🤖 AI 正在全力抄寫數據中... (數據量大時可能需要 30-60 秒)'):
-            # 這裡把 system_prompt 和 user content 放在一起傳送
-            response = model.generate_content([system_prompt, combined_input])
-        
-        # 3. 檢查回應是否被安全機制阻擋
-        if response.prompt_feedback and response.prompt_feedback.block_reason:
-            st.error(f"⚠️ AI 拒絕回答，原因: {response.prompt_feedback.block_reason}")
-            st.warning("偵測到可能的敏感關鍵字 (如：中國販賣)，已嘗試調整安全設定。")
-            return {"job_no": "Safety Blocked", "issues": [], "dimension_data": []}
-
-        raw_content = response.text
-        
-        # 4. 清洗 Markdown (雙重保險)
-        raw_content = raw_content.strip()
-        if raw_content.startswith("```json"):
-            raw_content = raw_content[7:]
-        if raw_content.endswith("```"):
-            raw_content = raw_content[:-3]
-        
-        parsed_data = json.loads(raw_content)
-        
-        # 補上 Token 用量
-        if hasattr(response, 'usage_metadata'):
-            parsed_data["_token_usage"] = {
-                "input": response.usage_metadata.prompt_token_count, 
-                "output": response.usage_metadata.candidates_token_count
-            }
-        return parsed_data
-
-    except ValueError as ve:
-        # 通常是 response.text 無法存取 (被擋掉時)
-        st.error("❌ AI 回應為空 (可能被安全性攔截)")
-        with st.expander("👀 查看安全回饋資訊"):
-            st.write(response.prompt_feedback)
-        return {"job_no": "Blocked", "issues": [], "dimension_data": []}
-
     except json.JSONDecodeError as e:
-        st.error(f"❌ JSON 解析失敗！(AI 回傳了非 JSON 格式)")
-        with st.expander("👀 查看 AI 到底回傳了什麼 (Debug)"):
+        # 🚨 這裡就是抓出「為什麼跑了29秒卻失敗」的關鍵
+        st.error("❌ JSON 解析失敗！請查看下方 AI 的原始回應：")
+        with st.expander("👀 點擊查看 AI 到底回傳了什麼"):
+            # 如果 AI 有回傳東西，印出來看
             if 'raw_content' in locals():
                 st.code(raw_content)
             elif 'response' in locals():
                 st.code(response.text)
-            else:
-                st.write("無法取得回應內容")
+        # 回傳錯誤結構，避免程式當機
         return {"job_no": "JSON Error", "issues": [], "dimension_data": []}
-        
+
     except Exception as e:
-        st.error(f"❌ 系統錯誤: {str(e)}")
-        return {"job_no": "Error", "issues": [], "dimension_data": []}
+        # 其他錯誤 (例如網路中斷、API 錯誤)
+        st.error(f"❌ 系統發生錯誤: {str(e)}")
+        return {"job_no": f"Error: {str(e)}", "issues": [], "dimension_data": []}
     
 # --- 重點：Python 引擎獨立於 agent 函式之外 ---
 
