@@ -573,7 +573,9 @@ def python_numerical_audit(dimension_data):
     
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官：權限分級版 (三大天王優先 + 來源標籤補完)
+    Python 會計官：全域門禁版 (修復同名誤判)
+    1. 擴充門禁：新增 "未再生" vs "再生" 的互斥檢查。
+    2. 全域執法：即使 Fuzzy 分數高達 99，只要觸犯門禁規則一律踢出。
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -619,7 +621,6 @@ def python_accounting_audit(dimension_data, res_main):
 
         # --- 2.1 單項數量計算 ---
         is_weight_mode = "KG" in title_clean.upper() or target_pc > 100
-
         if is_weight_mode:
             current_sum = 0
             has_bad_sector = False
@@ -631,14 +632,13 @@ def python_accounting_audit(dimension_data, res_main):
             if has_bad_sector:
                 accounting_issues.append({
                     "page": page, "item": raw_title, "issue_type": "⚠️數據損毀",
-                    "common_reason": "含無法辨識重量，總重可能有誤",
+                    "common_reason": "含無法辨識重量",
                     "failures": [{"id": "警告", "val": "[!]", "calc": "數據損毀"}],
-                    "source": "🐍 會計引擎" # 👈
+                    "source": "🐍 會計引擎"
                 })
         else:
             actual_item_qty = len(data_list) 
 
-        # 單項比對
         if actual_item_qty != target_pc and target_pc > 0:
             accounting_issues.append({
                 "page": page, "item": raw_title, "issue_type": "統計不符(單項)",
@@ -647,7 +647,7 @@ def python_accounting_audit(dimension_data, res_main):
                     {"id": "目標", "val": target_pc, "calc": "標題"},
                     {"id": "實際", "val": actual_item_qty, "calc": "內文計數"}
                 ],
-                "source": "🐍 會計引擎" # 👈
+                "source": "🐍 會計引擎"
             })
 
         # --- 2.2 編號重複性示警 ---
@@ -656,31 +656,48 @@ def python_accounting_audit(dimension_data, res_main):
                 if count > 1:
                      accounting_issues.append({
                         "page": page, "item": raw_title, "issue_type": "⚠️編號重複警示(本體)",
-                        "common_reason": f"本體編號 {rid} 重複 {count} 次 (應為獨一)",
+                        "common_reason": f"本體編號 {rid} 重複 {count} 次",
                         "failures": [{"id": rid, "val": count, "calc": "建議檢查"}],
-                        "source": "🐍 會計引擎" # 👈
+                        "source": "🐍 會計引擎"
                      })
         elif any(k in title_clean for k in ["軸頸", "內孔", "JOURNAL"]):
              for rid, count in id_counts.items():
                 if count > 2:
                      accounting_issues.append({
                         "page": page, "item": raw_title, "issue_type": "⚠️編號重複警示(軸頸)",
-                        "common_reason": f"軸頸編號 {rid} 出現 {count} 次 (一般限 2 次)",
+                        "common_reason": f"軸頸編號 {rid} 出現 {count} 次",
                         "failures": [{"id": rid, "val": count, "calc": "建議檢查"}],
-                        "source": "🐍 會計引擎" # 👈
+                        "source": "🐍 會計引擎"
                      })
 
-        # --- 2.3 總表對帳 (權限分級版) ---
+        # --- 2.3 總表對帳 (門禁升級版) ---
         for s_title, data in global_sum_tracker.items():
             match = False
             s_title_clean = clean_text(s_title)
             
-            # 🛑 權限檢查
+            # === 1. 定義門禁特徵 (Basket Constraints) ===
+            # A. 部位互斥
+            req_body = "本體" in s_title_clean
+            req_journal = any(k in s_title_clean for k in ["軸頸", "內孔", "JOURNAL"])
+            
+            # B. 製程互斥 (新增!!)
+            # 若籃子標題明確寫了 "未再生"，則項目必須也有 "未再生"
+            req_unregen = "未再生" in s_title_clean
+            # 若籃子標題寫了 "再生" 但沒寫 "未再生"，則項目絕不能有 "未再生"
+            req_regen_only = "再生" in s_title_clean and not req_unregen
+            
+            # === 2. 定義項目特徵 (Item Attributes) ===
+            is_item_body = "本體" in title_clean
+            is_item_journal = any(k in title_clean for k in ["軸頸", "內孔", "JOURNAL"])
+            is_item_unregen = "未再生" in title_clean
+            
+            # === 3. 執行匹配邏輯 ===
+            
+            # 優先級一：三大天王 (全卷掃描)
             is_main_disassembly = "ROLL拆裝" in s_title_clean 
             is_main_machining = "ROLL車修" in s_title_clean   
             is_main_welding = "ROLL銲補" in s_title_clean     
 
-            # === 優先級一：三大天王 (全卷掃描) ===
             if is_main_disassembly:
                 if "組裝" in title_clean or "拆裝" in title_clean: match = True
             
@@ -693,10 +710,23 @@ def python_accounting_audit(dimension_data, res_main):
                 has_part = "軸頸" in title_clean or "本體" in title_clean
                 if has_part and "銲補" in title_clean: match = True
             
-            # === 優先級二：普通籃子 (同名核對) ===
+            # 優先級二：普通籃子 (同名核對 + 強制門禁)
             else:
+                # 即使分數高達 99，門禁檢查不通過也無效
                 if fuzz.partial_ratio(s_title_clean, title_clean) > 90:
                     match = True
+                    
+                    # 👮‍♂️ [門禁檢查 A] 部位互斥
+                    # 籃子限本體，但項目不是本體 -> 踢出
+                    if req_body and not is_item_body: match = False
+                    # 籃子限軸頸，但項目不是軸頸 -> 踢出
+                    elif req_journal and not is_item_journal: match = False
+                    
+                    # 👮‍♂️ [門禁檢查 B] 再生/未再生互斥 (新功能)
+                    # 籃子是 "未再生"，項目卻沒寫 "未再生" -> 踢出 (可能是再生)
+                    if req_unregen and not is_item_unregen: match = False
+                    # 籃子是 "再生"(純)，項目卻寫了 "未再生" -> 踢出
+                    elif req_regen_only and is_item_unregen: match = False
 
             if match:
                 data["actual"] += actual_item_qty
@@ -715,7 +745,7 @@ def python_accounting_audit(dimension_data, res_main):
                 "page": "總表", "item": s_title, "issue_type": "統計不符(總帳)",
                 "common_reason": f"標註 {data['target']} != 實際 {data['actual']}",
                 "failures": [{"id": "🔍 基準", "val": data["target"]}] + data["details"] + [{"id": "🧮 實際", "val": data["actual"]}],
-                "source": "🐍 會計引擎" # 👈
+                "source": "🐍 會計引擎"
             })
 
     if abs(freight_actual_sum - freight_target) > 0.01 and freight_target > 0:
@@ -723,7 +753,7 @@ def python_accounting_audit(dimension_data, res_main):
             "page": "總表", "item": "運費核對", "issue_type": "統計不符(運費)",
             "common_reason": f"基準 {freight_target} != 實際 {freight_actual_sum}",
             "failures": [{"id": "🚚 基準", "val": freight_target}] + freight_details + [{"id": "🧮 實際", "val": freight_actual_sum}],
-            "source": "🐍 會計引擎" # 👈
+            "source": "🐍 會計引擎"
         })
         
     return accounting_issues
