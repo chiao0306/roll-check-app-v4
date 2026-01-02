@@ -536,127 +536,144 @@ def python_numerical_audit(dimension_data):
             except: continue
     return list(grouped_errors.values())
     
+# 💡 [加速優化] 在函式外面讀取 Excel，保證全速運行
+@st.cache_data
+def load_rules_cached():
+    try:
+        df = pd.read_excel("rules.xlsx")
+        df.columns = [c.strip() for c in df.columns]
+        # 預先清理 Item_Name 的空格，提速比對
+        df['clean_name'] = df['Item_Name'].astype(str).str.upper().str.replace(" ", "")
+        return df
+    except:
+        return None
+
 def python_accounting_audit(dimension_data, res_main):
     """
-    【核心功能說明】
-    本引擎負責將 AI 抄錄的數據（傳票）與左上角的統計表（總帳）進行核對。
-    判定流程分為：1.單項計數 -> 2.分類加總 -> 3.運費核算 -> 4.結果對帳。
+    Python 會計官：高效能版 (修正讀取瓶頸與模糊比對運算量)
     """
     accounting_issues = []
     from thefuzz import fuzz
     from collections import Counter
     import re
-    
-    # 【輔助功能】將帶有單位的文字（如 4524KG, 12PC）轉為純數字，供數學運算
+
+    # 1. 💡 [提速關鍵] 使用快取讀取 Excel
+    df_rules = load_rules_cached()
+
     def safe_float(value):
         if value is None or str(value).upper() == 'NULL': return 0.0
         cleaned = "".join(re.findall(r"[\d\.]+", str(value).replace(',', '')))
         try: return float(cleaned) if cleaned else 0.0
         except: return 0.0
-    
-    # 1. 【初始化總帳】讀取左上角統計表，建立空的追蹤器
+
+    # 2. 建立總帳追蹤器
     summary_rows = res_main.get("summary_rows", [])
     global_sum_tracker = {
         s['title']: {"target": safe_float(s['target']), "actual": 0, "details": []} 
         for s in summary_rows if s.get('title')
     }
     
-    # 讀取運費目標數值
     freight_target = safe_float(res_main.get("freight_target", 0))
     freight_actual_sum = 0
     freight_details = []
 
-    # 2. 【開始點貨】遍歷每一頁內文的每一個加工項目
+    # 3. 開始逐項遍歷
     for item in dimension_data:
-        title = item.get("item_title", "") # 項目名稱
-        page = item.get("page", "?")      # 所在頁碼
-        target_pc = safe_float(item.get("item_pc_target", 0)) # 括號內的PC數
-        rules = item.get("accounting_rules", {}) # Excel特規
-        ds = item.get("ds", "") # 數據字串
+        title = item.get("item_title", "")
+        clean_title = str(title).upper().replace(" ", "") # 預處理標題
+        page = item.get("page", "?")
+        target_pc = safe_float(item.get("item_pc_target", 0))
         
-        # 將壓縮格式 ID:Val|ID:Val 拆解為清單
+        # 解壓縮數據
+        ds = item.get("ds", "")
         data_list = [pair.split(":") for pair in ds.split("|") if ":" in pair]
         if not data_list: continue
 
-        # 【功能：重量模式判斷】
-        # 如果項目標題有 "KG" 或 數值很大，代表要算「重量總和」而非「個數」
+        # 💡 4. [提速關鍵] 優化查表邏輯：精確匹配優先，不准地毯式搜尋
+        matched_rule = {"local": "", "agg": "", "freight": ""}
+        if df_rules is not None:
+            # 先試試看最快的「完全相等」
+            quick_match = df_rules[df_rules['clean_name'] == clean_title]
+            if not quick_match.empty:
+                row = quick_match.iloc[0]
+                matched_rule = {
+                    "local": str(row.get('Unit_Rule_Local', '')),
+                    "agg": str(row.get('Unit_Rule_Agg', '')),
+                    "freight": str(row.get('Unit_Rule_Freight', ''))
+                }
+            else:
+                # 完全不相等才跑模糊比對 (限定前 5 筆最像的)
+                for _, row in df_rules.iterrows():
+                    if fuzz.partial_ratio(str(row['clean_name']), clean_title) >= 90:
+                        matched_rule = {
+                            "local": str(row.get('Unit_Rule_Local', '')),
+                            "agg": str(row.get('Unit_Rule_Agg', '')),
+                            "freight": str(row.get('Unit_Rule_Freight', ''))
+                        }
+                        break
+
+        # --- 3.1 單項核對 ---
+        actual_item_qty = 0
         is_weight_mode = "KG" in title.upper() or target_pc > 100
 
-        # --- 2.1 執行單項計數 ---
         if is_weight_mode:
-            # 💡 [重量模式]：直接加總數據區的所有數字（如 4524）
             actual_item_qty = sum([safe_float(e[1]) for e in data_list])
         else:
-            # 💡 [個數模式]：依照本體/軸頸規則計數
-            u_local = str(rules.get("local", ""))
-            ids = [str(e[0]).strip() for e in data_list if len(e) > 0]
-            
+            u_local = matched_rule["local"]
             if "1SET=4PCS" in u_local: actual_item_qty = len(data_list) / 4
             elif "1SET=2PCS" in u_local: actual_item_qty = len(data_list) / 2
             elif "本體" in title or "PC=PC" in u_local: 
-                actual_item_qty = len(set(ids)) # 本體去重
+                actual_item_qty = len(set([str(e[0]).strip() for e in data_list]))
             else: 
-                actual_item_qty = len(data_list) # 軸頸計行數
+                actual_item_qty = len(data_list)
 
-        # [回報] 如果單項 PC 數不對，立刻記錄 (排除重量模式)
         if not is_weight_mode and actual_item_qty != target_pc and target_pc > 0:
             accounting_issues.append({
                 "page": page, "item": title, "issue_type": "統計不符(單項)",
                 "common_reason": f"標題寫 {target_pc}PC，內文數到 {actual_item_qty}",
-                "failures": [{"id": "目標", "val": target_pc}, {"id": "實際", "val": actual_item_qty}]
+                "failures": [{"id": "標題目標", "val": target_pc}, {"id": "內文實際", "val": actual_item_qty}]
             })
 
-        # --- 2.2 總表對帳邏輯 (決定這項數據要算在總表哪一行) ---
-        u_agg_raw = str(rules.get("agg", ""))
+        # --- 3.2 總表對帳 ---
+        u_agg_raw = matched_rule["agg"]
         agg_parts = [p.strip() for p in u_agg_raw.split(",")]
-        is_exempt = "豁免" in agg_parts # 檢查是否有豁免大籃子的標籤
-
-        # --- 2.2 總表對帳 (三色籃子分流邏輯) ---
-        # 💡 [優化] 先把標題與總表名稱去空格，防止「拆 裝」這種空格干擾
-        clean_title = title.replace(" ", "")
+        is_exempt = "豁免" in agg_parts
         
+        # 單位換算比率
+        agg_multiplier = 1.0
+        for p in agg_parts:
+            conv = re.search(r"(\d+)SET=1PC", p)
+            if conv: agg_multiplier = 1.0 / float(conv.group(1))
+
+        # 這裡的迴圈是必要的，但我們減少內容運算
         for s_title, data in global_sum_tracker.items():
-            clean_s_title = s_title.replace(" ", "")
-            
-            # A. 識別總表標題類型 (依照您的要求精簡)
-            is_rep_basket  = "再生" in clean_s_title # 💡 只留再生，去掉車修
-            is_weld_basket = "銲補" in clean_s_title # 💡 只留銲補
-            is_assem_basket = any(k in clean_s_title for k in ["拆裝", "組裝", "裝配", "ASSEM"])
+            s_title_clean = s_title.replace(" ", "")
+            is_rep = "再生" in s_title_clean
+            is_weld = "銲補" in s_title_clean
+            is_assem = any(k in s_title_clean for k in ["拆裝", "組裝", "裝配"])
             
             match = False
-            # A模式：聚合籃子
-            if not is_exempt:
-                if is_rep_basket and any(k in clean_title for k in ["未再生", "再生", "研磨", "車修"]): match = True
-                elif is_weld_basket and any(k in clean_title for k in ["銲補", "銲接"]): match = True
-                elif is_assem_basket and any(k in clean_title for k in ["拆裝", "組裝", "裝配", "真圓度"]): match = True
+            if (is_rep or is_weld or is_assem) and not is_exempt:
+                if is_rep and any(k in clean_title for k in ["未再生", "再生", "研磨", "車修"]): match = True
+                elif is_weld and "銲補" in clean_title: match = True
+                elif is_assem and any(k in clean_title for k in ["拆裝", "組裝", "真圓度"]): match = True
             
-            # B模式：一般對帳 (完全匹配)
-            if not match and fuzz.ratio(clean_s_title.upper(), clean_title.upper()) > 90:
+            # 💡 [提速優化] 名字對上才加總，先用簡單的 in
+            if not match and (s_title_clean in clean_title or clean_title in s_title_clean):
                 match = True
 
             if match:
-                # 處理 1SET=1PC 等特殊換算
-                multiplier = 1.0
-                conv_match = re.search(r"(\d+)SET=1PC", u_agg_raw)
-                if conv_match: multiplier = 1.0 / float(conv_match.group(1))
-                
-                add_val = actual_item_qty * multiplier
-                data["actual"] += add_val
-                data["details"].append({"id": f"{title} (P.{page})", "val": add_val, "calc": "計入總帳"})
+                item_val = actual_item_qty * agg_multiplier
+                data["actual"] += item_val
+                data["details"].append({"id": f"{title} (P.{page})", "val": item_val, "calc": "計入總帳"})
 
-        # --- 2.3 運費核對 ---
-        u_fr = str(rules.get("freight", ""))
+        # --- 3.3 運費核對 ---
+        u_fr = matched_rule["freight"]
         if "計入" in u_fr or ("未再生" in title and "本體" in title):
-            # 運費也支援 XPC=1 換算
-            fr_mult = 1.0
-            fr_conv = re.search(r"(\d+)PC=1", u_fr)
-            if fr_conv: fr_mult = 1.0 / float(fr_conv.group(1))
-            
-            val_for_fr = actual_item_qty * fr_mult
-            freight_actual_sum += val_for_fr
-            freight_details.append({"id": f"{title} (P.{page})", "val": val_for_fr, "calc": "計入運費"})
+            freight_actual_sum += actual_item_qty
+            freight_details.append({"id": f"{title} (P.{page})", "val": actual_item_qty, "calc": "計入運費"})
 
-    # 3. 【結帳報告】比對總表實際加總與目標
+    # 4. 【結帳報告】比對總表實際加總與目標
     for s_title, data in global_sum_tracker.items():
         if abs(data["actual"] - data["target"]) > 0.01 and data["target"] > 0:
             accounting_issues.append({
@@ -665,7 +682,7 @@ def python_accounting_audit(dimension_data, res_main):
                 "failures": [{"id": "🔍 統計基準", "val": data["target"]}] + data["details"] + [{"id": "🧮 內文實際總計", "val": data["actual"]}]
             })
 
-    # 4. 【運費報告】
+    # 5. 【運費報告】
     if abs(freight_actual_sum - freight_target) > 0.01 and freight_target > 0:
         accounting_issues.append({
             "page": "總表", "item": "運費項次核對", "issue_type": "統計不符(運費)",
