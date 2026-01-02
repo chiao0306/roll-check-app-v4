@@ -317,10 +317,12 @@ def python_header_check(photo_gallery):
     return issues, extracted_data
 
 def agent_unified_check(combined_input, full_text_for_search, api_key, model_name):
+    import re # 確保引用 Regex 套件
+    
     # 讀取規則
     dynamic_rules = get_dynamic_rules(full_text_for_search)
 
-    # Prompt: 簡潔明瞭，不囉嗦
+    # Prompt: 強調只回傳 JSON，並給出範例
     system_prompt = f"""
     你是一位極度嚴謹的中鋼機械品管【數據抄錄員】。
     
@@ -337,21 +339,19 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
        - 再生/研磨 -> range
 
     #### 輸出格式：
-    請務必回傳單一合法的 JSON 物件。
+    請務必回傳單一合法的 JSON 物件。不要使用 Markdown 標記，不要說廢話。
     ⚠️ 為了節省空間，請【不要】回傳 accounting_rules 和 sl 欄位。
     """
     
     try:
         genai.configure(api_key=api_key)
         
-        # ⚡️ 設定關鍵：
-        # 1. 拿掉 response_mime_type (避免卡住)
-        # 2. 加上 safety_settings (避免被關鍵字攔截)
+        # 設定 AI
         model = genai.GenerativeModel(
             model_name=model_name,
             generation_config={
-                "temperature": 0.1,             # 微微的溫度讓回應更流暢
-                "max_output_tokens": 16384,     # 給夠空間，但不用開到 6萬
+                "temperature": 0.1,             
+                "max_output_tokens": 16384,     
             },
             safety_settings={
                 "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
@@ -361,21 +361,24 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
             }
         )
         
-        # 呼叫 AI (一次處理全部，回到您習慣的速度)
+        # 呼叫 AI
         with st.spinner('🤖 AI 正在全卷分析中...'):
             response = model.generate_content([system_prompt, combined_input])
         
-        # 4. 清洗與解析
+        # --- ⚡️ 關鍵修改：暴力清洗 JSON ---
         raw_content = response.text.strip()
         
-        # 手動拆除 Markdown (比叫 AI 拆快且穩)
-        if "```json" in raw_content:
-            raw_content = raw_content.split("```json")[1].split("```")[0].strip()
-        elif "```" in raw_content:
-            raw_content = raw_content.split("```")[1].split("```")[0].strip()
-
-        parsed_data = json.loads(raw_content)
+        # 1. 使用 Regex 尋找最外層的 { }
+        # dotall=True 讓 . 可以匹配換行符號
+        match = re.search(r"\{.*\}", raw_content, re.DOTALL)
         
+        if match:
+            clean_json = match.group(0)
+            parsed_data = json.loads(clean_json)
+        else:
+            # 如果連大括號都找不到，那才是真的沒救了
+            raise ValueError("AI 回傳的內容找不到 JSON 括號")
+            
         parsed_data["_token_usage"] = {
             "input": response.usage_metadata.prompt_token_count, 
             "output": response.usage_metadata.candidates_token_count
@@ -383,12 +386,13 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
         return parsed_data
 
     except Exception as e:
-        # 發生錯誤直接報錯，不要回傳 Unknown
-        st.error(f"❌ 分析發生錯誤: {str(e)}")
-        # 嘗試印出原始內容幫助除錯
+        # 發生錯誤直接報錯，並把 AI 原始文字印出來給你看
+        st.error(f"❌ 分析發生錯誤 (有 Token 但解析失敗): {str(e)}")
+        
         if 'raw_content' in locals():
-            with st.expander("👀 原始回應內容"):
-                st.code(raw_content)
+            with st.expander("👀 點我查看 AI 原始產出 (Debug)"):
+                st.code(raw_content) # 這裡可以看到 AI 到底寫了什麼
+                
         return {"job_no": f"Error: {str(e)}", "issues": [], "dimension_data": []}
 
 # --- 重點：Python 引擎獨立於 agent 函式之外 ---
