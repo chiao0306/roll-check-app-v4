@@ -539,19 +539,31 @@ def python_numerical_audit(dimension_data):
     
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官：負責所有數量的精確對帳與運費計算
+    Python 會計官：執行單項核對、軸頸限次檢查、雙模式對帳、運費精算
     """
     accounting_issues = []
     from thefuzz import fuzz
     from collections import Counter
     import re
 
+    # 💡 [輔助工具：安全轉型數字] 
+    # 防止 AI 傳回 "16PC" 導致 Python 運算當機
+    def safe_float(value):
+        if value is None or str(value).upper() == 'NULL': return 0.0
+        cleaned = "".join(re.findall(r"[\d\.]+", str(value).replace(',', '')))
+        try: return float(cleaned) if cleaned else 0.0
+        except: return 0.0
+
     # 1. 取得對帳基準 (來自左上角統計表)
     summary_rows = res_main.get("summary_rows", [])
-    global_sum_tracker = {s['title']: {"target": s['target'], "actual": 0, "details": []} for s in summary_rows if s.get('title')}
+    # 使用 safe_float 確保 target 是數字
+    global_sum_tracker = {
+        s['title']: {"target": safe_float(s['target']), "actual": 0, "details": []} 
+        for s in summary_rows if s.get('title')
+    }
     
-    # 💡 取得運費目標 (左上角)
-    freight_target = res_main.get("freight_target", 0)
+    # 💡 取得運費目標 (使用 safe_float 清洗)
+    freight_target = safe_float(res_main.get("freight_target", 0))
     freight_actual_sum = 0
     freight_details = []
 
@@ -559,7 +571,8 @@ def python_accounting_audit(dimension_data, res_main):
     for item in dimension_data:
         title = item.get("item_title", "")
         page = item.get("page", "?")
-        target_pc = item.get("item_pc_target", 0)
+        # 💡 [關鍵修正]：這裡改用 safe_float，AI 如果多寫了 "PC" 也不會出錯
+        target_pc = safe_float(item.get("item_pc_target", 0)) 
         rules = item.get("accounting_rules", {})
         
         # 💡 解開壓縮數據 ds
@@ -571,7 +584,7 @@ def python_accounting_audit(dimension_data, res_main):
         ids = [str(e[0]).strip() for e in data_list if len(e) > 0]
         id_counts = Counter(ids)
 
-        # --- 2.1 單項 PC 數核對 (Local Rule) ---
+        # --- 2.1 單項 PC 數核對 ---
         u_local = str(rules.get("local", ""))
         is_body = "本體" in title
         is_journal = any(k in title for k in ["軸頸", "內孔", "Journal"])
@@ -584,11 +597,11 @@ def python_accounting_audit(dimension_data, res_main):
         if actual_item_qty != target_pc and target_pc > 0:
             accounting_issues.append({
                 "page": page, "item": title, "issue_type": "統計不符(單項)",
-                "common_reason": f"要求 {target_pc}PC，內文數到 {actual_item_qty}",
+                "common_reason": f"要求 {target_pc}PC，內文核算為 {actual_item_qty}",
                 "failures": [{"id": "標題目標", "val": target_pc}, {"id": "內文計數", "val": actual_item_qty}]
             })
 
-        # --- 2.2 軸頸重複性檢查 (限 2 次) ---
+        # --- 2.2 軸頸重複性檢查 ---
         if is_journal:
             for rid, count in id_counts.items():
                 if count >= 3:
@@ -601,39 +614,42 @@ def python_accounting_audit(dimension_data, res_main):
         # --- 2.3 總表對帳 (A聚合/B一般) ---
         u_agg_raw = str(rules.get("agg", ""))
         agg_multiplier = 1.0
-        # 解析單位換算
         conv = re.search(r"(\d+)SET=1PC", u_agg_raw)
         if conv: agg_multiplier = 1.0 / float(conv.group(1))
 
         for s_title, data in global_sum_tracker.items():
+            # 聚合模式關鍵字
             is_rep = any(k in s_title for k in ["ROLL車修"])
-            is_weld = "ROLL車修" in s_title
+            is_weld = "ROLL銲補" in s_title
             is_assem = any(k in s_title for k in ["ROLL拆裝"])
             
             match = False
-            # A 模式：聚合籃子
             if (is_rep or is_weld or is_assem) and "豁免" not in u_agg_raw:
                 if is_rep and any(k in title for k in ["未再生", "再生"]): match = True
                 elif is_weld and "銲補" in title: match = True
                 elif is_assem and any(k in title for k in ["拆裝", "組裝", "真圓度"]): match = True
-            # B 模式：名字直接對帳
-            if not match and fuzz.partial_ratio(s_title, title) > 85: match = True
+            
+            if not match and fuzz.partial_ratio(s_title, title) > 90: match = True
 
             if match:
                 val_for_agg = actual_item_qty * agg_multiplier
                 data["actual"] += val_for_agg
                 data["details"].append({"id": f"{title} (P.{page})", "val": val_for_agg, "calc": "計入總帳"})
 
-        # --- 2.4 💡 運費核對 (Freight Check - 補回) ---
+        # --- 2.4 運費核對 ---
         u_fr = str(rules.get("freight", ""))
-        # 規則：全卷「本體」+「未再生」之項目
         if "計入" in u_fr or ("本體" in title and "未再生" in title):
             if "豁免" not in u_fr:
-                freight_actual_sum += actual_item_qty
-                freight_details.append({"id": f"{title} (P.{page})", "val": actual_item_qty, "calc": "計入運費"})
+                # 運費動態解析 XPC=1
+                fr_divisor = 1
+                fr_match = re.search(r"(\d+)PC=1", u_fr)
+                if fr_match: fr_divisor = int(fr_match.group(1))
+                
+                val_for_fr = actual_item_qty / fr_divisor
+                freight_actual_sum += val_for_fr
+                freight_details.append({"id": f"{title} (P.{page})", "val": val_for_fr, "calc": "計入運費"})
 
-    # 3. 結算最終結果報告
-    # 總表報告
+    # 3. 結算異常報告
     for s_title, data in global_sum_tracker.items():
         if abs(data["actual"] - data["target"]) > 0.01 and data["target"] > 0:
             accounting_issues.append({
@@ -642,7 +658,6 @@ def python_accounting_audit(dimension_data, res_main):
                 "failures": [{"id": "🔍 統計基準", "val": data["target"]}] + data["details"] + [{"id": "🧮 實際總計", "val": data["actual"]}]
             })
 
-    # 運費報告
     if abs(freight_actual_sum - freight_target) > 0.01 and freight_target > 0:
         accounting_issues.append({
             "page": "總表", "item": "運費核對", "issue_type": "統計不符(運費)",
