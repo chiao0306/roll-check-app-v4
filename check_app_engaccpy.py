@@ -490,7 +490,8 @@ def python_numerical_audit(dimension_data):
         s_threshold = logic.get("t", 0)
         
         un_regen_target = None
-        if "un_regen" in l_type or ("未再生" in (cat + title) and "軸頸" not in (cat + title)):
+        # 💡 增加 "未再生" 字串判斷，確保 AI 傳回中文標籤也能正確觸發
+        if l_type in ["un_regen", "未再生"] or ("未再生" in (cat + title) and "軸頸" not in (cat + title)):
             cands = [n for n in clean_std if n >= 120.0]
             if s_threshold and float(s_threshold) >= 120.0: cands.append(float(s_threshold))
             if cands: un_regen_target = max(cands)
@@ -533,7 +534,8 @@ def python_numerical_audit(dimension_data):
                         is_passed, reason = False, "應填兩位小數"
 
                 # C. 軸頸上限
-                elif "max_limit" in l_type or ("軸頸" in cat and "未再生" in cat):
+                # 💡 確保不管是英文標籤還是中文標籤，只要有「軸頸」且有「未再生」就進來
+                elif l_type == "max_limit" or (("軸頸" in (cat + title)) and ("未再生" in (cat + title))):
                     engine_label = "軸頸(上限)"
                     candidates = [float(n) for n in (clean_std + [float(s_threshold) if s_threshold else 0])]
                     target = max(candidates) if candidates else 0
@@ -543,7 +545,8 @@ def python_numerical_audit(dimension_data):
                         elif val > target: is_passed, reason = False, f"超過上限 {target}"
 
                 # D. 精加工/區間
-                elif any(x in (cat + title) for x in ["再生", "精加工", "研磨", "車修", "組裝", "拆裝", "真圓度"]):
+                # 💡 只有在「完全沒有未再生」字眼時，才允許進入精加工判定
+                elif any(x in (cat + title) for x in ["再生", "精加工", "研磨", "車修", "組裝", "拆裝", "真圓度"]) and "未再生" not in (cat + title):
                     engine_label = "精加工"
                     if not is_two_dec:
                         is_passed, reason = False, "應填兩位小數"
