@@ -705,7 +705,7 @@ def python_accounting_audit(dimension_data, res_main):
             else:
                 # 使用 Fuzzy Match 進行同名核對
                 # 因為 "本體銲補" 跟 "軸頸銲補" 相似度不高，所以不會誤抓
-                if fuzz.partial_ratio(s_title_clean, title_clean) > 90:
+                if fuzz.partial_ratio(s_title_clean, title_clean) > 94:
                     match = True
 
             # 如果命中，就丟進籃子
