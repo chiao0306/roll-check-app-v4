@@ -573,20 +573,20 @@ def python_numerical_audit(dimension_data):
     
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官：全域門禁 + 運費規則升級版
-    1. 運費邏輯：讀取 rules.xlsx，支援「豁免」、「X=1 換算」。
-    2. 啟動條件：只有當 freight_target > 0 時才計算運費。
-    3. 預設邏輯：若無特殊規則，抓「本體 + 未再生」。
+    Python 會計官：全域門禁 + 運費智慧核對版
+    1. 運費邏輯：優先讀取 rules.xlsx (豁免/換算)，無規則時走預設邏輯。
+    2. 預設邏輯：全卷「本體」且「未再生」的項目計入運費。
+    3. 清洗升級：標題移除引號，提高 Excel 匹配率。
     """
     accounting_issues = []
     from thefuzz import fuzz
     from collections import Counter
     import re
-    import pandas as pd # 確保有匯入 pandas
+    import pandas as pd 
 
-    # 🧽 真空清洗工具
+    # 🧽 真空清洗工具 (升級：連引號都洗掉，確保 Excel 查表無死角)
     def clean_text(text):
-        return str(text).replace(" ", "").replace("\n", "").replace("\r", "").strip()
+        return str(text).replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
 
     # 安全轉型工具
     def safe_float(value):
@@ -599,15 +599,15 @@ def python_accounting_audit(dimension_data, res_main):
     # 0. 預載 Excel 規則 (用於運費查表)
     rules_dict = {}
     try:
+        # 嘗試讀取 rules.xlsx，若失敗則 rules_dict 為空，程式不會崩潰
         df = pd.read_excel("rules.xlsx")
         df.columns = [c.strip() for c in df.columns]
-        # 建立簡單的查找字典 { "項目名稱": "運費規則" }
         for _, row in df.iterrows():
             iname = str(row.get('Item_Name', '')).strip()
             u_fr = str(row.get('Unit_Rule_Freight', '')).strip()
             if iname: rules_dict[clean_text(iname)] = u_fr
     except:
-        pass # 如果讀不到檔或失敗，就用空字典 (走預設邏輯)
+        pass 
 
     # 1. 取得對帳基準
     summary_rows = res_main.get("summary_rows", [])
@@ -685,23 +685,20 @@ def python_accounting_audit(dimension_data, res_main):
                         "source": "🐍 會計引擎"
                      })
 
-        # --- 2.3 總表對帳 (全域門禁版) ---
+        # --- 2.3 總表對帳 (門禁版) ---
         for s_title, data in global_sum_tracker.items():
             match = False
             s_title_clean = clean_text(s_title)
             
-            # 定義門禁特徵
             req_body = "本體" in s_title_clean
             req_journal = any(k in s_title_clean for k in ["軸頸", "內孔", "JOURNAL"])
             req_unregen = "未再生" in s_title_clean
             req_regen_only = "再生" in s_title_clean and not req_unregen
             
-            # 定義項目特徵
             is_item_body = "本體" in title_clean
             is_item_journal = any(k in title_clean for k in ["軸頸", "內孔", "JOURNAL"])
             is_item_unregen = "未再生" in title_clean
             
-            # 優先級一：三大天王
             is_main_disassembly = "ROLL拆裝" in s_title_clean 
             is_main_machining = "ROLL車修" in s_title_clean   
             is_main_welding = "ROLL銲補" in s_title_clean     
@@ -715,12 +712,9 @@ def python_accounting_audit(dimension_data, res_main):
             elif is_main_welding:
                 has_part = "軸頸" in title_clean or "本體" in title_clean
                 if has_part and "銲補" in title_clean: match = True
-            
-            # 優先級二：普通籃子
             else:
                 if fuzz.partial_ratio(s_title_clean, title_clean) > 90:
                     match = True
-                    # 門禁檢查
                     if req_body and not is_item_body: match = False
                     elif req_journal and not is_item_journal: match = False
                     if req_unregen and not is_item_unregen: match = False
@@ -730,52 +724,56 @@ def python_accounting_audit(dimension_data, res_main):
                 data["actual"] += actual_item_qty
                 data["details"].append({"id": f"{raw_title} (P.{page})", "val": actual_item_qty, "calc": "計入"})
 
-        # --- 2.4 運費核對 (Excel 規則升級版) ---
-        # 💡 啟動條件：只有運費籃子存在 (target > 0) 才做這件事
+        # --- 2.4 運費智慧核對 ---
+        # 💡 啟動條件：總表有設定運費目標 (Target > 0)
         if freight_target > 0:
             
-            # A. 查找 Excel 規則
-            # 先嘗試完全匹配，若無則嘗試 Fuzzy 查找
+            # Step A: 查找 Excel 規則
+            # 優先找完全匹配 (清洗後)，若無則用 Fuzzy 找最像的
             u_fr = rules_dict.get(title_clean, "")
-            if not u_fr:
-                # 若找不到完全匹配，試試看 Fuzzy (對應 Excel 裡的 Item Name)
-                # 這裡簡單掃描 rules_dict 的 keys
+            
+            if not u_fr and rules_dict:
+                # 若完全匹配失敗，嘗試 Fuzzy Search
                 best_score = 0
                 for k, v in rules_dict.items():
-                    score = fuzz.partial_ratio(k, title_clean)
-                    if score > 90 and score > best_score:
+                    score = fuzz.ratio(k, title_clean) # 使用 ratio 全字匹配較安全
+                    if score > 95 and score > best_score:
                         best_score = score
                         u_fr = v
             
-            # B. 判斷邏輯
-            # 1. 豁免權：有 "豁免" 就直接跳過
+            # Step B: 判斷是否計入
+            # 1. 豁免權：Excel 寫了 "豁免" -> 不計入
             is_exempt = "豁免" in str(u_fr)
             
-            # 2. 強制換算權：有 "X=1" (如 4PC=1, 4=1)
-            # Regex 抓取 "數字" = 1
-            conv_match = re.search(r"(\d+)\s*(?:PC|SET)?\s*=\s*1", str(u_fr), re.IGNORECASE)
+            # 2. 強制換算權：Excel 寫了 "X=1" (如 4PC=1, 4=1)
+            # Regex 抓取 "數字 = 1" 的模式
+            conv_match = re.search(r"(\d+)\s*(?:PC|SET|PCS)?\s*=\s*1", str(u_fr), re.IGNORECASE)
             
-            # 3. 預設底線：本體 + 未再生
+            # 3. 預設底線：全卷 「本體」且「未再生」
             is_default_target = "本體" in title_clean and "未再生" in title_clean
 
             should_count = False
             divisor = 1.0
 
             if is_exempt:
-                should_count = False
+                should_count = False # Excel 說免運 -> 聽 Excel 的
             elif conv_match:
-                should_count = True
+                should_count = True  # Excel 說要換算 -> 聽 Excel 的
                 divisor = float(conv_match.group(1))
             elif is_default_target:
-                should_count = True
+                should_count = True  # Excel 沒說話 -> 走預設 (本體+未再生)
                 divisor = 1.0
             
             if should_count:
                 val_for_fr = actual_item_qty / divisor
                 freight_actual_sum += val_for_fr
-                # 為了讓報表好看，如果有除數要顯示出來
-                calc_note = "計入運費" if divisor == 1 else f"計入(/{int(divisor)})"
-                freight_details.append({"id": f"{raw_title}", "val": val_for_fr, "calc": calc_note})
+                
+                # 顯示備註
+                note = "計入運費"
+                if divisor != 1: note = f"計入 (/{int(divisor)})"
+                elif u_fr: note = f"計入 (Rule:{u_fr})"
+                
+                freight_details.append({"id": f"{raw_title}", "val": val_for_fr, "calc": note})
 
     # 3. 結算異常
     for s_title, data in global_sum_tracker.items():
