@@ -369,7 +369,7 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
     
     generation_config = {"response_mime_type": "application/json", "temperature": 0.0}
     
-        try:
+    try:
         genai.configure(api_key=api_key)
         
         # 1. 設定生成配置 (強制 JSON + 提高 Token)
