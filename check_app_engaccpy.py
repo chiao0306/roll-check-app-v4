@@ -479,10 +479,24 @@ def python_numerical_audit(dimension_data):
             
             # A. 優先找 基準 ± 偏移 (如 300±0.1)
             pm_full = re.search(r"(\d+\.?\d*)±(\d+\.?\d*)", clean_part)
-            # B. 找 孤立的 ± 偏移 (如 真圓度±0.1) -> 代表 [0, 0.1]
+            # B. 找 孤立的 ± 偏移 (如 ±0.1)
             pm_lone = re.search(r"±(\d+\.?\d*)", clean_part)
-            # C. 找 mm 基底 (如 160mm)
+            # 💡 C. [新增] 找 波浪號區間 (如 101.64~101.66)
+            tilde_range = re.search(r"(\d+\.?\d*)[~～-](\d+\.?\d*)", clean_part)
+            # D. 找 mm 基底 (如 160mm)
             base_mm = re.search(r"(\d+\.?\d*)mm", clean_part)
+            
+            if pm_full:
+                b, o = float(pm_full.group(1)), float(pm_full.group(2))
+                s_ranges.append([round(b - o, 4), round(b + o, 4)])
+            elif pm_lone:
+                s_ranges.append([0.0, float(pm_lone.group(1))]) 
+            elif tilde_range:
+                # 💡 解析波浪號兩端的數字
+                n1, n2 = float(tilde_range.group(1)), float(tilde_range.group(2))
+                s_ranges.append([round(min(n1, n2), 4), round(max(n1, n2), 4)])
+            elif base_mm:
+                # ... (後續原有的 offsets 處理邏輯保持不變)
             
             if pm_full:
                 b, o = float(pm_full.group(1)), float(pm_full.group(2))
