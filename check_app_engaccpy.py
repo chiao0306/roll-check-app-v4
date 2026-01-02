@@ -433,7 +433,7 @@ def python_numerical_audit(dimension_data):
     if not dimension_data: return []
 
     for item in dimension_data:
-        # 1. 取得數據 (DS 格式)
+        # 1. 取得數據
         ds = str(item.get("ds", ""))
         if not ds: continue
         raw_entries = [p.split(":") for p in ds.split("|") if ":" in p]
@@ -443,20 +443,21 @@ def python_numerical_audit(dimension_data):
         page_num = item.get("page", "?")
         raw_spec = str(item.get("std_spec", "")).replace('"', "")
         
-        # 2. 🛡️ 數據清洗與 mm 定位
-        mm_nums = [float(n) for n in re.findall(r"(\d+\.?\d*)\s*mm", raw_spec)]
-        all_nums = [float(n) for n in re.findall(r"(\d+\.?\d*)", raw_spec)]
-        noise = [350.0, 300.0, 200.0, 145.0, 130.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
-        # 免死金牌：緊貼 mm 的數字不准過濾
-        clean_std = [n for n in all_nums if (n in mm_nums) or (n not in noise and n > 5)]
+        # 2. 🛡️ 數據清洗
+        all_nums = [float(n) for n in re.findall(r"[-+]?\d+\.?\d*", raw_spec.replace(" ", ""))]
+        # 雜訊過濾表 (常見的非規格數字)
+        noise = [350.0, 300.0, 200.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+        # 建立一個乾淨的數字池供後續比對 (只留 >5 且非雜訊的)
+        clean_std = [n for n in all_nums if (n not in noise and n > 5)]
 
-        # 3. 💡 多重區間自動預算 (雙規格/多基準強力版)
+        # 3. 💡 多重區間自動預算 (修復版：不切分逗號)
         s_ranges = []
-        # 強化切分邏輯：加入逗號與頓號
-        spec_parts = re.split(r"[一二三四五六]|[123456]\.|\d+[\.、]|[;；,，]", raw_spec)
+        # ⚡️ 修正點：移除 [;；,，] 中的逗號與頓號，避免把公差切斷
+        # 只用「項目編號」或「分號」來切分不同規格
+        spec_parts = re.split(r"[一二三四五六]|[123456]\.|\d+[\.]|[;；]", raw_spec)
         
         for part in spec_parts:
-            # 暴力去空格、去換行
+            # 暴力去空格：讓 "-0. 13" 變成 "-0.13"
             clean_part = part.replace(" ", "").replace("\n", "").strip()
             if not clean_part: continue
             
@@ -466,47 +467,51 @@ def python_numerical_audit(dimension_data):
                 b = float(pm_match.group(1)) if pm_match.group(1) else 0.0
                 o = float(pm_match.group(2))
                 s_ranges.append([round(b - o, 4), round(b + o, 4)])
-                continue 
+                continue
 
             # --- 邏輯 B：處理波浪號區間 (如 101.64~101.66) ---
             tilde_match = re.search(r"(\d+\.?\d*)[~～-](\d+\.?\d*)", clean_part)
-            # 只有當兩個數字位數接近時才視為區間 (避免把 160-0.01 誤判為 160~0.01)
             if tilde_match:
                 n1, n2 = float(tilde_match.group(1)), float(tilde_match.group(2))
+                # 簡單防呆：兩個數字不能差太多 (避免把 160-0.01 誤判為區間)
                 if abs(n1 - n2) < n1 * 0.5: 
                     s_ranges.append([round(min(n1, n2), 4), round(max(n1, n2), 4)])
                     continue
 
-            # --- 邏輯 C：萬用多基準解析 (解決 160...130... 雙規格) ---
-            # 1. 找出這段文字裡所有的數字
-            all_numbers = re.findall(r"[-+]?\d+\.?\d*", clean_part)
-            if not all_numbers: continue
-
-            # 2. 抓取所有偏移量 (例如 -0.014)
+            # --- 邏輯 C：萬用多基準解析 (解決 140 -0.01, -0.03) ---
+            # 1. 找出所有偏移量 (帶有 + 或 - 的數字)
             offsets = re.findall(r"([+-]\d+\.?\d*)", clean_part)
             offset_vals = [float(o) for o in offsets]
             
-            # 3. 抓取所有「可能是基準」的大數字 (大於10且不等於偏移量)
-            # 這是解決您問題的核心：同時抓出 160 和 130
+            # 2. 找出所有「基準值」 (大於10，且不是剛剛抓到的偏移量)
+            # 這裡用原本的 clean_part 抓數字，確保不會因為去空格而亂掉
+            potential_bases = re.findall(r"[-+]?\d+\.?\d*", clean_part)
             base_vals = []
-            for n_str in all_numbers:
+            
+            for n_str in potential_bases:
                 try:
                     val = float(n_str)
-                    if val > 10.0 and val not in offset_vals: # 過濾掉像 0.03 這種小數
+                    # 條件：大於10 且 不在偏移量列表中 (用絕對值比對更準)
+                    is_offset = False
+                    for o in offset_vals:
+                        if abs(val - o) < 0.0001: is_offset = True
+                    
+                    if val > 10.0 and not is_offset:
                         base_vals.append(val)
                 except: continue
             
-            # 4. 組合基準與偏移
+            # 3. 組合：讓每個基準值都去加上所有的偏移量
             for b_val in base_vals:
                 if offset_vals:
-                    # 如果有偏移量，計算範圍
                     endpoints = [round(b_val + o, 4) for o in offset_vals]
+                    # 如果只有一個偏移量 (如 +0.5)，通常隱含另一個端點是基準本身
+                    # 但如果是兩個偏移量 (如 -0.01, -0.03)，就取這兩個為邊界
                     if len(endpoints) == 1: endpoints.append(b_val)
                     s_ranges.append([min(endpoints), max(endpoints)])
                 else:
-                    # 只有單一數字，無公差 (例如只寫 160mm)
+                    # 只有基準沒有偏移 -> 視為單一值 (嚴格相等)
                     s_ranges.append([b_val, b_val])
-                    
+
         # 4. 💡 預算基準 (移出循環)
         logic = item.get("sl", {})
         l_type = logic.get("lt", "")
@@ -529,7 +534,6 @@ def python_numerical_audit(dimension_data):
             try:
                 is_passed, reason, t_used, engine_label = True, "", "N/A", "未知"
 
-                # 壞軌偵測
                 if "[!]" in val_raw:
                     is_passed = False
                     reason = "🛑數據損壞(壞軌)"
@@ -540,14 +544,12 @@ def python_numerical_audit(dimension_data):
                     val_str = v_m[0] if v_m else val_raw
                     val = float(val_str)
 
-                # 格式判定
                 if val_str != "[!]":
                     is_two_dec = "." in val_str and len(val_str.split(".")[-1]) == 2
                     is_pure_int = "." not in val_str
                 else:
                     is_two_dec, is_pure_int = True, True 
 
-                # --- 判定邏輯分流 ---
                 if "min_limit" in l_type or "銲補" in (cat + title):
                     engine_label = "銲補"
                     if not is_pure_int: is_passed, reason = False, "應為純整數"
@@ -578,7 +580,7 @@ def python_numerical_audit(dimension_data):
                         is_passed, reason = False, "應填兩位小數"
                     elif s_ranges:
                         t_used = str(s_ranges)
-                        # 💡 核心修正：只要落在「任何一個」解析出的區間內，就算 Pass
+                        # 💡 核心：只要符合任何一個解析出的區間就算合格
                         if not any(r[0] <= val <= r[1] for r in s_ranges): 
                             is_passed, reason = False, "不在區間內"
 
@@ -591,8 +593,7 @@ def python_numerical_audit(dimension_data):
                             "common_reason": reason, "failures": []
                         }
                     grouped_errors[key]["failures"].append({"id": rid, "val": val_str, "target": f"基準:{t_used}"})
-            except: 
-                continue
+            except: continue
                 
     return list(grouped_errors.values())
     
