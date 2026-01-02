@@ -432,7 +432,7 @@ def python_numerical_audit(dimension_data):
         if not ds: continue
         raw_entries = [p.split(":") for p in ds.split("|") if ":" in p]
         
-        # 🧽 [修正] 強制清洗標題與分類，確保邏輯判斷無死角
+        # 🧽 強制清洗標題與分類
         title = str(item.get("item_title", "")).replace(" ", "").replace("\n", "").replace('"', "")
         cat = str(item.get("category", "")).replace(" ", "").strip()
         
@@ -445,7 +445,7 @@ def python_numerical_audit(dimension_data):
         noise = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 0.0] 
         clean_std = [n for n in all_nums if (n not in noise and n > 10)]
 
-        # 3. 💡 多重區間自動預算 (保留之前的修復：不切分小數點)
+        # 3. 💡 多重區間自動預算
         s_ranges = []
         spec_parts = re.split(r"[一二三四五六]|[;；]", raw_spec)
         
@@ -469,7 +469,7 @@ def python_numerical_audit(dimension_data):
                     s_ranges.append([round(min(n1, n2), 4), round(max(n1, n2), 4)])
                     continue
 
-            # 邏輯 C：智慧配對 (解決 140 -0.01, -0.03)
+            # 邏輯 C：智慧配對
             all_tokens = re.findall(r"[-+]?\d+\.?\d*", clean_part)
             if not all_tokens: continue
 
@@ -489,12 +489,9 @@ def python_numerical_audit(dimension_data):
                     else:
                         s_ranges.append([b, b])
 
-        # 4. 💡 預算基準 (Logic 變數的處理)
-        # 這裡雖然 AI 已經不輸出了，但保留代碼無害，且我們主要依賴 cat + title 判定
-        s_threshold = 0 # 預設為 0，因為 AI 不輸出了
-        
+        # 4. 💡 預算基準
+        s_threshold = 0
         un_regen_target = None
-        # 使用清洗後的 cat 和 title 判斷
         if cat in ["un_regen", "未再生"] or ("未再生" in (cat + title) and "軸頸" not in (cat + title)):
             cands = [n for n in clean_std if n >= 120.0]
             if cands: un_regen_target = max(cands)
@@ -526,7 +523,7 @@ def python_numerical_audit(dimension_data):
                 else:
                     is_two_dec, is_pure_int = True, True 
 
-                # 使用清洗後的字串進行匹配
+                # 判定邏輯
                 if "min_limit" in cat or "銲補" in (cat + title):
                     engine_label = "銲補"
                     if not is_pure_int: is_passed, reason = False, "應為純整數"
@@ -551,7 +548,6 @@ def python_numerical_audit(dimension_data):
                         if not is_pure_int: is_passed, reason = False, "應為純整數"
                         elif val > target: is_passed, reason = False, f"超過上限 {target}"
 
-                # 精加工：確保判斷字串也是乾淨的
                 elif any(x in (cat + title) for x in ["再生", "精加工", "研磨", "車修", "組裝", "拆裝", "真圓度"]) and "未再生" not in (cat + title):
                     engine_label = "精加工"
                     if not is_two_dec:
@@ -567,7 +563,8 @@ def python_numerical_audit(dimension_data):
                         grouped_errors[key] = {
                             "page": page_num, "item": title, 
                             "issue_type": f"異常({engine_label})", 
-                            "common_reason": reason, "failures": []
+                            "common_reason": reason, "failures": [],
+                            "source": "🐍 工程引擎" # 👈 兇手就是少了這一行！補上後就不會顯示空標籤了
                         }
                     grouped_errors[key]["failures"].append({"id": rid, "val": val_str, "target": f"基準:{t_used}"})
             except: continue
@@ -576,9 +573,7 @@ def python_numerical_audit(dimension_data):
     
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官：權限分級版
-    1. 只有 "ROLL拆裝/車修/銲補" 三大天王籃子，才有資格啟動全卷掃描。
-    2. 其他籃子一律走 "同名模糊比對"，避免誤抓。
+    Python 會計官：權限分級版 (三大天王優先 + 來源標籤補完)
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -611,11 +606,10 @@ def python_accounting_audit(dimension_data, res_main):
     # 2. 逐項過帳
     for item in dimension_data:
         raw_title = item.get("item_title", "")
-        title_clean = clean_text(raw_title) # 清洗後的標題用於判斷
+        title_clean = clean_text(raw_title) 
         page = item.get("page", "?")
         target_pc = safe_float(item.get("item_pc_target", 0)) 
         
-        # 解開數據 ds
         ds = str(item.get("ds", ""))
         data_list = [pair.split(":") for pair in ds.split("|") if ":" in pair]
         if not data_list: continue
@@ -623,7 +617,7 @@ def python_accounting_audit(dimension_data, res_main):
         ids = [str(e[0]).strip() for e in data_list if len(e) > 0]
         id_counts = Counter(ids)
 
-        # --- 2.1 單項數量計算 (絕對計數) ---
+        # --- 2.1 單項數量計算 ---
         is_weight_mode = "KG" in title_clean.upper() or target_pc > 100
 
         if is_weight_mode:
@@ -638,10 +632,11 @@ def python_accounting_audit(dimension_data, res_main):
                 accounting_issues.append({
                     "page": page, "item": raw_title, "issue_type": "⚠️數據損毀",
                     "common_reason": "含無法辨識重量，總重可能有誤",
-                    "failures": [{"id": "警告", "val": "[!]", "calc": "數據損毀"}]
+                    "failures": [{"id": "警告", "val": "[!]", "calc": "數據損毀"}],
+                    "source": "🐍 會計引擎" # 👈
                 })
         else:
-            actual_item_qty = len(data_list) # 不去重，有幾行算幾行
+            actual_item_qty = len(data_list) 
 
         # 單項比對
         if actual_item_qty != target_pc and target_pc > 0:
@@ -652,7 +647,7 @@ def python_accounting_audit(dimension_data, res_main):
                     {"id": "目標", "val": target_pc, "calc": "標題"},
                     {"id": "實際", "val": actual_item_qty, "calc": "內文計數"}
                 ],
-                "source": "🐍 會計引擎"
+                "source": "🐍 會計引擎" # 👈
             })
 
         # --- 2.2 編號重複性示警 ---
@@ -662,7 +657,8 @@ def python_accounting_audit(dimension_data, res_main):
                      accounting_issues.append({
                         "page": page, "item": raw_title, "issue_type": "⚠️編號重複警示(本體)",
                         "common_reason": f"本體編號 {rid} 重複 {count} 次 (應為獨一)",
-                        "failures": [{"id": rid, "val": count, "calc": "建議檢查"}]
+                        "failures": [{"id": rid, "val": count, "calc": "建議檢查"}],
+                        "source": "🐍 會計引擎" # 👈
                      })
         elif any(k in title_clean for k in ["軸頸", "內孔", "JOURNAL"]):
              for rid, count in id_counts.items():
@@ -670,7 +666,8 @@ def python_accounting_audit(dimension_data, res_main):
                      accounting_issues.append({
                         "page": page, "item": raw_title, "issue_type": "⚠️編號重複警示(軸頸)",
                         "common_reason": f"軸頸編號 {rid} 出現 {count} 次 (一般限 2 次)",
-                        "failures": [{"id": rid, "val": count, "calc": "建議檢查"}]
+                        "failures": [{"id": rid, "val": count, "calc": "建議檢查"}],
+                        "source": "🐍 會計引擎" # 👈
                      })
 
         # --- 2.3 總表對帳 (權限分級版) ---
@@ -678,37 +675,29 @@ def python_accounting_audit(dimension_data, res_main):
             match = False
             s_title_clean = clean_text(s_title)
             
-            # 🛑 權限檢查：只有包含 "ROLL..." 的籃子才是三大天王
-            is_main_disassembly = "ROLL拆裝" in s_title_clean # 必須包含 "ROLL拆裝"
-            is_main_machining = "ROLL車修" in s_title_clean   # 必須包含 "ROLL車修"
-            is_main_welding = "ROLL銲補" in s_title_clean     # 必須包含 "ROLL銲補"
+            # 🛑 權限檢查
+            is_main_disassembly = "ROLL拆裝" in s_title_clean 
+            is_main_machining = "ROLL車修" in s_title_clean   
+            is_main_welding = "ROLL銲補" in s_title_clean     
 
             # === 優先級一：三大天王 (全卷掃描) ===
-            
             if is_main_disassembly:
-                # 規則：全卷含 "組裝" 或 "拆裝"
                 if "組裝" in title_clean or "拆裝" in title_clean: match = True
             
             elif is_main_machining:
-                # 規則：全卷 (軸頸 或 本體) + (再生 或 未再生)
                 has_part = "軸頸" in title_clean or "本體" in title_clean
                 has_action = "再生" in title_clean or "未再生" in title_clean
                 if has_part and has_action: match = True
             
             elif is_main_welding:
-                # 規則：全卷 (軸頸 或 本體) + (銲補)
                 has_part = "軸頸" in title_clean or "本體" in title_clean
                 if has_part and "銲補" in title_clean: match = True
             
             # === 優先級二：普通籃子 (同名核對) ===
-            # 如果不是三大天王 (例如 "本體銲補"、"軸頸再生")，就走這條路
             else:
-                # 使用 Fuzzy Match 進行同名核對
-                # 因為 "本體銲補" 跟 "軸頸銲補" 相似度不高，所以不會誤抓
-                if fuzz.partial_ratio(s_title_clean, title_clean) > 94:
+                if fuzz.partial_ratio(s_title_clean, title_clean) > 90:
                     match = True
 
-            # 如果命中，就丟進籃子
             if match:
                 data["actual"] += actual_item_qty
                 data["details"].append({"id": f"{raw_title} (P.{page})", "val": actual_item_qty, "calc": "計入"})
@@ -725,14 +714,16 @@ def python_accounting_audit(dimension_data, res_main):
             accounting_issues.append({
                 "page": "總表", "item": s_title, "issue_type": "統計不符(總帳)",
                 "common_reason": f"標註 {data['target']} != 實際 {data['actual']}",
-                "failures": [{"id": "🔍 基準", "val": data["target"]}] + data["details"] + [{"id": "🧮 實際", "val": data["actual"]}]
+                "failures": [{"id": "🔍 基準", "val": data["target"]}] + data["details"] + [{"id": "🧮 實際", "val": data["actual"]}],
+                "source": "🐍 會計引擎" # 👈
             })
 
     if abs(freight_actual_sum - freight_target) > 0.01 and freight_target > 0:
         accounting_issues.append({
             "page": "總表", "item": "運費核對", "issue_type": "統計不符(運費)",
             "common_reason": f"基準 {freight_target} != 實際 {freight_actual_sum}",
-            "failures": [{"id": "🚚 基準", "val": freight_target}] + freight_details + [{"id": "🧮 實際", "val": freight_actual_sum}]
+            "failures": [{"id": "🚚 基準", "val": freight_target}] + freight_details + [{"id": "🧮 實際", "val": freight_actual_sum}],
+            "source": "🐍 會計引擎" # 👈
         })
         
     return accounting_issues
@@ -814,7 +805,7 @@ def python_process_audit(dimension_data):
                         "val": f"後段:{nxt['val']} < 前段:{curr['val']}", 
                         "calc": "不符物理演進邏輯"
                     }],
-                    "source": "🐍 系統判定"
+                    "source": "🐍 流程引擎""
                 })
     return process_issues
     
