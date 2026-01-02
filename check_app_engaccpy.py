@@ -573,14 +573,16 @@ def python_numerical_audit(dimension_data):
     
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官：全域門禁版 (修復同名誤判)
-    1. 擴充門禁：新增 "未再生" vs "再生" 的互斥檢查。
-    2. 全域執法：即使 Fuzzy 分數高達 99，只要觸犯門禁規則一律踢出。
+    Python 會計官：全域門禁 + 運費規則升級版
+    1. 運費邏輯：讀取 rules.xlsx，支援「豁免」、「X=1 換算」。
+    2. 啟動條件：只有當 freight_target > 0 時才計算運費。
+    3. 預設邏輯：若無特殊規則，抓「本體 + 未再生」。
     """
     accounting_issues = []
     from thefuzz import fuzz
     from collections import Counter
     import re
+    import pandas as pd # 確保有匯入 pandas
 
     # 🧽 真空清洗工具
     def clean_text(text):
@@ -593,6 +595,19 @@ def python_accounting_audit(dimension_data, res_main):
         cleaned = "".join(re.findall(r"[\d\.]+", str(value).replace(',', '')))
         try: return float(cleaned) if cleaned else 0.0
         except: return 0.0
+
+    # 0. 預載 Excel 規則 (用於運費查表)
+    rules_dict = {}
+    try:
+        df = pd.read_excel("rules.xlsx")
+        df.columns = [c.strip() for c in df.columns]
+        # 建立簡單的查找字典 { "項目名稱": "運費規則" }
+        for _, row in df.iterrows():
+            iname = str(row.get('Item_Name', '')).strip()
+            u_fr = str(row.get('Unit_Rule_Freight', '')).strip()
+            if iname: rules_dict[clean_text(iname)] = u_fr
+    except:
+        pass # 如果讀不到檔或失敗，就用空字典 (走預設邏輯)
 
     # 1. 取得對帳基準
     summary_rows = res_main.get("summary_rows", [])
@@ -670,73 +685,97 @@ def python_accounting_audit(dimension_data, res_main):
                         "source": "🐍 會計引擎"
                      })
 
-        # --- 2.3 總表對帳 (門禁升級版) ---
+        # --- 2.3 總表對帳 (全域門禁版) ---
         for s_title, data in global_sum_tracker.items():
             match = False
             s_title_clean = clean_text(s_title)
             
-            # === 1. 定義門禁特徵 (Basket Constraints) ===
-            # A. 部位互斥
+            # 定義門禁特徵
             req_body = "本體" in s_title_clean
             req_journal = any(k in s_title_clean for k in ["軸頸", "內孔", "JOURNAL"])
-            
-            # B. 製程互斥 (新增!!)
-            # 若籃子標題明確寫了 "未再生"，則項目必須也有 "未再生"
             req_unregen = "未再生" in s_title_clean
-            # 若籃子標題寫了 "再生" 但沒寫 "未再生"，則項目絕不能有 "未再生"
             req_regen_only = "再生" in s_title_clean and not req_unregen
             
-            # === 2. 定義項目特徵 (Item Attributes) ===
+            # 定義項目特徵
             is_item_body = "本體" in title_clean
             is_item_journal = any(k in title_clean for k in ["軸頸", "內孔", "JOURNAL"])
             is_item_unregen = "未再生" in title_clean
             
-            # === 3. 執行匹配邏輯 ===
-            
-            # 優先級一：三大天王 (全卷掃描)
+            # 優先級一：三大天王
             is_main_disassembly = "ROLL拆裝" in s_title_clean 
             is_main_machining = "ROLL車修" in s_title_clean   
             is_main_welding = "ROLL銲補" in s_title_clean     
 
             if is_main_disassembly:
                 if "組裝" in title_clean or "拆裝" in title_clean: match = True
-            
             elif is_main_machining:
                 has_part = "軸頸" in title_clean or "本體" in title_clean
                 has_action = "再生" in title_clean or "未再生" in title_clean
                 if has_part and has_action: match = True
-            
             elif is_main_welding:
                 has_part = "軸頸" in title_clean or "本體" in title_clean
                 if has_part and "銲補" in title_clean: match = True
             
-            # 優先級二：普通籃子 (同名核對 + 強制門禁)
+            # 優先級二：普通籃子
             else:
-                # 即使分數高達 99，門禁檢查不通過也無效
                 if fuzz.partial_ratio(s_title_clean, title_clean) > 90:
                     match = True
-                    
-                    # 👮‍♂️ [門禁檢查 A] 部位互斥
-                    # 籃子限本體，但項目不是本體 -> 踢出
+                    # 門禁檢查
                     if req_body and not is_item_body: match = False
-                    # 籃子限軸頸，但項目不是軸頸 -> 踢出
                     elif req_journal and not is_item_journal: match = False
-                    
-                    # 👮‍♂️ [門禁檢查 B] 再生/未再生互斥 (新功能)
-                    # 籃子是 "未再生"，項目卻沒寫 "未再生" -> 踢出 (可能是再生)
                     if req_unregen and not is_item_unregen: match = False
-                    # 籃子是 "再生"(純)，項目卻寫了 "未再生" -> 踢出
                     elif req_regen_only and is_item_unregen: match = False
 
             if match:
                 data["actual"] += actual_item_qty
                 data["details"].append({"id": f"{raw_title} (P.{page})", "val": actual_item_qty, "calc": "計入"})
 
-        # --- 2.4 運費核對 ---
-        if "本體" in title_clean or "計入" in title_clean or "運費" in title_clean:
-             if "豁免" not in title_clean:
-                freight_actual_sum += actual_item_qty
-                freight_details.append({"id": f"{raw_title}", "val": actual_item_qty, "calc": "計入運費"})
+        # --- 2.4 運費核對 (Excel 規則升級版) ---
+        # 💡 啟動條件：只有運費籃子存在 (target > 0) 才做這件事
+        if freight_target > 0:
+            
+            # A. 查找 Excel 規則
+            # 先嘗試完全匹配，若無則嘗試 Fuzzy 查找
+            u_fr = rules_dict.get(title_clean, "")
+            if not u_fr:
+                # 若找不到完全匹配，試試看 Fuzzy (對應 Excel 裡的 Item Name)
+                # 這裡簡單掃描 rules_dict 的 keys
+                best_score = 0
+                for k, v in rules_dict.items():
+                    score = fuzz.partial_ratio(k, title_clean)
+                    if score > 90 and score > best_score:
+                        best_score = score
+                        u_fr = v
+            
+            # B. 判斷邏輯
+            # 1. 豁免權：有 "豁免" 就直接跳過
+            is_exempt = "豁免" in str(u_fr)
+            
+            # 2. 強制換算權：有 "X=1" (如 4PC=1, 4=1)
+            # Regex 抓取 "數字" = 1
+            conv_match = re.search(r"(\d+)\s*(?:PC|SET)?\s*=\s*1", str(u_fr), re.IGNORECASE)
+            
+            # 3. 預設底線：本體 + 未再生
+            is_default_target = "本體" in title_clean and "未再生" in title_clean
+
+            should_count = False
+            divisor = 1.0
+
+            if is_exempt:
+                should_count = False
+            elif conv_match:
+                should_count = True
+                divisor = float(conv_match.group(1))
+            elif is_default_target:
+                should_count = True
+                divisor = 1.0
+            
+            if should_count:
+                val_for_fr = actual_item_qty / divisor
+                freight_actual_sum += val_for_fr
+                # 為了讓報表好看，如果有除數要顯示出來
+                calc_note = "計入運費" if divisor == 1 else f"計入(/{int(divisor)})"
+                freight_details.append({"id": f"{raw_title}", "val": val_for_fr, "calc": calc_note})
 
     # 3. 結算異常
     for s_title, data in global_sum_tracker.items():
