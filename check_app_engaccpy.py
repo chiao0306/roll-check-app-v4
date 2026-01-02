@@ -891,7 +891,7 @@ if st.session_state.photo_gallery:
                 "ai_extracted_data": dim_data,
                 "python_debug_data": python_debug_data,
                 "full_text_for_search": combined_input # 補回這行以免報錯
-                 "combined_input": combined_input  # ✅ 確保這一行一定要在！
+                "combined_input": combined_input  # ✅ 確保這一行一定要在！
             }
             status_box.update(label="✅ 分析完成！", state="complete", expanded=False)
             st.rerun()
