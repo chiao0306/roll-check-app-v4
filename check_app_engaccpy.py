@@ -939,14 +939,20 @@ if st.session_state.photo_gallery:
                 except Exception as e:
                     return index, None, None, str(e)
 
-            # 數據收集
+                        # 數據收集
             with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
                 futures = [executor.submit(process_task, i, item) for i, item in enumerate(st.session_state.photo_gallery)]
                 for future in concurrent.futures.as_completed(futures):
                     idx, h_txt, f_txt, err = future.result()
                     if not err:
                         st.session_state.photo_gallery[idx].update({'header_text': h_txt, 'full_text': f_txt, 'file': None})
+                    else:
+                        # ⚡️ 新增：如果有錯誤，顯示出來，不要裝沒事
+                        st.error(f"第 {idx+1} 頁 OCR 失敗: {err}")
+                        st.session_state.photo_gallery[idx].update({'full_text': f"[OCR FAILED] {err}", 'header_text': "Error"})
+                    
                     progress_bar.progress((idx + 1) / total_imgs)
+
 
             ocr_duration = time.time() - ocr_start
             combined_input = ""
@@ -975,23 +981,31 @@ if st.session_state.photo_gallery:
             
             # 存入快取
             usage = res_main.get("_token_usage", {"input": 0, "output": 0})
+            
+            # ⚡️ 修正：先檢查是否有嚴重錯誤
+            job_no_status = res_main.get("job_no", "Unknown")
+            
             st.session_state.analysis_result_cache = {
-                "job_no": res_main.get("job_no", "Unknown"),
+                "job_no": job_no_status,
                 "all_issues": all_issues,
-                "total_duration": time.time() - total_start,
-                "cost_twd": (usage.get("input", 0)*0.5 + usage.get("output", 0)*3.0) / 1000000 * 32.5,
-                "total_in": usage.get("input", 0),
-                "total_out": usage.get("output", 0),
-                "ocr_duration": ocr_duration,
-                "time_eng": time.time() - total_start - ocr_duration,
-                "ai_extracted_data": dim_data,
-                "python_debug_data": python_debug_data,
-                "full_text_for_search": combined_input, # 補回這行以免報錯
-                "combined_input": combined_input  # ✅ 確保這一行一定要在！
+                # ... (中間保持不變) ...
+                "combined_input": combined_input
             }
-            status_box.update(label="✅ 分析完成！", state="complete", expanded=False)
+            
+            # 更新狀態欄為完成
+            status_box.update(label="✅ 分析程序結束", state="complete", expanded=False)
+            
+            # ⚡️ 新增：如果 AI 發生錯誤，強制在狀態欄「外面」顯示紅字，並停止執行
+            if "Error" in job_no_status or "JSON" in job_no_status:
+                st.error(f"❌ 分析失敗，AI 回傳錯誤：{job_no_status}")
+                if "issues" in res_main and res_main["issues"]:
+                     # 嘗試顯示 AI 到底回傳了什麼錯誤訊息 (如果是 Safety Blocked)
+                     for issue in res_main["issues"]:
+                         st.warning(f"{issue.get('issue_type')}: {issue.get('common_reason')}")
+                st.stop() # 停止後續顯示，避免跳出更多錯誤
+            
             st.rerun()
-
+            
     # --- 💡 [重大修正] 顯示結果區塊：必須與 if trigger_analysis 平級 ---
     if st.session_state.analysis_result_cache:
         cache = st.session_state.analysis_result_cache
