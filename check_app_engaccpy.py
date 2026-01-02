@@ -896,15 +896,17 @@ if st.session_state.photo_gallery:
 
     trigger_analysis = start_btn or is_auto_start
 
-    if trigger_analysis:
+        if trigger_analysis:
         st.session_state.auto_start_analysis = False
         total_start = time.time()
         
         # 1. 執行分析區塊
         with st.status("總稽核官正在進行全方位分析...", expanded=True) as status_box:
-            status_text = st.empty()
             progress_bar = st.progress(0)
-            total_imgs = len(st.session_state.photo_gallery)
+            status_text = st.empty()
+            
+            # --- 階段一：OCR 識別 (多執行緒) ---
+            status_text.write("👀 正在進行 OCR 文字識別...")
             ocr_start = time.time()
             
             def process_task(index, item):
@@ -917,7 +919,7 @@ if st.session_state.photo_gallery:
                 except Exception as e:
                     return index, None, None, str(e)
 
-                        # 數據收集
+            total_imgs = len(st.session_state.photo_gallery)
             with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
                 futures = [executor.submit(process_task, i, item) for i, item in enumerate(st.session_state.photo_gallery)]
                 for future in concurrent.futures.as_completed(futures):
@@ -925,64 +927,129 @@ if st.session_state.photo_gallery:
                     if not err:
                         st.session_state.photo_gallery[idx].update({'header_text': h_txt, 'full_text': f_txt, 'file': None})
                     else:
-                        # ⚡️ 新增：如果有錯誤，顯示出來，不要裝沒事
-                        st.error(f"第 {idx+1} 頁 OCR 失敗: {err}")
-                        st.session_state.photo_gallery[idx].update({'full_text': f"[OCR FAILED] {err}", 'header_text': "Error"})
-                    
-                    progress_bar.progress((idx + 1) / total_imgs)
-
+                        st.error(f"P.{idx+1} OCR 失敗: {err}")
+                        st.session_state.photo_gallery[idx].update({'full_text': "OCR FAILED", 'header_text': "Error"})
+                    progress_bar.progress(0.2 * ((idx + 1) / total_imgs))
 
             ocr_duration = time.time() - ocr_start
-            combined_input = ""
-            for i, p in enumerate(st.session_state.photo_gallery):
-                combined_input += f"\n=== Page {i+1} ===\n{p.get('full_text','')}\n"
-
-            res_main = agent_unified_check(combined_input, combined_input, GEMINI_KEY, main_model_name)
-            st.write("DEBUG - AI 回傳內容:", res_main) # ⚡️ 讓錯誤現形
-            dim_data = res_main.get("dimension_data", [])
-            python_numeric_issues = python_numerical_audit(dim_data)
-            python_accounting_issues = python_accounting_audit(dim_data, res_main)
-            python_process_issues = python_process_audit(dim_data)
-            python_header_issues, python_debug_data = python_header_check(st.session_state.photo_gallery)
-
-            ai_filtered_issues = []
-            ai_raw_issues = res_main.get("issues", [])
-            if isinstance(ai_raw_issues, list):
-                for i in ai_raw_issues:
-                    if isinstance(i, dict):
-                        i['source'] = '🤖 總稽核 AI'
-                        if any(k in i.get("issue_type", "") for k in ["流程", "規格提取失敗", "未匹配"]):
-                            ai_filtered_issues.append(i)
-
-            # 最終合併所有籃子
-            all_issues = ai_filtered_issues + python_numeric_issues + python_accounting_issues + python_process_issues + python_header_issues
             
-            # 存入快取
-            usage = res_main.get("_token_usage", {"input": 0, "output": 0})
+            # --- 階段二：AI 分頁流水線 (解決卡死的核心) ---
+            status_text.write("🤖 AI 正在逐頁抄寫數據 (分頁處理模式)...")
             
-            # ⚡️ 修正：先檢查是否有嚴重錯誤
-            job_no_status = res_main.get("job_no", "Unknown")
+            # 準備總容器 (Python 會在這裡拿到全卷資料)
+            master_dim_data = []
+            master_issues = []
+            master_job_no = "Unknown"
+            master_summary = []
+            master_freight = 0
             
-            st.session_state.analysis_result_cache = {
-                "job_no": job_no_status,
-                "all_issues": all_issues,
-                # ... (中間保持不變) ...
-                "combined_input": combined_input
+            total_tokens_in = 0
+            total_tokens_out = 0
+            combined_input_log = "" 
+
+            for i, page in enumerate(st.session_state.photo_gallery):
+                page_text = page.get('full_text', '')
+                if "OCR FAILED" in page_text or not page_text.strip():
+                    continue
+                
+                status_text.write(f"🤖 AI 正在分析第 {i+1}/{total_imgs} 頁...")
+                
+                # 建立單頁 Input
+                current_input = f"\n=== Page {i+1} ===\n{page_text}\n"
+                combined_input_log += current_input
+                
+                # 呼叫 AI (只傳入單頁，速度極快)
+                # 注意：這裡使用您之前定義好的 agent_unified_check
+                res_part = agent_unified_check(current_input, page_text, GEMINI_KEY, main_model_name)
+                
+                # 收集 Token
+                usage = res_part.get("_token_usage", {})
+                total_tokens_in += usage.get("input", 0)
+                total_tokens_out += usage.get("output", 0)
+                
+                # --- 數據組裝邏輯 ---
+                # 1. 抓工令 (通常每一頁都有，抓到為止)
+                if res_part.get("job_no") and res_part.get("job_no") not in ["Unknown", "JSON Error"]:
+                    master_job_no = res_part.get("job_no")
+                
+                # 2. 抓統計表 (通常只在第一頁)
+                if res_part.get("summary_rows"):
+                    master_summary = res_part.get("summary_rows")
+                    
+                # 3. 抓運費 (通常只在第一頁)
+                if res_part.get("freight_target"):
+                    master_freight = res_part.get("freight_target")
+
+                # 4. 抓 AI 發現的單頁問題
+                if res_part.get("issues"):
+                    for iss in res_part["issues"]:
+                        iss['page'] = i + 1 
+                        master_issues.append(iss)
+
+                # 5. 抓最核心的尺寸數據 (加入總清單)
+                if res_part.get("dimension_data"):
+                    for d in res_part["dimension_data"]:
+                        d['page'] = i + 1 
+                        master_dim_data.append(d)
+                
+                # 更新進度條 (從 20% ~ 90%)
+                progress_bar.progress(0.2 + 0.7 * ((i + 1) / total_imgs))
+            
+            # --- 階段三：Python 總稽核 (跨頁邏輯在這裡執行) ---
+            status_text.write("🐍 Python 正在進行全卷跨頁比對...")
+            
+            # 建構完整的資料結構給 Python
+            virtual_res_main = {
+                "job_no": master_job_no,
+                "summary_rows": master_summary,
+                "freight_target": master_freight,
+                "issues": master_issues, 
+                "dimension_data": master_dim_data # 這裡包含了所有頁面的數據
             }
             
-            # 更新狀態欄為完成
-            status_box.update(label="✅ 分析程序結束", state="complete", expanded=False)
+            # 呼叫 Python 檢查 (因為傳入的是 master_dim_data，所以跨頁檢查有效！)
+            python_numeric_issues = python_numerical_audit(master_dim_data)
+            python_accounting_issues = python_accounting_audit(master_dim_data, virtual_res_main)
+            python_process_issues = python_process_audit(master_dim_data) # 這裡會檢查 P1 vs P4 的流程
+            python_header_issues, python_debug_data = python_header_check(st.session_state.photo_gallery)
+
+            # 過濾 AI 的 Issues 
+            ai_filtered_issues = []
+            for item in master_issues:
+                item['source'] = '🤖 總稽核 AI'
+                # 只保留非統計類的，因為統計類由 Python 接手
+                if not any(k in item.get("issue_type", "") for k in ["流程", "統計"]):
+                    ai_filtered_issues.append(item)
+
+            # 最終合併所有異常
+            all_issues = ai_filtered_issues + python_numeric_issues + python_accounting_issues + python_process_issues + python_header_issues
             
-            # ⚡️ 新增：如果 AI 發生錯誤，強制在狀態欄「外面」顯示紅字，並停止執行
-            if "Error" in job_no_status or "JSON" in job_no_status:
-                st.error(f"❌ 分析失敗，AI 回傳錯誤：{job_no_status}")
-                if "issues" in res_main and res_main["issues"]:
-                     # 嘗試顯示 AI 到底回傳了什麼錯誤訊息 (如果是 Safety Blocked)
-                     for issue in res_main["issues"]:
-                         st.warning(f"{issue.get('issue_type')}: {issue.get('common_reason')}")
-                st.stop() # 停止後續顯示，避免跳出更多錯誤
+            progress_bar.progress(1.0)
+            
+            # 存入快取
+            st.session_state.analysis_result_cache = {
+                "job_no": master_job_no,
+                "all_issues": all_issues,
+                "total_duration": time.time() - total_start,
+                "cost_twd": (total_tokens_in*0.5 + total_tokens_out*3.0) / 1000000 * 32.5,
+                "total_in": total_tokens_in,
+                "total_out": total_tokens_out,
+                "ocr_duration": ocr_duration,
+                "time_eng": time.time() - total_start - ocr_duration,
+                "ai_extracted_data": master_dim_data,
+                "python_debug_data": python_debug_data,
+                "full_text_for_search": combined_input_log,
+                "combined_input": combined_input_log 
+            }
+            
+            status_box.update(label="✅ 分析完成！", state="complete", expanded=False)
+            
+            # 顯示嚴重錯誤檢查
+            if "Error" in str(master_job_no) or "JSON" in str(master_job_no):
+                st.error(f"部分分析可能失敗，請檢查。工令狀態：{master_job_no}")
             
             st.rerun()
+
             
     # --- 💡 [重大修正] 顯示結果區塊：必須與 if trigger_analysis 平級 ---
     if st.session_state.analysis_result_cache:
