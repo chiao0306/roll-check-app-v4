@@ -316,7 +316,7 @@ def python_header_check(photo_gallery):
                 
     return issues, extracted_data
 
-   def agent_unified_check(combined_input, full_text_for_search, api_key, model_name):
+def agent_unified_check(combined_input, full_text_for_search, api_key, model_name):
     # 讀取 Python 規則 (給 Python 用，不給 AI 用，節省 AI 腦力)
     dynamic_rules = get_dynamic_rules(full_text_for_search)
 
