@@ -488,13 +488,13 @@ def python_numerical_audit(dimension_data):
             if cands: un_regen_target = max(cands)
 
         # 5. 開始逐一判定
-       for entry in raw_entries:
-            if len(entry) < 2: continue
-            # 💡 [加強]：同時去首尾空白與中間空格
-            rid = str(entry[0]).strip().replace(" ", "")
-            val_raw = str(entry[1]).strip().replace(" ", "")
-            
-            if not val_raw or val_raw in ["N/A", "nan", "M10"]: continue
+           for entry in raw_entries:
+                if len(entry) < 2: continue
+                # 💡 [加強]：同時去首尾空白與中間空格
+                rid = str(entry[0]).strip().replace(" ", "")
+                val_raw = str(entry[1]).strip().replace(" ", "")
+                
+                if not val_raw or val_raw in ["N/A", "nan", "M10"]: continue
 
             try:
                 # 只取第一個數字
