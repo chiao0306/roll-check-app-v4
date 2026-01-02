@@ -835,7 +835,7 @@ def python_process_audit(dimension_data):
                         "val": f"後段:{nxt['val']} < 前段:{curr['val']}", 
                         "calc": "不符物理演進邏輯"
                     }],
-                    "source": "🐍 流程引擎""
+                    "source": "🐍 流程引擎"
                 })
     return process_issues
     
