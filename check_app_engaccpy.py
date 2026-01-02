@@ -443,21 +443,23 @@ def python_numerical_audit(dimension_data):
         page_num = item.get("page", "?")
         raw_spec = str(item.get("std_spec", "")).replace('"', "")
         
-        # 2. 🛡️ 數據清洗
+        # 2. 🛡️ 數據清洗 (修正版：保留 300, 350 等大尺寸，只過濾小雜訊)
         all_nums = [float(n) for n in re.findall(r"[-+]?\d+\.?\d*", raw_spec.replace(" ", ""))]
-        # 雜訊過濾表 (常見的非規格數字)
-        noise = [350.0, 300.0, 200.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
-        # 建立一個乾淨的數字池供後續比對 (只留 >5 且非雜訊的)
-        clean_std = [n for n in all_nums if (n not in noise and n > 5)]
+        
+        # ⚡️ 關鍵修改：只過濾 1~10 這種像是「項次」或「數量」的小數字
+        # 絕對不要過濾 100 以上的數字，因為那可能是直徑！
+        noise = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 0.0] 
+        
+        clean_std = [n for n in all_nums if (n not in noise and n > 10)] # 這裡確保只抓大於 10 的當作有效規格
 
-        # 3. 💡 多重區間自動預算 (修復版：不切分逗號)
+        # 3. 💡 多重區間自動預算 (不切分小數點版)
         s_ranges = []
-        # ⚡️ 修正點：移除 [;；,，] 中的逗號與頓號，避免把公差切斷
-        # 只用「項目編號」或「分號」來切分不同規格
-        spec_parts = re.split(r"[一二三四五六]|[123456]\.|\d+[\.]|[;；]", raw_spec)
+        
+        # ⚡️ 修正點：只用中文數字或分號切分，絕對不切小數點
+        spec_parts = re.split(r"[一二三四五六]|[;；]", raw_spec)
         
         for part in spec_parts:
-            # 暴力去空格：讓 "-0. 13" 變成 "-0.13"
+            # 去除空格，修復 "-0. 014" 這種 AI 格式問題
             clean_part = part.replace(" ", "").replace("\n", "").strip()
             if not clean_part: continue
             
@@ -473,44 +475,44 @@ def python_numerical_audit(dimension_data):
             tilde_match = re.search(r"(\d+\.?\d*)[~～-](\d+\.?\d*)", clean_part)
             if tilde_match:
                 n1, n2 = float(tilde_match.group(1)), float(tilde_match.group(2))
-                # 簡單防呆：兩個數字不能差太多 (避免把 160-0.01 誤判為區間)
+                # 防呆：兩個數字不能差太多 (避免把 140-0.01 誤判為 140~0.01)
                 if abs(n1 - n2) < n1 * 0.5: 
                     s_ranges.append([round(min(n1, n2), 4), round(max(n1, n2), 4)])
                     continue
 
-            # --- 邏輯 C：萬用多基準解析 (解決 140 -0.01, -0.03) ---
-            # 1. 找出所有偏移量 (帶有 + 或 - 的數字)
-            offsets = re.findall(r"([+-]\d+\.?\d*)", clean_part)
-            offset_vals = [float(o) for o in offsets]
+            # --- 邏輯 C：智慧配對 (解決 140 -0.01, -0.03) ---
+            # 1. 抓出所有數字 (包含負數)
+            all_tokens = re.findall(r"[-+]?\d+\.?\d*", clean_part)
+            if not all_tokens: continue
+
+            # 2. 分類：誰是基準(Base)，誰是公差(Offset)
+            bases = []
+            offsets = []
             
-            # 2. 找出所有「基準值」 (大於10，且不是剛剛抓到的偏移量)
-            # 這裡用原本的 clean_part 抓數字，確保不會因為去空格而亂掉
-            potential_bases = re.findall(r"[-+]?\d+\.?\d*", clean_part)
-            base_vals = []
+            for token in all_tokens:
+                val = float(token)
+                # 規則：大於 10 的通常是直徑基準，小於 1 的通常是公差
+                # 帶有 +/- 符號的即使大一點也算公差，但在 regex 裡 float 會吃掉符號
+                # 所以我們用數值大小做最穩定的判斷
+                if val > 10.0:
+                    bases.append(val)
+                elif abs(val) < 10.0:
+                    offsets.append(val)
             
-            for n_str in potential_bases:
-                try:
-                    val = float(n_str)
-                    # 條件：大於10 且 不在偏移量列表中 (用絕對值比對更準)
-                    is_offset = False
-                    for o in offset_vals:
-                        if abs(val - o) < 0.0001: is_offset = True
-                    
-                    if val > 10.0 and not is_offset:
-                        base_vals.append(val)
-                except: continue
-            
-            # 3. 組合：讓每個基準值都去加上所有的偏移量
-            for b_val in base_vals:
-                if offset_vals:
-                    endpoints = [round(b_val + o, 4) for o in offset_vals]
-                    # 如果只有一個偏移量 (如 +0.5)，通常隱含另一個端點是基準本身
-                    # 但如果是兩個偏移量 (如 -0.01, -0.03)，就取這兩個為邊界
-                    if len(endpoints) == 1: endpoints.append(b_val)
-                    s_ranges.append([min(endpoints), max(endpoints)])
-                else:
-                    # 只有基準沒有偏移 -> 視為單一值 (嚴格相等)
-                    s_ranges.append([b_val, b_val])
+            # 3. 配對：把找到的公差應用到這一段找到的所有基準上
+            if bases:
+                for b in bases:
+                    if offsets:
+                        # 有公差：計算範圍 (基準+公差)
+                        endpoints = [round(b + o, 4) for o in offsets]
+                        # 如果只有一個公差 (如 140 -0.05)，預設另一個端點是基準本身(140)
+                        # 但如果是兩個公差 (如 -0.01, -0.03)，就取這兩個為邊界
+                        # 您的案例是兩個公差，所以會形成 [139.961, 139.986]
+                        if len(endpoints) == 1: endpoints.append(b)
+                        s_ranges.append([min(endpoints), max(endpoints)])
+                    else:
+                        # 沒公差：單一值
+                        s_ranges.append([b, b])
 
         # 4. 💡 預算基準 (移出循環)
         logic = item.get("sl", {})
