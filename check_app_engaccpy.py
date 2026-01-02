@@ -317,41 +317,71 @@ def python_header_check(photo_gallery):
     return issues, extracted_data
 
 def agent_unified_check(combined_input, full_text_for_search, api_key, model_name):
-    import re # 確保引用 Regex 套件
-    
-    # 讀取規則
+    import re
     dynamic_rules = get_dynamic_rules(full_text_for_search)
 
-    # Prompt: 強調只回傳 JSON，並給出範例
+    # 1. 整合您的【工程級 Prompt】
     system_prompt = f"""
-    你是一位極度嚴謹的中鋼機械品管【數據抄錄員】。
+    你是一位極度嚴謹的中鋼機械品管【數據抄錄員】。你必須像「電腦程式」一樣執行任務。
     
     {dynamic_rules}
 
     ---
-    #### 任務指令：
-    1. **規格抄錄 (std_spec)**：抄錄 mm, ±, +, - 等原始文字。
-    2. **數據抄錄 (ds)**：格式為 "ID:值|ID:值"。
-       - 遇到無法辨識的模糊字跡，請標記為 [!]。
-    3. **分類 (category)**：
-       - 銲補 -> min_limit
-       - 未再生 -> un_regen (若含軸頸則為 max_limit)
-       - 再生/研磨 -> range
 
-    #### 輸出格式：
-    請務必回傳單一合法的 JSON 物件。不要使用 Markdown 標記，不要說廢話。
-    ⚠️ 為了節省空間，請【不要】回傳 accounting_rules 和 sl 欄位。
+    #### ⚔️ 模組 A：工程尺寸數據提取 (AI 任務：抄錄)
+    1. **規格抄錄 (std_spec)**：精確抄錄標題中含 `mm`、`±`、`+`、`-` 的原始文字。
+    2. **數據抄錄 (ds)**：格式為 `"ID:值|ID:值"`。
+       - **字串保護**：禁止簡化數字。實測值若顯示 `349.90`，必須輸出 `"349.90"`。
+       - **壞軌標記 [!]**：若儲存格辨識不良（汙點/字跡黏連/反光），嚴禁腦補，直接標記為 `[!]`。
+       - **範例**：`"31L10:301.08|31L48:[!]|31L66:304.11"`
+    
+    3. **項目分類決策流程 (由上至下執行，命中即停止)**：
+        - **LEVEL 1：銲補與裝配判定 (最高優先)**
+          * 標題含「銲補」、「銲接」 -> `min_limit`。
+          * 標題含「組裝」、「拆裝」、「裝配」、「真圓度」 -> `range`。
+        - **LEVEL 2：未再生判定 (含車修)**
+          * 標題含「未再生」三字時：
+            a. 含「軸頸」 -> `max_limit`。
+            b. 不含「軸頸」(本體) -> `un_regen`。
+          * (💡 注意：此類項目即使包含「車修」字眼，也必須鎖定在 LEVEL 2)。
+        - **LEVEL 3：精加工判定**
+          * 標題不含「未再生」，且包含「再生」、「研磨」、「精加工」、「車修加工」、「KEYWAY」 -> `range`。
+
+    #### 💰 模組 B：會計指標提取
+    1. **統計表**：抄錄統計表每一行名稱與實交數量到 `summary_rows`。
+    2. **運費指標**：提取運費項次與標題括號內的 PC 數。
+
+    #### ⚖️ 模組 C：流程稽核 (判定結果放入 issues)
+    1. **位階檢查**：`未再生 < 研磨 < 再生 < 銲補`。若跨頁面後段尺寸小於前段（銲補除外），報 `🛑流程異常`。
+
+    ---
+    #### 📝 輸出規範 (JSON)
+    請務必回傳單一合法的 JSON 物件，不要有廢話。格式如下：
+    {{
+      "job_no": "工令",
+      "summary_rows": [ {{ "title": "名稱", "target": 數字 }} ],
+      "freight_target": 數字,
+      "issues": [ 
+         {{ "page": 數字, "item": "項目", "issue_type": "🛑流程異常", "common_reason": "原因", "failures": [] }} 
+      ],
+      "dimension_data": [
+         {{
+           "page": 數字, "item_title": "標題", "category": "分類標籤", 
+           "item_pc_target": 數字, "std_spec": "規格文字", "ds": "ID:值|ID:值" 
+         }}
+      ]
+    }}
     """
     
     try:
         genai.configure(api_key=api_key)
         
-        # 設定 AI
+        # 使用最高安全等級與大容量 Token 設定
         model = genai.GenerativeModel(
             model_name=model_name,
             generation_config={
-                "temperature": 0.1,             
-                "max_output_tokens": 16384,     
+                "temperature": 0.0,
+                "max_output_tokens": 16384, # 加大輸出空間
             },
             safety_settings={
                 "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
@@ -361,24 +391,20 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
             }
         )
         
-        # 呼叫 AI
-        with st.spinner('🤖 AI 正在全卷分析中...'):
+        with st.spinner('🤖 總稽核 Agent 正在套用精密規則進行分析...'):
             response = model.generate_content([system_prompt, combined_input])
         
-        # --- ⚡️ 關鍵修改：暴力清洗 JSON ---
         raw_content = response.text.strip()
         
-        # 1. 使用 Regex 尋找最外層的 { }
-        # dotall=True 讓 . 可以匹配換行符號
+        # ⚡️ 使用 Regex 提取 JSON，防止 AI 回傳額外的文字說明
         match = re.search(r"\{.*\}", raw_content, re.DOTALL)
-        
         if match:
             clean_json = match.group(0)
             parsed_data = json.loads(clean_json)
         else:
-            # 如果連大括號都找不到，那才是真的沒救了
-            raise ValueError("AI 回傳的內容找不到 JSON 括號")
+            raise ValueError("無法從 AI 回應中提取有效的 JSON 結構")
             
+        # 填補 Token 用量資訊
         parsed_data["_token_usage"] = {
             "input": response.usage_metadata.prompt_token_count, 
             "output": response.usage_metadata.candidates_token_count
@@ -386,13 +412,11 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
         return parsed_data
 
     except Exception as e:
-        # 發生錯誤直接報錯，並把 AI 原始文字印出來給你看
-        st.error(f"❌ 分析發生錯誤 (有 Token 但解析失敗): {str(e)}")
-        
+        st.error(f"❌ 分析失敗: {str(e)}")
+        # 失敗時在 DEBUG 區塊顯示 AI 到底說了什麼
         if 'raw_content' in locals():
-            with st.expander("👀 點我查看 AI 原始產出 (Debug)"):
-                st.code(raw_content) # 這裡可以看到 AI 到底寫了什麼
-                
+            with st.expander("👀 查看 AI 產出的原始文字"):
+                st.code(raw_content)
         return {"job_no": f"Error: {str(e)}", "issues": [], "dimension_data": []}
 
 # --- 重點：Python 引擎獨立於 agent 函式之外 ---
