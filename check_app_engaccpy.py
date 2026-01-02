@@ -573,14 +573,14 @@ def python_numerical_audit(dimension_data):
     
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官：三條鐵律 + 真空清洗版 (無視所有空格干擾)
+    Python 會計官：絕對計數 (不去重) + 本體/軸頸分級示警
     """
     accounting_issues = []
     from thefuzz import fuzz
     from collections import Counter
     import re
 
-    # 🧽 [新增] 真空清洗工具：移除所有空格、換行
+    # 🧽 真空清洗工具
     def clean_text(text):
         return str(text).replace(" ", "").replace("\n", "").replace("\r", "").strip()
 
@@ -592,9 +592,8 @@ def python_accounting_audit(dimension_data, res_main):
         try: return float(cleaned) if cleaned else 0.0
         except: return 0.0
 
-    # 1. 取得對帳基準 (建立籃子)
+    # 1. 取得對帳基準
     summary_rows = res_main.get("summary_rows", [])
-    # 這裡的 key (s['title']) 保持原樣以利顯示，但在比對時我們會清洗它
     global_sum_tracker = {
         s['title']: {"target": safe_float(s['target']), "actual": 0, "details": []} 
         for s in summary_rows if s.get('title')
@@ -607,9 +606,7 @@ def python_accounting_audit(dimension_data, res_main):
     # 2. 逐項過帳
     for item in dimension_data:
         raw_title = item.get("item_title", "")
-        # 🧽 立即建立「無空格版標題」供邏輯判斷使用
-        title_clean = clean_text(raw_title)
-        
+        title_clean = clean_text(raw_title) # 清洗後的標題用於判斷
         page = item.get("page", "?")
         target_pc = safe_float(item.get("item_pc_target", 0)) 
         
@@ -621,9 +618,11 @@ def python_accounting_audit(dimension_data, res_main):
         ids = [str(e[0]).strip() for e in data_list if len(e) > 0]
         id_counts = Counter(ids)
 
-        # --- 2.1 單項數量計算 ---
-        # 使用清洗後的標題判斷本體/重量
-        is_body = "本體" in title_clean
+        # --- 2.1 單項數量計算 (核心修正：絕對計數) ---
+        # 邏輯：不管本體還是軸頸，表格裡有幾行數據，就代表做了幾次工。
+        # 完全移除 set(ids) 去重邏輯。
+        
+        u_local = "" # 若未來有 rules 擴充可在此讀取
         is_weight_mode = "KG" in title_clean.upper() or target_pc > 100
 
         if is_weight_mode:
@@ -637,12 +636,19 @@ def python_accounting_audit(dimension_data, res_main):
             if has_bad_sector:
                 accounting_issues.append({
                     "page": page, "item": raw_title, "issue_type": "⚠️數據損毀",
-                    "common_reason": "包含無法辨識的重量數據",
+                    "common_reason": "含無法辨識重量，總重可能有誤",
                     "failures": [{"id": "警告", "val": "[!]", "calc": "數據損毀"}]
                 })
         else:
-            if is_body: actual_item_qty = len(set(ids)) 
-            else: actual_item_qty = len(data_list)
+            # 🔢 數量模式 (PC/SET)
+            # 這裡只保留 "SET" 的特殊換算，其餘一律用 len(data_list)
+            # 也就是：AI 抄到 8 筆，這裡就是 8。
+            if "1SET=4PCS" in u_local: 
+                actual_item_qty = len(data_list) / 4
+            elif "1SET=2PCS" in u_local: 
+                actual_item_qty = len(data_list) / 2
+            else: 
+                actual_item_qty = len(data_list) # 👈 關鍵：不做任何去重
 
         # 單項比對
         if actual_item_qty != target_pc and target_pc > 0:
@@ -651,63 +657,61 @@ def python_accounting_audit(dimension_data, res_main):
                 "common_reason": f"標題 {target_pc}PC != 內文 {actual_item_qty}",
                 "failures": [
                     {"id": "目標", "val": target_pc, "calc": "標題"},
-                    {"id": "實際", "val": actual_item_qty, "calc": "內文"}
+                    {"id": "實際", "val": actual_item_qty, "calc": "內文計數"}
                 ],
                 "source": "🐍 會計引擎"
             })
 
-        # --- 2.2 軸頸重複性檢查 ---
-        # 使用 clean_text 確保 "軸 頸" 也能被抓到
-        if any(k in title_clean for k in ["軸頸", "內孔", "Journal"]):
-            for rid, count in id_counts.items():
-                if count >= 3:
-                    accounting_issues.append({
-                        "page": page, "item": raw_title, "issue_type": "🛑編號重複異常",
-                        "common_reason": f"編號 {rid} 出現 {count} 次",
-                        "failures": [{"id": rid, "val": count, "calc": "禁止超過2次"}]
-                    })
+        # --- 2.2 編號重複性示警 (分級處理) ---
+        
+        # A. 本體檢查：只要重複就不對 (Limit > 1)
+        if "本體" in title_clean:
+             for rid, count in id_counts.items():
+                if count > 1:
+                     accounting_issues.append({
+                        "page": page, "item": raw_title, "issue_type": "⚠️編號重複警示(本體)",
+                        "common_reason": f"本體編號 {rid} 重複 {count} 次 (應為獨一)",
+                        "failures": [{"id": rid, "val": count, "calc": "建議檢查"}]
+                     })
 
-        # --- 2.3 總表對帳 (鐵律 + 真空清洗) ---
+        # B. 軸頸檢查：允許一對，超過2次才叫 (Limit > 2)
+        elif any(k in title_clean for k in ["軸頸", "內孔", "JOURNAL"]):
+             for rid, count in id_counts.items():
+                if count > 2:
+                     accounting_issues.append({
+                        "page": page, "item": raw_title, "issue_type": "⚠️編號重複警示(軸頸)",
+                        "common_reason": f"軸頸編號 {rid} 出現 {count} 次 (一般限 2 次)",
+                        "failures": [{"id": rid, "val": count, "calc": "建議檢查"}]
+                     })
+
+        # --- 2.3 總表對帳 (鐵律版) ---
         for s_title, data in global_sum_tracker.items():
             match = False
-            
-            # 🧽 清洗籃子標題，確保比對時無視空格
             s_title_clean = clean_text(s_title)
             
-            # 判斷籃子類型 (使用清洗後的字串)
-            # 例如：即使籃子叫 "ROLL 車修"，變成 "ROLL車修" 後就能匹配到關鍵字
             is_basket_disassembly = "拆裝" in s_title_clean or "組裝" in s_title_clean
             is_basket_machining = "ROLL車修" in s_title_clean
             is_basket_welding = "ROLL銲補" in s_title_clean
             
-            # 🛑 鐵律一：拆裝籃子
+            # 鐵律一：拆裝
             if is_basket_disassembly:
-                # 規則：全卷含 "組裝" 或 "拆裝" 的項目 (使用 title_clean)
-                if "組裝" in title_clean or "拆裝" in title_clean:
-                    match = True
+                if "組裝" in title_clean or "拆裝" in title_clean: match = True
             
-            # 🛑 鐵律二：車修籃子
+            # 鐵律二：車修 (軸頸/本體 + 再生/未再生)
             elif is_basket_machining:
-                # 規則：全卷 (軸頸 或 本體) + (再生 或 未再生)
                 has_part = "軸頸" in title_clean or "本體" in title_clean
                 has_action = "再生" in title_clean or "未再生" in title_clean
-                if has_part and has_action:
-                    match = True
+                if has_part and has_action: match = True
             
-            # 🛑 鐵律三：銲補籃子
+            # 鐵律三：銲補 (軸頸/本體 + 銲補)
             elif is_basket_welding:
-                # 規則：全卷 (軸頸 或 本體) + (銲補)
                 has_part = "軸頸" in title_clean or "本體" in title_clean
-                if has_part and "銲補" in title_clean:
-                    match = True
+                if has_part and "銲補" in title_clean: match = True
             
-            # 🟢 其他籃子 (Fallback)
+            # 其他 (Fallback)
             else:
-                # Fuzzy match 本身對空格比較寬容，但給它清洗過的字串會更準
-                if fuzz.partial_ratio(s_title_clean, title_clean) > 90:
-                    match = True
+                if fuzz.partial_ratio(s_title_clean, title_clean) > 90: match = True
 
-            # 如果命中，就丟進籃子
             if match:
                 data["actual"] += actual_item_qty
                 data["details"].append({"id": f"{raw_title} (P.{page})", "val": actual_item_qty, "calc": "計入"})
@@ -715,6 +719,7 @@ def python_accounting_audit(dimension_data, res_main):
         # --- 2.4 運費核對 ---
         if "本體" in title_clean or "計入" in title_clean or "運費" in title_clean:
              if "豁免" not in title_clean:
+                # 這裡一樣直接加總 actual_item_qty (8支就是8支運費)
                 freight_actual_sum += actual_item_qty
                 freight_details.append({"id": f"{raw_title}", "val": actual_item_qty, "calc": "計入運費"})
 
