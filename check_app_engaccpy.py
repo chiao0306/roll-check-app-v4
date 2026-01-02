@@ -465,24 +465,29 @@ def python_numerical_audit(dimension_data):
         # 免死金牌：緊貼 mm 的數字不准過濾
         clean_std = [n for n in all_nums if (n in mm_nums) or (n not in noise and n > 5)]
 
-        # 3. 💡 公差自動預算 (修正版：支援雙正/雙負公差)
+        # 3. 💡 強健型公差預算 (修正：暴力清除空格並解析所有偏差)
         s_ranges = []
-        base_match = re.search(r"(\d+\.?\d*)\s*mm", raw_spec)
-        pm_match = re.search(r"(\d+\.?\d*)\s*[±]\s*(\d+\.?\d*)", raw_spec)
+        # 先把 "0. 13" 這種 OCR 產生的空格清掉，變成 "0.13"
+        clean_spec = raw_spec.replace(" ", "")
         
-        if pm_match: # 處理 ± 情況
+        # A. 抓取 mm 之前的數字作為基準 (base)
+        base_match = re.search(r"(\d+\.?\d*)mm", clean_spec)
+        pm_match = re.search(r"(\d+\.?\d*)±(\d+\.?\d*)", clean_spec)
+        
+        if pm_match: # 處理 ±
             b, o = float(pm_match.group(1)), float(pm_match.group(2))
             s_ranges.append([round(b - o, 4), round(b + o, 4)])
-        elif base_match: # 處理 +0.3, +0.8 或 +0, -0.14 等偏差
+        elif base_match: # 處理 +0.3, +0.8 或 +0, -0.13 等多種偏差
             b = float(base_match.group(1))
-            # 抓取所有帶符號的數字，如 +0.3, +0.8, -0.05
-            offsets = re.findall(r"([+-]\s*\d+\.?\d*)", raw_spec)
+            # 💡 找出所有帶符號的偏移量
+            offsets = re.findall(r"([+-]\d+\.?\d*)", clean_spec)
             if offsets:
-                # 將所有偏移量加到基準值上，取出最小值與最大值作為區間
-                calc_nums = [b + float(o.replace(" ", "")) for o in offsets]
-                # 💡 如果只有一個偏移量 (如 +0.5)，則區間是 基準值 到 基準值+0.5
-                if len(calc_nums) == 1: calc_nums.append(b) 
-                s_ranges.append([round(min(calc_nums), 4), round(max(calc_nums), 4)])
+                # 把基準數字加上偏移量，算出所有端點
+                # 例如 300 + 0 = 300.0, 300 + (-0.13) = 299.87
+                endpoints = [b + float(o) for o in offsets]
+                # 如果只有一個偏移量，基準本身也是一個端點
+                if len(endpoints) == 1: endpoints.append(b)
+                s_ranges.append([round(min(endpoints), 4), round(max(endpoints), 4)])
 
         # 4. 💡 預算基準 (移出循環)
         logic = item.get("sl", {})
