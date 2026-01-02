@@ -497,19 +497,6 @@ def python_numerical_audit(dimension_data):
                 s_ranges.append([round(min(n1, n2), 4), round(max(n1, n2), 4)])
             elif base_mm:
                 # ... (後續原有的 offsets 處理邏輯保持不變)
-            
-            if pm_full:
-                b, o = float(pm_full.group(1)), float(pm_full.group(2))
-                s_ranges.append([round(b - o, 4), round(b + o, 4)])
-            elif pm_lone:
-                # 只有公差，視為 0 到 0.1
-                s_ranges.append([0.0, float(pm_lone.group(1))]) 
-            elif base_mm:
-                b = float(base_mm.group(1))
-                # 🛡️ [雜訊過濾]：如果抓到的基準數字在黑名單內，且該段落沒有其他公差，則忽略它
-                offsets = re.findall(r"([+-]\d+\.?\d*)", clean_part)
-                if b in noise_list and not offsets:
-                    continue # 這可能是型號雜訊，跳過
                 
                 if offsets:
                     endpoints = [b + float(o) for o in offsets]
