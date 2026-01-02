@@ -465,16 +465,24 @@ def python_numerical_audit(dimension_data):
         # 免死金牌：緊貼 mm 的數字不准過濾
         clean_std = [n for n in all_nums if (n in mm_nums) or (n not in noise and n > 5)]
 
-        # 3. 💡 公差自動預算
+        # 3. 💡 公差自動預算 (修正版：支援雙正/雙負公差)
         s_ranges = []
+        base_match = re.search(r"(\d+\.?\d*)\s*mm", raw_spec)
         pm_match = re.search(r"(\d+\.?\d*)\s*[±]\s*(\d+\.?\d*)", raw_spec)
-        dev_match = re.search(r"(\d+\.?\d*)\s*[\+]\s*(\d+\.?\d*)\s*,\s*[\-]\s*(\d+\.?\d*)", raw_spec)
-        if pm_match:
+        
+        if pm_match: # 處理 ± 情況
             b, o = float(pm_match.group(1)), float(pm_match.group(2))
-            s_ranges.append([b - o, b + o])
-        elif dev_match:
-            b, p, m = float(dev_match.group(1)), float(dev_match.group(2)), float(dev_match.group(3))
-            s_ranges.append([b - m, b + p])
+            s_ranges.append([round(b - o, 4), round(b + o, 4)])
+        elif base_match: # 處理 +0.3, +0.8 或 +0, -0.14 等偏差
+            b = float(base_match.group(1))
+            # 抓取所有帶符號的數字，如 +0.3, +0.8, -0.05
+            offsets = re.findall(r"([+-]\s*\d+\.?\d*)", raw_spec)
+            if offsets:
+                # 將所有偏移量加到基準值上，取出最小值與最大值作為區間
+                calc_nums = [b + float(o.replace(" ", "")) for o in offsets]
+                # 💡 如果只有一個偏移量 (如 +0.5)，則區間是 基準值 到 基準值+0.5
+                if len(calc_nums) == 1: calc_nums.append(b) 
+                s_ranges.append([round(min(calc_nums), 4), round(max(calc_nums), 4)])
 
         # 4. 💡 預算基準 (移出循環)
         logic = item.get("sl", {})
