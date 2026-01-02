@@ -465,42 +465,55 @@ def python_numerical_audit(dimension_data):
         # 免死金牌：緊貼 mm 的數字不准過濾
         clean_std = [n for n in all_nums if (n in mm_nums) or (n not in noise and n > 5)]
 
-        # 3. 💡 多重區間自動預算 (全兼容修正版)
+        # 3. 💡 多重區間自動預算 (終極全兼容版：處理 ±, ~, +/- 偏差及無 mm 情況)
         s_ranges = []
         spec_parts = re.split(r"[一二三四五六]|[（(]\d+[)）]|[;；]", raw_spec)
         
         for part in spec_parts:
-            # 💡 暴力去空格
+            # 暴力去空格、去換行
             clean_part = part.replace(" ", "").replace("\n", "").strip()
             if not clean_part: continue
             
-            # A. 優先找 基準 ± 偏移 (如 300±0.1)
-            pm_full = re.search(r"(\d+\.?\d*)±(\d+\.?\d*)", clean_part)
-            # B. 找 孤立的 ± 偏移 (如 ±0.1)
-            pm_lone = re.search(r"±(\d+\.?\d*)", clean_part)
-            # C. 找 波浪號區間 (如 101.64~101.66)
-            tilde_range = re.search(r"(\d+\.?\d*)[~～-](\d+\.?\d*)", clean_part)
-            # D. 找 mm 基底 (如 160mm)
-            base_mm = re.search(r"(\d+\.?\d*)mm", clean_part)
-            
-            if pm_full:
-                b, o = float(pm_full.group(1)), float(pm_full.group(2))
+            # --- 邏輯 A：優先處理 ± (如 300±0.1 或 只有±0.1) ---
+            pm_match = re.search(r"(\d+\.?\d*)?±(\d+\.?\d*)", clean_part)
+            if pm_match:
+                base_str, offset_str = pm_match.group(1), pm_match.group(2)
+                b = float(base_str) if base_str else 0.0
+                o = float(offset_str)
                 s_ranges.append([round(b - o, 4), round(b + o, 4)])
-            elif pm_lone:
-                s_ranges.append([0.0, float(pm_lone.group(1))]) 
-            elif tilde_range:
-                n1, n2 = float(tilde_range.group(1)), float(tilde_range.group(2))
+                continue # 處理完畢，跳過此段落後續判定
+
+            # --- 邏輯 B：處理波浪號區間 (如 101.64~101.66) ---
+            tilde_match = re.search(r"(\d+\.?\d*)[~～-](\d+\.?\d*)", clean_part)
+            if tilde_match:
+                n1, n2 = float(tilde_match.group(1)), float(tilde_match.group(2))
                 s_ranges.append([round(min(n1, n2), 4), round(max(n1, n2), 4)])
-            elif base_mm:
-                b = float(base_mm.group(1))
-                # ✅ [關鍵補回這行]：必須先定義 offsets，後面的 if offsets 才能跑
+                continue
+
+            # --- 邏輯 C：萬用偏移量解析 (處理 300 -0.34, +0.15 等所有情況) ---
+            # 1. 找出這段文字裡所有的數字 (包含小數)
+            all_numbers = re.findall(r"[-+]?\d+\.?\d*", clean_part)
+            if not all_numbers: continue
+
+            # 2. 判斷誰是「基底」。第一個沒有帶正負號的數字，或第一個帶 mm 的數字是基底。
+            # 我們採用最穩的做法：第一筆數字是基底，後續帶有 [+-] 的是偏移量
+            try:
+                base_val = float(all_numbers[0])
+                # 找出所有明確寫出 + 或 - 的偏移量
                 offsets = re.findall(r"([+-]\d+\.?\d*)", clean_part)
+                
                 if offsets:
-                    endpoints = [b + float(o) for o in offsets]
-                    if len(endpoints) == 1: endpoints.append(b)
-                    s_ranges.append([round(min(endpoints), 4), round(max(endpoints), 4)])
+                    # 計算所有可能的端點
+                    endpoints = [round(base_val + float(o), 4) for o in offsets]
+                    # 有偏差時，基準值本身往往也是其中一個端點 (例如 +0.5)
+                    # 如果只有一個偏移量，補上基準值自己
+                    if len(endpoints) == 1: endpoints.append(base_val)
+                    s_ranges.append([min(endpoints), max(endpoints)])
                 else:
-                    s_ranges.append([b, b])
+                    # 只有單一數字 (如 160mm)
+                    if base_val > 10: # 過濾掉太小的雜訊數字
+                        s_ranges.append([base_val, base_val])
+            except: continue
                     
         # 4. 💡 預算基準 (移出循環)
         logic = item.get("sl", {})
