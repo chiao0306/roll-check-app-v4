@@ -369,61 +369,81 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
     
     generation_config = {"response_mime_type": "application/json", "temperature": 0.0}
     
-        
-    try:
+        try:
         genai.configure(api_key=api_key)
         
-        # 1. 設定生成配置 (關鍵修改：加入 max_output_tokens 與 response_mime_type)
+        # 1. 設定生成配置 (強制 JSON + 提高 Token)
         generation_config = {
-            "temperature": 0.1,            # 降低隨機性，讓格式更穩定
-            "max_output_tokens": 8192,     # ⚡️ 提高上限，防止長表格被截斷
-            "response_mime_type": "application/json"  # ⚡️ 強制 Gemini 輸出純 JSON 格式
+            "temperature": 0.1,
+            "max_output_tokens": 8192,
+            "response_mime_type": "application/json"
+        }
+        
+        # 2. 設定安全過濾 (⚡️ 關鍵修改：全部設為 BLOCK_NONE 以免被 OCR 雜訊誤殺)
+        from google.generativeai.types import HarmCategory, HarmBlockThreshold
+        safety_settings = {
+            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
         }
 
-        # 初始化模型時直接帶入設定
         model = genai.GenerativeModel(
             model_name=model_name, 
-            generation_config=generation_config
+            generation_config=generation_config,
+            safety_settings=safety_settings  # <--- 加上這行
         )
         
-        # 增加載入中的提示動畫
         with st.spinner('🤖 AI 正在全力抄寫數據中... (數據量大時可能需要 30-60 秒)'):
-            # 注意：這裡的 input 必須包含 system_prompt 和 combined_input
+            # 這裡把 system_prompt 和 user content 放在一起傳送
             response = model.generate_content([system_prompt, combined_input])
         
+        # 3. 檢查回應是否被安全機制阻擋
+        if response.prompt_feedback and response.prompt_feedback.block_reason:
+            st.error(f"⚠️ AI 拒絕回答，原因: {response.prompt_feedback.block_reason}")
+            st.warning("偵測到可能的敏感關鍵字 (如：中國販賣)，已嘗試調整安全設定。")
+            return {"job_no": "Safety Blocked", "issues": [], "dimension_data": []}
+
         raw_content = response.text
         
-        # 2. 移除可能的 Markdown 標記 (雙重保險)
+        # 4. 清洗 Markdown (雙重保險)
+        raw_content = raw_content.strip()
         if raw_content.startswith("```json"):
             raw_content = raw_content[7:]
         if raw_content.endswith("```"):
             raw_content = raw_content[:-3]
-        raw_content = raw_content.strip()
-
+        
         parsed_data = json.loads(raw_content)
         
-        # 記錄 Token 使用量
-        parsed_data["_token_usage"] = {
-            "input": response.usage_metadata.prompt_token_count, 
-            "output": response.usage_metadata.candidates_token_count
-        }
+        # 補上 Token 用量
+        if hasattr(response, 'usage_metadata'):
+            parsed_data["_token_usage"] = {
+                "input": response.usage_metadata.prompt_token_count, 
+                "output": response.usage_metadata.candidates_token_count
+            }
         return parsed_data
 
+    except ValueError as ve:
+        # 通常是 response.text 無法存取 (被擋掉時)
+        st.error("❌ AI 回應為空 (可能被安全性攔截)")
+        with st.expander("👀 查看安全回饋資訊"):
+            st.write(response.prompt_feedback)
+        return {"job_no": "Blocked", "issues": [], "dimension_data": []}
+
     except json.JSONDecodeError as e:
-        # 3. 增加錯誤顯示，讓您知道發生什麼事
-        st.error(f"❌ JSON 解析失敗！可能是內容被截斷。")
-        with st.expander("👀 查看導致錯誤的原始回應"):
-            # 如果 response 變數存在，就印出來
-            if 'response' in locals():
-                st.code(response.text) 
+        st.error(f"❌ JSON 解析失敗！(AI 回傳了非 JSON 格式)")
+        with st.expander("👀 查看 AI 到底回傳了什麼 (Debug)"):
+            if 'raw_content' in locals():
+                st.code(raw_content)
+            elif 'response' in locals():
+                st.code(response.text)
             else:
                 st.write("無法取得回應內容")
-        print(f"JSON Error: {e}")
         return {"job_no": "JSON Error", "issues": [], "dimension_data": []}
         
     except Exception as e:
-        st.error(f"❌ AI 呼叫發生錯誤: {e}")
-        return {"job_no": f"Error: {str(e)}", "issues": [], "dimension_data": []}
+        st.error(f"❌ 系統錯誤: {str(e)}")
+        return {"job_no": "Error", "issues": [], "dimension_data": []}
     
 # --- 重點：Python 引擎獨立於 agent 函式之外 ---
 
