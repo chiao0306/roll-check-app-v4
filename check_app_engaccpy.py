@@ -374,11 +374,6 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
     # "response_mime_type": "application/json" # ⚡️ 暫時註解掉這行！
     }
 
-    
-    def agent_unified_check(combined_input, full_text_for_search, api_key, model_name):
-    dynamic_rules = get_dynamic_rules(full_text_for_search)
-    # ... (System Prompt 保持不變) ...
-
     try:
         genai.configure(api_key=api_key)
         
