@@ -629,9 +629,11 @@ def python_accounting_audit(dimension_data, res_main):
     import re
 
     # 💡 [輔助工具：安全轉型數字] 
-    # 防止 AI 傳回 "16PC" 導致 Python 運算當機
     def safe_float(value):
         if value is None or str(value).upper() == 'NULL': return 0.0
+        # 💡 [新增] 識別壞軌標記
+        if "[!]" in str(value): return "BAD_DATA" 
+        
         cleaned = "".join(re.findall(r"[\d\.]+", str(value).replace(',', '')))
         try: return float(cleaned) if cleaned else 0.0
         except: return 0.0
@@ -666,21 +668,55 @@ def python_accounting_audit(dimension_data, res_main):
         ids = [str(e[0]).strip() for e in data_list if len(e) > 0]
         id_counts = Counter(ids)
 
-        # --- 2.1 單項 PC 數核對 ---
+        # --- 2.1 單項 PC 數核對 (含壞軌相容邏輯) ---
         u_local = str(rules.get("local", ""))
         is_body = "本體" in title
         is_journal = any(k in title for k in ["軸頸", "內孔", "Journal"])
         
-        if "1SET=4PCS" in u_local: actual_item_qty = len(data_list) / 4
-        elif "1SET=2PCS" in u_local: actual_item_qty = len(data_list) / 2
-        elif is_body or "PC=PC" in u_local: actual_item_qty = len(set(ids)) # 本體去重
-        else: actual_item_qty = len(data_list)
+        # 💡 [關鍵：判斷是否為重量計件 (KG)]
+        is_weight_mode = "KG" in title.upper() or target_pc > 100
 
+        if is_weight_mode:
+            # ⚖️ 重量模式：執行加總，並偵測是否有壞軌
+            current_sum = 0
+            has_bad_sector = False
+            for e in data_list:
+                temp_val = safe_float(e[1])
+                if temp_val == "DATA_DAMAGED":
+                    has_bad_sector = True
+                else:
+                    current_sum += temp_val
+            
+            actual_item_qty = current_sum
+            
+            if has_bad_sector:
+                accounting_issues.append({
+                    "page": page, "item": title, "issue_type": "⚠️數據損毀",
+                    "common_reason": "包含無法辨識的重量數據，總重無法精確計算",
+                    "failures": [{"id": "警告", "val": "[!]", "calc": "數據損毀"}]
+                })
+        else:
+            # 🔢 數量模式 (PC/SET)：正常點人頭，即使數據是 [!] 也算 1 支
+            if "1SET=4PCS" in u_local: 
+                actual_item_qty = len(data_list) / 4
+            elif "1SET=2PCS" in u_local: 
+                actual_item_qty = len(data_list) / 2
+            elif is_body or "PC=PC" in u_local: 
+                # 即使實測值是 [!]，只要 ID 還在，就會被納入去重計數
+                actual_item_qty = len(set(ids)) 
+            else: 
+                actual_item_qty = len(data_list)
+
+        # 執行單項數量比對
         if actual_item_qty != target_pc and target_pc > 0:
             accounting_issues.append({
                 "page": page, "item": title, "issue_type": "統計不符(單項)",
-                "common_reason": f"要求 {target_pc}PC，內文核算為 {actual_item_qty}",
-                "failures": [{"id": "標題目標", "val": target_pc}, {"id": "內文計數", "val": actual_item_qty}]
+                "common_reason": f"標題要求 {target_pc}PC，內文核算為 {actual_item_qty}",
+                "failures": [
+                    {"id": "項目標題目標", "val": target_pc, "calc": "目標"},
+                    {"id": "內文實際計數", "val": actual_item_qty, "calc": "實際"}
+                ],
+                "source": "🐍 會計引擎"
             })
 
         # --- 2.2 軸頸重複性檢查 ---
