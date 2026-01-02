@@ -896,7 +896,7 @@ if st.session_state.photo_gallery:
 
     trigger_analysis = start_btn or is_auto_start
 
-        if trigger_analysis:
+    if trigger_analysis:
         st.session_state.auto_start_analysis = False
         total_start = time.time()
         
