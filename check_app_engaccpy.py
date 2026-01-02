@@ -891,6 +891,7 @@ if st.session_state.photo_gallery:
                 "ai_extracted_data": dim_data,
                 "python_debug_data": python_debug_data,
                 "full_text_for_search": combined_input # 補回這行以免報錯
+                 "combined_input": combined_input  # ✅ 確保這一行一定要在！
             }
             status_box.update(label="✅ 分析完成！", state="complete", expanded=False)
             st.rerun()
@@ -985,9 +986,10 @@ if st.session_state.photo_gallery:
             type="primary"
         )
 
+        # 💡 使用 .get() 可以防止因為找不到標籤而直接報錯當機
         with st.expander("👀 查看傳給 AI 的最終文字 (Prompt Input)"):
             st.caption("這才是 AI 真正讀到的內容 (已過濾雜訊)：")
-            st.code(cache['combined_input'], language='markdown')
+            st.code(cache.get('combined_input', '無資料'), language='markdown')
     
     if st.session_state.photo_gallery and st.session_state.get('source_mode') != 'json':
         st.caption("已拍攝照片：")
