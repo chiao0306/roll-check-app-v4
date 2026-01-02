@@ -829,74 +829,55 @@ if st.session_state.photo_gallery:
         st.session_state.auto_start_analysis = False
         total_start = time.time()
         
-        # 1. 建立專業載入狀態
+        # 1. 執行分析區塊
         with st.status("總稽核官正在進行全方位分析...", expanded=True) as status_box:
             status_text = st.empty()
             progress_bar = st.progress(0)
             total_imgs = len(st.session_state.photo_gallery)
             ocr_start = time.time()
             
-            # 定義抄錄工人
             def process_task(index, item):
-                # 💡 如果是 JSON 匯入，已有文字則直接回傳
                 if item.get('full_text'):
                     return index, item.get('header_text',''), item['full_text'], None
                 try:
-                    # 如果是照片，呼叫 Azure
                     item['file'].seek(0)
                     _, h, f, _, _ = extract_layout_with_azure(item['file'], DOC_ENDPOINT, DOC_KEY)
                     return index, h, f, None
                 except Exception as e:
                     return index, None, None, str(e)
 
-            # 執行數據收集
-            status_text.text(f"正在整理 {total_imgs} 頁文件數據...")
+            # 數據收集
             with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
                 futures = [executor.submit(process_task, i, item) for i, item in enumerate(st.session_state.photo_gallery)]
                 for future in concurrent.futures.as_completed(futures):
                     idx, h_txt, f_txt, err = future.result()
                     if not err:
-                        st.session_state.photo_gallery[idx].update({
-                            'header_text': h_txt, 
-                            'full_text': f_txt,
-                            'file': None # 釋放記憶體防止崩潰
-                        })
+                        st.session_state.photo_gallery[idx].update({'header_text': h_txt, 'full_text': f_txt, 'file': None})
                     progress_bar.progress((idx + 1) / total_imgs)
 
             ocr_duration = time.time() - ocr_start
-            
-            # --- 💡 [關鍵補回]：開始將收集到的文字合併發送給 AI ---
-            status_text.text("數據收集完畢，正在傳送至總稽核 Agent...")
             combined_input = ""
             for i, p in enumerate(st.session_state.photo_gallery):
                 combined_input += f"\n=== Page {i+1} ===\n{p.get('full_text','')}\n"
 
-            # 2. 執行 AI 翻譯與流程分析
             res_main = agent_unified_check(combined_input, combined_input, GEMINI_KEY, main_model_name)
             dim_data = res_main.get("dimension_data", [])
-            
-            # 3. 執行 Python 數值與會計引擎
-            status_text.text("AI 抄錄完成，正在由 Python 引擎進行硬核對帳...")
             python_numeric_issues = python_numerical_audit(dim_data)
             python_accounting_issues = python_accounting_audit(dim_data, res_main)
-            
-            # 4. 執行表頭一致性檢查
             python_header_issues, python_debug_data = python_header_check(st.session_state.photo_gallery)
 
-            # 5. 合併所有異常結果 (過濾 AI 多嘴的數值錯誤)
             ai_filtered_issues = []
             ai_raw_issues = res_main.get("issues", [])
             if isinstance(ai_raw_issues, list):
                 for i in ai_raw_issues:
                     if isinstance(i, dict):
                         i['source'] = '🤖 總稽核 AI'
-                        # 只保留流程、提取失敗、未匹配。其餘交給 Python。
                         if any(k in i.get("issue_type", "") for k in ["流程", "規格提取失敗", "未匹配"]):
                             ai_filtered_issues.append(i)
 
             all_issues = ai_filtered_issues + python_numeric_issues + python_accounting_issues + python_header_issues
             
-            # --- 6. 存入快取與統計 ---
+            # 存入快取
             usage = res_main.get("_token_usage", {"input": 0, "output": 0})
             st.session_state.analysis_result_cache = {
                 "job_no": res_main.get("job_no", "Unknown"),
@@ -908,108 +889,76 @@ if st.session_state.photo_gallery:
                 "ocr_duration": ocr_duration,
                 "time_eng": time.time() - total_start - ocr_duration,
                 "ai_extracted_data": dim_data,
-                "python_debug_data": python_debug_data
+                "python_debug_data": python_debug_data,
+                "full_text_for_search": combined_input # 補回這行以免報錯
             }
-            
             status_box.update(label="✅ 分析完成！", state="complete", expanded=False)
-            # 💡 最後一步：強制刷新頁面顯示結果
             st.rerun()
+
+    # --- 💡 [重大修正] 顯示結果區塊：必須與 if trigger_analysis 平級 ---
+    if st.session_state.analysis_result_cache:
+        cache = st.session_state.analysis_result_cache
+        all_issues = cache.get('all_issues', [])
         
         st.success(f"工令: {cache['job_no']} | ⏱️ {cache['total_duration']:.1f}s")
         st.info(f"💰 本次成本: NT$ {cache['cost_twd']:.2f} (In: {cache['total_in']:,} / Out: {cache['total_out']:,})")
         st.caption(f"細節耗時: Azure OCR {cache['ocr_duration']:.1f}s | AI 分析 {cache['time_eng']:.1f}s")
         
+        # 展開頁面
         with st.expander("🔍 查看 AI 讀取到的 Excel 規則 (Debug)"):
-            rules_text = get_dynamic_rules(cache['full_text_for_search'], debug_mode=True)
-            if "無特定規則" in rules_text:
-                st.caption("無匹配規則")
-            else:
-                st.markdown(rules_text)
+            rules_text = get_dynamic_rules(cache.get('full_text_for_search',''), debug_mode=True)
+            st.markdown(rules_text)
                 
-        # --- 新增的 Debug 展開頁 ---
-        with st.expander("🔬 查看 AI 抄錄給 Python 的原始數據 (檢查手寫過濾)", expanded=False):
-            raw_dim_data = cache.get("ai_extracted_data", [])
-            if raw_dim_data:
-                st.write("這是 AI 抄錄並翻譯後的 JSON（包含格式是否正確、數字是否被簡化）：")
-                st.json(raw_dim_data)
-            else:
-                st.caption("無數據提取資料。")
+        with st.expander("🔬 查看 AI 抄錄原始數據", expanded=False):
+            st.json(cache.get("ai_extracted_data", []))
 
         with st.expander("🐍 查看 Python 硬邏輯偵測結果 (Debug)", expanded=False):
             if cache.get('python_debug_data'):
-                p_data = cache['python_debug_data']
-                standard_data = {}
-                all_values = {"工令編號": [], "預定交貨": [], "實際交貨": []}
-                for page in p_data:
-                    for k in all_values.keys():
-                        if page.get(k) and page[k] != "N/A":
-                            all_values[k].append(page[k])
-                
-                standard_row = {"頁碼": "🏆 判定標準"}
-                for k, v in all_values.items():
-                    if v:
-                        standard_row[k] = Counter(v).most_common(1)[0][0]
-                    else:
-                        standard_row[k] = "N/A"
-                
-                final_df_data = [standard_row] + p_data
-                st.dataframe(final_df_data, use_container_width=True, hide_index=True)
-                st.info("💡 「判定標準」是依據多數決產生的。")
+                st.dataframe(cache['python_debug_data'], use_container_width=True, hide_index=True)
             else:
                 st.caption("無偵測資料")
 
+        # 判定結論顯示
         real_errors = [i for i in all_issues if "未匹配" not in i.get('issue_type', '')]
-        
-        if not real_errors:
+        if not all_issues:
             st.balloons()
-            if not all_issues:
-                st.success("✅ 全數合格！")
-            else:
-                st.success(f"✅ 數值全數合格！ (但有 {len(all_issues)} 個項目未匹配規則，請檢查)")
+            st.success("✅ 全數合格！")
+        elif not real_errors:
+            st.success(f"✅ 數值合格！ (但有 {len(all_issues)} 個項目未匹配規則)")
         else:
-            st.error(f"發現 {len(real_errors)} 類數值異常，另有 {len(all_issues) - len(real_errors)} 個項目未匹配規則")
+            st.error(f"發現 {len(real_errors)} 類異常")
 
+        # 卡片循環顯示
         for item in all_issues:
             with st.container(border=True):
                 c1, c2 = st.columns([3, 1])
-                
                 source_label = item.get('source', '')
                 issue_type = item.get('issue_type', '異常')
-                
                 c1.markdown(f"**P.{item.get('page', '?')} | {item.get('item')}**  `{source_label}`")
                 
-                # 顏色控制：會計統計類用紅色，規格類用黃色
-                if "統計" in issue_type or "數量" in issue_type or "流程" in issue_type:
+                if any(kw in issue_type for kw in ["統計", "數量", "流程"]):
                     c2.error(f"🛑 {issue_type}")
                 else:
                     c2.warning(f"⚠️ {issue_type}")
                 
                 st.caption(f"原因: {item.get('common_reason', '')}")
                 
-                # --- 渲染表格 (會計對帳單) ---
                 failures = item.get('failures', [])
                 if failures:
                     table_data = []
                     for f in failures:
                         if isinstance(f, dict):
-                            # 我們統一使用這四個欄位標題，會計與工程共用
-                            row = {
-                                "項目/滾輪編號": f.get('id', '未知'), 
+                            table_data.append({
+                                "項目/編號": f.get('id', '未知'), 
                                 "實測/計數": f.get('val', 'N/A'),
-                                "標準/備註": f.get('target', ''), # 工程用
-                                "判定算式/狀態": f.get('calc', '') # 會計用
-                            }
-                            # 如果是會計模式，把 target 留空，資訊主要在 id 和 val
-                            table_data.append(row)
-                    
-                    if table_data:
-                        st.dataframe(table_data, use_container_width=True, hide_index=True)
-                else:
-                    # 如果沒有 failures，至少顯示一個數據提示
-                    st.info(f"詳細數據見上述原因說明")
+                                "標準/備註": f.get('target', ''),
+                                "狀態": f.get('calc', '')
+                            })
+                    st.dataframe(table_data, use_container_width=True, hide_index=True)
         
         st.divider()
-
+        # 下載按鈕與原文展開
+        # ... (這裡接你原本剩下的代碼即可，也要記得縮排往左移)
         current_job_no = cache.get('job_no', 'Unknown')
         safe_job_no = current_job_no.replace("/", "_").replace("\\", "_").strip()
         file_name_str = f"{safe_job_no}_cleaned.json"
