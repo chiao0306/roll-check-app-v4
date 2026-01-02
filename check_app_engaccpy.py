@@ -827,28 +827,56 @@ if st.session_state.photo_gallery:
 
     if trigger_analysis:
         total_start = time.time()
-        # 💡 建立專業狀態列，分開 AI 與 Python 進度
-        with st.status("🚀 稽核任務啟動...", expanded=True) as status_box:
-            
-            # --- 第一階段：OCR 掃描 ---
-            status_box.write("📸 正在讀取並平行掃描文件圖片...")
-            status = st.empty() # 為了保留原有的 status.text 顯示
+        # 💡 建立狀態盒子 (st.status)，找回跑步小人的載入感
+        with st.status("總稽核官正在進行全方位分析...", expanded=True) as status_box:
+            status = st.empty() 
             progress_bar = st.progress(0)
+            
+            extracted_data_list = [None] * len(st.session_state.photo_gallery)
             total_imgs = len(st.session_state.photo_gallery)
             ocr_start = time.time()
+            
+            # 💡 [關鍵補回] 定義 process_image_task 函式
+            def process_image_task(index, item):
+                index = int(index)
+                # 如果已經有資料了就不重複掃描
+                if item.get('full_text'):
+                    return index, item.get('table_md',''), item.get('header_text',''), item['full_text'], None, "OK", None
+        
+                try:
+                    if item.get('file') is None:
+                        return index, None, None, None, None, None, "無圖片檔案"
+                    
+                    item['file'].seek(0)
+                    # 執行 Azure OCR
+                    _, h, f, _, _ = extract_layout_with_azure(item['file'], DOC_ENDPOINT, DOC_KEY)
+                    return index, "", h, f, None, "OK", None
+                except Exception as e:
+                    return index, None, None, None, None, None, f"OCR失敗: {str(e)}"
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            # 💡 執行平行掃描
+            status.text(f"Azure 正在平行掃描 {total_imgs} 頁文件...")
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
                 futures = []
                 for i, item in enumerate(st.session_state.photo_gallery):
+                    # 這裡的名字必須跟上面 def 的名字一模一樣
                     futures.append(executor.submit(process_image_task, i, item))
                 
+                completed_count = 0
                 for future in concurrent.futures.as_completed(futures):
                     idx, t_md, h_txt, f_txt, raw_j, r_page, err = future.result()
+                    idx = int(idx)
+                    
                     if not err:
+                        # 存入資料並【釋放記憶體】
                         st.session_state.photo_gallery[idx].update({
-                            'table_md': t_md, 'header_text': h_txt, 'full_text': f_txt, 'real_page': r_page, 'file': None # 💡 釋放記憶體
+                            'header_text': h_txt, 
+                            'full_text': f_txt,
+                            'file': None # 👈 掃完就丟掉圖片，防止 8 頁當機
                         })
-                    progress_bar.progress((idx + 1) / total_imgs)
+                    
+                    completed_count += 1
+                    progress_bar.progress(completed_count / total_imgs)
             
             ocr_duration = time.time() - ocr_start
             combined_input = "\n".join([f"=== Page {i+1} ===\n{p['full_text']}" for i, p in enumerate(st.session_state.photo_gallery)])
