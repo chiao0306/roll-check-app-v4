@@ -465,34 +465,46 @@ def python_numerical_audit(dimension_data):
         # 免死金牌：緊貼 mm 的數字不准過濾
         clean_std = [n for n in all_nums if (n in mm_nums) or (n not in noise and n > 5)]
 
-        # 3. 💡 多重區間自動預算 (支援 一、二、多重規格並存)
+        # 3. 💡 多重區間自動預算 (整合版：支援孤立公差、mm 定位、雜訊隔離)
         s_ranges = []
-        # 先根據「一、二、三、(1)、(2)」等序號或分號切開段落
+        # 🛡️ 定義型號與機號雜訊黑名單 (不准這些數字單獨當基準)
+        noise_list = [350.0, 300.0, 200.0, 145.0, 130.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+        
+        # 根據序號切開段落 (一、二、(1)、(2))
         spec_parts = re.split(r"[一二三四五六]|[（(]\d+[)）]|[;；]", raw_spec)
         
         for part in spec_parts:
             clean_part = part.replace(" ", "")
             if not clean_part: continue
             
-            # A. 找該段落的基準值 (mm之前的數字)
-            base_match = re.search(r"(\d+\.?\d*)mm", clean_part)
-            # B. 找該段落的 ± 結構
-            pm_match = re.search(r"(\d+\.?\d*)±(\d+\.?\d*)", clean_part)
+            # A. 優先找 基準 ± 偏移 (如 300±0.1)
+            pm_full = re.search(r"(\d+\.?\d*)±(\d+\.?\d*)", clean_part)
+            # B. 找 孤立的 ± 偏移 (如 真圓度±0.1) -> 代表 [0, 0.1]
+            pm_lone = re.search(r"±(\d+\.?\d*)", clean_part)
+            # C. 找 mm 基底 (如 160mm)
+            base_mm = re.search(r"(\d+\.?\d*)mm", clean_part)
             
-            if pm_match:
-                b, o = float(pm_match.group(1)), float(pm_match.group(2))
+            if pm_full:
+                b, o = float(pm_full.group(1)), float(pm_full.group(2))
                 s_ranges.append([round(b - o, 4), round(b + o, 4)])
-            elif base_match:
-                b = float(base_match.group(1))
-                # 💡 僅在「這一個段落」內找偏移量
+            elif pm_lone:
+                # 只有公差，視為 0 到 0.1
+                s_ranges.append([0.0, float(pm_lone.group(1))]) 
+            elif base_mm:
+                b = float(base_mm.group(1))
+                # 🛡️ [雜訊過濾]：如果抓到的基準數字在黑名單內，且該段落沒有其他公差，則忽略它
                 offsets = re.findall(r"([+-]\d+\.?\d*)", clean_part)
+                if b in noise_list and not offsets:
+                    continue # 這可能是型號雜訊，跳過
+                
                 if offsets:
                     endpoints = [b + float(o) for o in offsets]
                     if len(endpoints) == 1: endpoints.append(b)
                     s_ranges.append([round(min(endpoints), 4), round(max(endpoints), 4)])
                 else:
-                    # 如果只有 mm 沒公差，就把該數字當成單一標準
-                    s_ranges.append([b, b])
+                    # 沒有公差的單一 mm 數字，且不在黑名單，才當成基準
+                    if b not in noise_list:
+                        s_ranges.append([b, b])
                     
         # 4. 💡 預算基準 (移出循環)
         logic = item.get("sl", {})
