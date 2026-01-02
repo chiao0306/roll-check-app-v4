@@ -367,27 +367,61 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
     }}
     """
     
-    generation_config = {"response_mime_type": "application/json", "temperature": 0.0}
+    # 修改後的建議配置
+    generation_config = {
+    "temperature": 0.0,             # ⚡️ 設為 0：最快且最穩定，不讓 AI 多想
+    "max_output_tokens": 4096,      # ⚡️ 先降回 4096：通常 4 頁資料這個長度就夠了，減少 AI 廢話
+    # "response_mime_type": "application/json" # ⚡️ 暫時註解掉這行！
+    }
+
     
+    def agent_unified_check(combined_input, full_text_for_search, api_key, model_name):
+    dynamic_rules = get_dynamic_rules(full_text_for_search)
+    # ... (System Prompt 保持不變) ...
+
     try:
         genai.configure(api_key=api_key)
         
-        # ⚡️ 修正：嘗試加上 models/ 前綴並解除安全攔截
+        # 1. 輕量化配置：移除強制 JSON 模式以提升速度
+        gen_config = {
+            "temperature": 0.0,          # 絕對穩定
+            "max_output_tokens": 5000,   # 適中的長度
+        }
+
+        # 2. 保留安全設定：防止 OCR 誤判攔截
+        safety = {
+            "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
+            "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
+            "HARM_CATEGORY_SEXUALLY_EXPLICIT": "BLOCK_NONE",
+            "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
+        }
+
         model = genai.GenerativeModel(
-            model_name=f"models/{model_name}" if "models/" not in model_name else model_name,
-            safety_settings={
-                "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
-                "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
-                "HARM_CATEGORY_SEXUALLY_EXPLICIT": "BLOCK_NONE",
-                "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
-            }
+            model_name=model_name,
+            generation_config=gen_config,
+            safety_settings=safety
         )
         
-        response = model.generate_content([system_prompt, combined_input], generation_config=generation_config)
+        # 3. 呼叫 AI
+        response = model.generate_content([system_prompt, combined_input])
         
-        # ⚡️ 檢查是否有內容
-        if not response.text:
-            return {"job_no": "Error: AI 回傳內容為空", "issues": [], "dimension_data": []}
+        # ⚡️ 手動清洗 JSON 標記 (因為關閉了強制模式，AI 可能會加 ```json)
+        raw_content = response.text.strip()
+        if "```json" in raw_content:
+            raw_content = raw_content.split("```json")[1].split("```")[0].strip()
+        elif "```" in raw_content:
+            raw_content = raw_content.split("```")[1].split("```")[0].strip()
+
+        parsed_data = json.loads(raw_content)
+        parsed_data["_token_usage"] = {
+            "input": response.usage_metadata.prompt_token_count, 
+            "output": response.usage_metadata.candidates_token_count
+        }
+        return parsed_data
+
+    except Exception as e:
+        # 發生錯誤時至少回傳一個帶有錯誤訊息的結構
+        return {"job_no": f"Error: {str(e)}", "issues": [], "dimension_data": []}
 
         raw_content = response.text
         
