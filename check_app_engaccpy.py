@@ -70,6 +70,7 @@ with st.sidebar:
     model_options = {
         "Gemini 3 Flash preview": "gemini-3-flash-preview",
         "Gemini 2.5 Flash": "models/gemini-2.5-flash",
+        "Gemini 2.5 Flash Lite": "gemini-2.5-flash-lite",
         "Gemini 2.5 Pro": "models/gemini-2.5-pro",
         #"GPT-5(無效)": "models/gpt-5",
         #"GPT-5 Mini(無效)": "models/gpt-5-mini",
@@ -80,7 +81,7 @@ with st.sidebar:
     model_selection = st.selectbox(
         "負責：規格、製程、數量、統計全包", 
         options=options_list, 
-        index=0, 
+        index=1, 
         key="main_model"
     )
     main_model_name = model_options[model_selection]
