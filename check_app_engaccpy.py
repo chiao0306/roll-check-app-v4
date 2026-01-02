@@ -826,109 +826,94 @@ if st.session_state.photo_gallery:
     trigger_analysis = start_btn or is_auto_start
 
     if trigger_analysis:
+        st.session_state.auto_start_analysis = False
         total_start = time.time()
-        # 💡 建立狀態盒子 (st.status)，找回跑步小人的載入感
+        
+        # 1. 建立專業載入狀態
         with st.status("總稽核官正在進行全方位分析...", expanded=True) as status_box:
-            status = st.empty() 
+            status_text = st.empty()
             progress_bar = st.progress(0)
-            
-            extracted_data_list = [None] * len(st.session_state.photo_gallery)
             total_imgs = len(st.session_state.photo_gallery)
             ocr_start = time.time()
             
-            # 💡 [關鍵補回] 定義 process_image_task 函式
-            def process_image_task(index, item):
-                index = int(index)
-                # 如果已經有資料了就不重複掃描
+            # 定義抄錄工人
+            def process_task(index, item):
+                # 💡 如果是 JSON 匯入，已有文字則直接回傳
                 if item.get('full_text'):
-                    return index, item.get('table_md',''), item.get('header_text',''), item['full_text'], None, "OK", None
-        
+                    return index, item.get('header_text',''), item['full_text'], None
                 try:
-                    if item.get('file') is None:
-                        return index, None, None, None, None, None, "無圖片檔案"
-                    
+                    # 如果是照片，呼叫 Azure
                     item['file'].seek(0)
-                    # 執行 Azure OCR
                     _, h, f, _, _ = extract_layout_with_azure(item['file'], DOC_ENDPOINT, DOC_KEY)
-                    return index, "", h, f, None, "OK", None
+                    return index, h, f, None
                 except Exception as e:
-                    return index, None, None, None, None, None, f"OCR失敗: {str(e)}"
+                    return index, None, None, str(e)
 
-            # 💡 執行平行掃描
-            status.text(f"Azure 正在平行掃描 {total_imgs} 頁文件...")
-            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-                futures = []
-                for i, item in enumerate(st.session_state.photo_gallery):
-                    # 這裡的名字必須跟上面 def 的名字一模一樣
-                    futures.append(executor.submit(process_image_task, i, item))
-                
-                completed_count = 0
+            # 執行數據收集
+            status_text.text(f"正在整理 {total_imgs} 頁文件數據...")
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                futures = [executor.submit(process_task, i, item) for i, item in enumerate(st.session_state.photo_gallery)]
                 for future in concurrent.futures.as_completed(futures):
-                    idx, t_md, h_txt, f_txt, raw_j, r_page, err = future.result()
-                    idx = int(idx)
-                    
+                    idx, h_txt, f_txt, err = future.result()
                     if not err:
-                        # 存入資料並【釋放記憶體】
                         st.session_state.photo_gallery[idx].update({
                             'header_text': h_txt, 
                             'full_text': f_txt,
-                            'file': None # 👈 掃完就丟掉圖片，防止 8 頁當機
+                            'file': None # 釋放記憶體防止崩潰
                         })
-                    
-                    completed_count += 1
-                    progress_bar.progress(completed_count / total_imgs)
-            
-            ocr_duration = time.time() - ocr_start
-            combined_input = "\n".join([f"=== Page {i+1} ===\n{p['full_text']}" for i, p in enumerate(st.session_state.photo_gallery)])
+                    progress_bar.progress((idx + 1) / total_imgs)
 
-            # --- 第二階段：AI 翻譯官 ---
-            status_box.update(label="🤖 正在呼叫 AI Agent 分析流程與抄寫數據...", state="running")
-            ai_start = time.time()
+            ocr_duration = time.time() - ocr_start
+            
+            # --- 💡 [關鍵補回]：開始將收集到的文字合併發送給 AI ---
+            status_text.text("數據收集完畢，正在傳送至總稽核 Agent...")
+            combined_input = ""
+            for i, p in enumerate(st.session_state.photo_gallery):
+                combined_input += f"\n=== Page {i+1} ===\n{p.get('full_text','')}\n"
+
+            # 2. 執行 AI 翻譯與流程分析
             res_main = agent_unified_check(combined_input, combined_input, GEMINI_KEY, main_model_name)
-            time_ai = time.time() - ai_start
-            
-            # --- 第三階段：Python 引擎 (尺寸 + 會計 + 流程) ---
-            status_box.update(label="🐍 正在啟動 Python 硬邏輯引擎執行精確校對...", state="running")
-            py_start = time.time()
-            
             dim_data = res_main.get("dimension_data", [])
+            
+            # 3. 執行 Python 數值與會計引擎
+            status_text.text("AI 抄錄完成，正在由 Python 引擎進行硬核對帳...")
             python_numeric_issues = python_numerical_audit(dim_data)
             python_accounting_issues = python_accounting_audit(dim_data, res_main)
-            python_process_issues = python_process_audit(dim_data) # 跨頁流程
-            python_header_issues, python_debug_data = python_header_check(st.session_state.photo_gallery)
             
-            # 合併結果
-            ai_raw_issues = res_main.get("issues", [])
+            # 4. 執行表頭一致性檢查
+            python_header_issues, python_debug_data = python_header_check(st.session_state.photo_gallery)
+
+            # 5. 合併所有異常結果 (過濾 AI 多嘴的數值錯誤)
             ai_filtered_issues = []
+            ai_raw_issues = res_main.get("issues", [])
             if isinstance(ai_raw_issues, list):
                 for i in ai_raw_issues:
                     if isinstance(i, dict):
                         i['source'] = '🤖 總稽核 AI'
-                        # 只保留 AI 擅長的特定任務
-                        if any(k in str(i.get("issue_type","")) for k in ["規格提取失敗", "未匹配"]):
+                        # 只保留流程、提取失敗、未匹配。其餘交給 Python。
+                        if any(k in i.get("issue_type", "") for k in ["流程", "規格提取失敗", "未匹配"]):
                             ai_filtered_issues.append(i)
 
-            all_issues = ai_filtered_issues + python_numeric_issues + python_accounting_issues + python_process_issues + python_header_issues
-            time_py = time.time() - py_start
-
-            # --- 存入快取 ---
+            all_issues = ai_filtered_issues + python_numeric_issues + python_accounting_issues + python_header_issues
+            
+            # --- 6. 存入快取與統計 ---
+            usage = res_main.get("_token_usage", {"input": 0, "output": 0})
             st.session_state.analysis_result_cache = {
                 "job_no": res_main.get("job_no", "Unknown"),
                 "all_issues": all_issues,
                 "total_duration": time.time() - total_start,
-                "cost_twd": (res_main.get("_token_usage",{}).get("input",0)*0.5 + res_main.get("_token_usage",{}).get("output",0)*3.0)/1000000*32.5,
+                "cost_twd": (usage.get("input", 0)*0.5 + usage.get("output", 0)*3.0) / 1000000 * 32.5,
+                "total_in": usage.get("input", 0),
+                "total_out": usage.get("output", 0),
                 "ocr_duration": ocr_duration,
-                "time_eng": time_ai, # AI 時間
-                "time_py": time_py,   # Python 時間
+                "time_eng": time.time() - total_start - ocr_duration,
                 "ai_extracted_data": dim_data,
                 "python_debug_data": python_debug_data
             }
             
-            # 完成：自動縮起盒子並變綠
             status_box.update(label="✅ 分析完成！", state="complete", expanded=False)
-
-        # 💡 重整頁面顯示結果
-        st.rerun()
+            # 💡 最後一步：強制刷新頁面顯示結果
+            st.rerun()
         
         st.success(f"工令: {cache['job_no']} | ⏱️ {cache['total_duration']:.1f}s")
         st.info(f"💰 本次成本: NT$ {cache['cost_twd']:.2f} (In: {cache['total_in']:,} / Out: {cache['total_out']:,})")
