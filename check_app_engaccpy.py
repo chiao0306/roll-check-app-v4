@@ -465,30 +465,35 @@ def python_numerical_audit(dimension_data):
         # 免死金牌：緊貼 mm 的數字不准過濾
         clean_std = [n for n in all_nums if (n in mm_nums) or (n not in noise and n > 5)]
 
-        # 3. 💡 強健型公差預算 (修正：暴力清除空格並解析所有偏差)
+        # 3. 💡 多重區間自動預算 (支援 一、二、多重規格並存)
         s_ranges = []
-        # 先把 "0. 13" 這種 OCR 產生的空格清掉，變成 "0.13"
-        clean_spec = raw_spec.replace(" ", "")
+        # 先根據「一、二、三、(1)、(2)」等序號或分號切開段落
+        spec_parts = re.split(r"[一二三四五六]|[（(]\d+[)）]|[;；]", raw_spec)
         
-        # A. 抓取 mm 之前的數字作為基準 (base)
-        base_match = re.search(r"(\d+\.?\d*)mm", clean_spec)
-        pm_match = re.search(r"(\d+\.?\d*)±(\d+\.?\d*)", clean_spec)
-        
-        if pm_match: # 處理 ±
-            b, o = float(pm_match.group(1)), float(pm_match.group(2))
-            s_ranges.append([round(b - o, 4), round(b + o, 4)])
-        elif base_match: # 處理 +0.3, +0.8 或 +0, -0.13 等多種偏差
-            b = float(base_match.group(1))
-            # 💡 找出所有帶符號的偏移量
-            offsets = re.findall(r"([+-]\d+\.?\d*)", clean_spec)
-            if offsets:
-                # 把基準數字加上偏移量，算出所有端點
-                # 例如 300 + 0 = 300.0, 300 + (-0.13) = 299.87
-                endpoints = [b + float(o) for o in offsets]
-                # 如果只有一個偏移量，基準本身也是一個端點
-                if len(endpoints) == 1: endpoints.append(b)
-                s_ranges.append([round(min(endpoints), 4), round(max(endpoints), 4)])
-
+        for part in spec_parts:
+            clean_part = part.replace(" ", "")
+            if not clean_part: continue
+            
+            # A. 找該段落的基準值 (mm之前的數字)
+            base_match = re.search(r"(\d+\.?\d*)mm", clean_part)
+            # B. 找該段落的 ± 結構
+            pm_match = re.search(r"(\d+\.?\d*)±(\d+\.?\d*)", clean_part)
+            
+            if pm_match:
+                b, o = float(pm_match.group(1)), float(pm_match.group(2))
+                s_ranges.append([round(b - o, 4), round(b + o, 4)])
+            elif base_match:
+                b = float(base_match.group(1))
+                # 💡 僅在「這一個段落」內找偏移量
+                offsets = re.findall(r"([+-]\d+\.?\d*)", clean_part)
+                if offsets:
+                    endpoints = [b + float(o) for o in offsets]
+                    if len(endpoints) == 1: endpoints.append(b)
+                    s_ranges.append([round(min(endpoints), 4), round(max(endpoints), 4)])
+                else:
+                    # 如果只有 mm 沒公差，就把該數字當成單一標準
+                    s_ranges.append([b, b])
+                    
         # 4. 💡 預算基準 (移出循環)
         logic = item.get("sl", {})
         l_type = logic.get("lt", "")
