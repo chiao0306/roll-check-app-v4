@@ -429,32 +429,28 @@ def python_numerical_audit(dimension_data):
         if not ds: continue
         raw_entries = [p.split(":") for p in ds.split("|") if ":" in p]
         
-        title = str(item.get("item_title", "")).replace(" ", "").replace('"', "")
-        cat = str(item.get("category", "")).strip()
+        # 🧽 [修正] 強制清洗標題與分類，確保邏輯判斷無死角
+        title = str(item.get("item_title", "")).replace(" ", "").replace("\n", "").replace('"', "")
+        cat = str(item.get("category", "")).replace(" ", "").strip()
+        
         page_num = item.get("page", "?")
         raw_spec = str(item.get("std_spec", "")).replace('"', "")
         
-        # 2. 🛡️ 數據清洗 (修正版：保留 300, 350 等大尺寸，只過濾小雜訊)
+        # 2. 🛡️ 數據清洗
         all_nums = [float(n) for n in re.findall(r"[-+]?\d+\.?\d*", raw_spec.replace(" ", ""))]
-        
-        # ⚡️ 關鍵修改：只過濾 1~10 這種像是「項次」或「數量」的小數字
-        # 絕對不要過濾 100 以上的數字，因為那可能是直徑！
+        # 只過濾像是項次的小數字，保留大尺寸
         noise = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 0.0] 
-        
-        clean_std = [n for n in all_nums if (n not in noise and n > 10)] # 這裡確保只抓大於 10 的當作有效規格
+        clean_std = [n for n in all_nums if (n not in noise and n > 10)]
 
-        # 3. 💡 多重區間自動預算 (不切分小數點版)
+        # 3. 💡 多重區間自動預算 (保留之前的修復：不切分小數點)
         s_ranges = []
-        
-        # ⚡️ 修正點：只用中文數字或分號切分，絕對不切小數點
         spec_parts = re.split(r"[一二三四五六]|[;；]", raw_spec)
         
         for part in spec_parts:
-            # 去除空格，修復 "-0. 014" 這種 AI 格式問題
             clean_part = part.replace(" ", "").replace("\n", "").strip()
             if not clean_part: continue
             
-            # --- 邏輯 A：優先處理 ± (如 300±0.1) ---
+            # 邏輯 A：優先處理 ±
             pm_match = re.search(r"(\d+\.?\d*)?±(\d+\.?\d*)", clean_part)
             if pm_match:
                 b = float(pm_match.group(1)) if pm_match.group(1) else 0.0
@@ -462,58 +458,42 @@ def python_numerical_audit(dimension_data):
                 s_ranges.append([round(b - o, 4), round(b + o, 4)])
                 continue
 
-            # --- 邏輯 B：處理波浪號區間 (如 101.64~101.66) ---
+            # 邏輯 B：處理波浪號區間
             tilde_match = re.search(r"(\d+\.?\d*)[~～-](\d+\.?\d*)", clean_part)
             if tilde_match:
                 n1, n2 = float(tilde_match.group(1)), float(tilde_match.group(2))
-                # 防呆：兩個數字不能差太多 (避免把 140-0.01 誤判為 140~0.01)
                 if abs(n1 - n2) < n1 * 0.5: 
                     s_ranges.append([round(min(n1, n2), 4), round(max(n1, n2), 4)])
                     continue
 
-            # --- 邏輯 C：智慧配對 (解決 140 -0.01, -0.03) ---
-            # 1. 抓出所有數字 (包含負數)
+            # 邏輯 C：智慧配對 (解決 140 -0.01, -0.03)
             all_tokens = re.findall(r"[-+]?\d+\.?\d*", clean_part)
             if not all_tokens: continue
 
-            # 2. 分類：誰是基準(Base)，誰是公差(Offset)
             bases = []
             offsets = []
-            
             for token in all_tokens:
                 val = float(token)
-                # 規則：大於 10 的通常是直徑基準，小於 1 的通常是公差
-                # 帶有 +/- 符號的即使大一點也算公差，但在 regex 裡 float 會吃掉符號
-                # 所以我們用數值大小做最穩定的判斷
-                if val > 10.0:
-                    bases.append(val)
-                elif abs(val) < 10.0:
-                    offsets.append(val)
+                if val > 10.0: bases.append(val)
+                elif abs(val) < 10.0: offsets.append(val)
             
-            # 3. 配對：把找到的公差應用到這一段找到的所有基準上
             if bases:
                 for b in bases:
                     if offsets:
-                        # 有公差：計算範圍 (基準+公差)
                         endpoints = [round(b + o, 4) for o in offsets]
-                        # 如果只有一個公差 (如 140 -0.05)，預設另一個端點是基準本身(140)
-                        # 但如果是兩個公差 (如 -0.01, -0.03)，就取這兩個為邊界
-                        # 您的案例是兩個公差，所以會形成 [139.961, 139.986]
                         if len(endpoints) == 1: endpoints.append(b)
                         s_ranges.append([min(endpoints), max(endpoints)])
                     else:
-                        # 沒公差：單一值
                         s_ranges.append([b, b])
 
-        # 4. 💡 預算基準 (移出循環)
-        logic = item.get("sl", {})
-        l_type = logic.get("lt", "")
-        s_threshold = logic.get("t", 0)
+        # 4. 💡 預算基準 (Logic 變數的處理)
+        # 這裡雖然 AI 已經不輸出了，但保留代碼無害，且我們主要依賴 cat + title 判定
+        s_threshold = 0 # 預設為 0，因為 AI 不輸出了
         
         un_regen_target = None
-        if l_type in ["un_regen", "未再生"] or ("未再生" in (cat + title) and "軸頸" not in (cat + title)):
+        # 使用清洗後的 cat 和 title 判斷
+        if cat in ["un_regen", "未再生"] or ("未再生" in (cat + title) and "軸頸" not in (cat + title)):
             cands = [n for n in clean_std if n >= 120.0]
-            if s_threshold and float(s_threshold) >= 120.0: cands.append(float(s_threshold))
             if cands: un_regen_target = max(cands)
 
         # --- 5. 開始逐一判定 ---
@@ -543,7 +523,8 @@ def python_numerical_audit(dimension_data):
                 else:
                     is_two_dec, is_pure_int = True, True 
 
-                if "min_limit" in l_type or "銲補" in (cat + title):
+                # 使用清洗後的字串進行匹配
+                if "min_limit" in cat or "銲補" in (cat + title):
                     engine_label = "銲補"
                     if not is_pure_int: is_passed, reason = False, "應為純整數"
                     elif clean_std:
@@ -558,22 +539,22 @@ def python_numerical_audit(dimension_data):
                     elif not is_two_dec: 
                         is_passed, reason = False, "應填兩位小數"
 
-                elif l_type == "max_limit" or (("軸頸" in (cat + title)) and ("未再生" in (cat + title))):
+                elif "max_limit" in cat or (("軸頸" in (cat + title)) and ("未再生" in (cat + title))):
                     engine_label = "軸頸(上限)"
-                    candidates = [float(n) for n in (clean_std + [float(s_threshold) if s_threshold else 0])]
+                    candidates = clean_std
                     target = max(candidates) if candidates else 0
                     t_used = target
                     if target > 0:
                         if not is_pure_int: is_passed, reason = False, "應為純整數"
                         elif val > target: is_passed, reason = False, f"超過上限 {target}"
 
+                # 精加工：確保判斷字串也是乾淨的
                 elif any(x in (cat + title) for x in ["再生", "精加工", "研磨", "車修", "組裝", "拆裝", "真圓度"]) and "未再生" not in (cat + title):
                     engine_label = "精加工"
                     if not is_two_dec:
                         is_passed, reason = False, "應填兩位小數"
                     elif s_ranges:
                         t_used = str(s_ranges)
-                        # 💡 核心：只要符合任何一個解析出的區間就算合格
                         if not any(r[0] <= val <= r[1] for r in s_ranges): 
                             is_passed, reason = False, "不在區間內"
 
@@ -592,33 +573,28 @@ def python_numerical_audit(dimension_data):
     
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官：【自動查表完全體】
-    整合功能：單項核對(去重)、軸頸限次、KG重量累加、A/B總表模式、運費動態解析。
+    Python 會計官：三條鐵律 + 真空清洗版 (無視所有空格干擾)
     """
     accounting_issues = []
     from thefuzz import fuzz
     from collections import Counter
     import re
-    import pandas as pd
 
-    # 💡 [新增：自動查表準備] 讀取全域 Excel 規則檔
-    try:
-        df_rules = pd.read_excel("rules.xlsx")
-        df_rules.columns = [c.strip() for c in df_rules.columns]
-    except:
-        df_rules = None
+    # 🧽 [新增] 真空清洗工具：移除所有空格、換行
+    def clean_text(text):
+        return str(text).replace(" ", "").replace("\n", "").replace("\r", "").strip()
 
-    # 💡 [輔助工具：安全轉型數字] 
+    # 安全轉型工具
     def safe_float(value):
         if value is None or str(value).upper() == 'NULL': return 0.0
-        val_str = str(value).strip()
-        if "[!]" in val_str: return "BAD_DATA" 
-        cleaned = "".join(re.findall(r"[\d\.]+", val_str.replace(',', '')))
+        if "[!]" in str(value): return "BAD_DATA" 
+        cleaned = "".join(re.findall(r"[\d\.]+", str(value).replace(',', '')))
         try: return float(cleaned) if cleaned else 0.0
         except: return 0.0
 
-    # 1. 取得對帳基準 (來自左上角統計表)
+    # 1. 取得對帳基準 (建立籃子)
     summary_rows = res_main.get("summary_rows", [])
+    # 這裡的 key (s['title']) 保持原樣以利顯示，但在比對時我們會清洗它
     global_sum_tracker = {
         s['title']: {"target": safe_float(s['target']), "actual": 0, "details": []} 
         for s in summary_rows if s.get('title')
@@ -628,27 +604,16 @@ def python_accounting_audit(dimension_data, res_main):
     freight_actual_sum = 0
     freight_details = []
 
-    # 2. 開始逐項遍歷
+    # 2. 逐項過帳
     for item in dimension_data:
-        title = item.get("item_title", "")
+        raw_title = item.get("item_title", "")
+        # 🧽 立即建立「無空格版標題」供邏輯判斷使用
+        title_clean = clean_text(raw_title)
+        
         page = item.get("page", "?")
         target_pc = safe_float(item.get("item_pc_target", 0)) 
         
-        # 💡 [關鍵功能：Python 自動查表補位]
-        # 不再依賴 AI 抄錄，直接從標題匹配 Excel 裡的三個會計欄位
-        matched_rule = {"local": "", "agg": "", "freight": ""}
-        if df_rules is not None:
-            for _, row in df_rules.iterrows():
-                # 使用標題模糊匹配 Excel 裡的 Item_Name
-                if fuzz.partial_ratio(str(row.get('Item_Name', '')), title) >= 85:
-                    matched_rule = {
-                        "local": str(row.get('Unit_Rule_Local', '')),
-                        "agg": str(row.get('Unit_Rule_Agg', '')),
-                        "freight": str(row.get('Unit_Rule_Freight', ''))
-                    }
-                    break
-        
-        # 💡 解開數據字串 ds
+        # 解開數據 ds
         ds = str(item.get("ds", ""))
         data_list = [pair.split(":") for pair in ds.split("|") if ":" in pair]
         if not data_list: continue
@@ -656,13 +621,10 @@ def python_accounting_audit(dimension_data, res_main):
         ids = [str(e[0]).strip() for e in data_list if len(e) > 0]
         id_counts = Counter(ids)
 
-        # --- 2.1 單項 PC 數核對 (含壞軌相容邏輯) ---
-        u_local = matched_rule["local"]
-        is_body = "本體" in title
-        is_journal = any(k in title for k in ["軸頸", "內孔", "Journal"])
-        
-        # 判斷是否為重量計件 (KG)
-        is_weight_mode = "KG" in title.upper() or target_pc > 100
+        # --- 2.1 單項數量計算 ---
+        # 使用清洗後的標題判斷本體/重量
+        is_body = "本體" in title_clean
+        is_weight_mode = "KG" in title_clean.upper() or target_pc > 100
 
         if is_weight_mode:
             current_sum = 0
@@ -674,90 +636,102 @@ def python_accounting_audit(dimension_data, res_main):
             actual_item_qty = current_sum
             if has_bad_sector:
                 accounting_issues.append({
-                    "page": page, "item": title, "issue_type": "⚠️數據損毀",
-                    "common_reason": "包含無法辨識的重量數據，總重可能不準",
+                    "page": page, "item": raw_title, "issue_type": "⚠️數據損毀",
+                    "common_reason": "包含無法辨識的重量數據",
                     "failures": [{"id": "警告", "val": "[!]", "calc": "數據損毀"}]
                 })
         else:
-            # 數量模式：1SET換算、本體去重、其餘計行
-            if "1SET=4PCS" in u_local: actual_item_qty = len(data_list) / 4
-            elif "1SET=2PCS" in u_local: actual_item_qty = len(data_list) / 2
-            elif is_body or "PC=PC" in u_local: actual_item_qty = len(set(ids)) 
+            if is_body: actual_item_qty = len(set(ids)) 
             else: actual_item_qty = len(data_list)
 
-        # 單項數量比對
-        if not is_weight_mode and actual_item_qty != target_pc and target_pc > 0:
+        # 單項比對
+        if actual_item_qty != target_pc and target_pc > 0:
             accounting_issues.append({
-                "page": page, "item": title, "issue_type": "統計不符(單項)",
-                "common_reason": f"要求 {target_pc}PC，內文核算為 {actual_item_qty}",
-                "failures": [{"id": "標題目標", "val": target_pc}, {"id": "內文實際", "val": actual_item_qty}]
+                "page": page, "item": raw_title, "issue_type": "統計不符(單項)",
+                "common_reason": f"標題 {target_pc}PC != 內文 {actual_item_qty}",
+                "failures": [
+                    {"id": "目標", "val": target_pc, "calc": "標題"},
+                    {"id": "實際", "val": actual_item_qty, "calc": "內文"}
+                ],
+                "source": "🐍 會計引擎"
             })
 
         # --- 2.2 軸頸重複性檢查 ---
-        if is_journal:
+        # 使用 clean_text 確保 "軸 頸" 也能被抓到
+        if any(k in title_clean for k in ["軸頸", "內孔", "Journal"]):
             for rid, count in id_counts.items():
                 if count >= 3:
                     accounting_issues.append({
-                        "page": page, "item": title, "issue_type": "🛑編號重複異常",
-                        "common_reason": f"編號 {rid} 出現 {count} 次，軸頸限 2 次",
+                        "page": page, "item": raw_title, "issue_type": "🛑編號重複異常",
+                        "common_reason": f"編號 {rid} 出現 {count} 次",
                         "failures": [{"id": rid, "val": count, "calc": "禁止超過2次"}]
                     })
 
-        # --- 2.3 總表對帳 (A聚合/B一般) ---
-        u_agg_raw = matched_rule["agg"]
-        agg_parts = [p.strip() for p in u_agg_raw.split(",")]
-        is_exempt_from_basket = "豁免" in agg_parts
-        
-        agg_multiplier = 1.0
-        for p in agg_parts:
-            conv = re.search(r"(\d+)SET=1PC", p)
-            if conv: agg_multiplier = 1.0 / float(conv.group(1))
-
+        # --- 2.3 總表對帳 (鐵律 + 真空清洗) ---
         for s_title, data in global_sum_tracker.items():
-            is_rep = any(k in s_title for k in ["ROLL車修", "再生"])
-            is_weld = "銲補" in s_title
-            is_assem = any(k in s_title for k in ["拆裝", "組裝"])
-            
             match = False
-            # A 模式 (聚合籃子)
-            if (is_rep or is_weld or is_assem) and not is_exempt_from_basket:
-                if is_rep and any(k in title for k in ["未再生", "再生", "研磨", "車修"]): match = True
-                elif is_weld and "銲補" in title: match = True
-                elif is_assem and any(k in title for k in ["拆裝", "組裝", "真圓度"]): match = True
-            # B 模式 (名字對帳)
-            if not match and fuzz.partial_ratio(s_title.upper(), title.upper()) > 90: match = True
-
-            if match:
-                val_for_agg = actual_item_qty * agg_multiplier
-                data["actual"] += val_for_agg
-                data["details"].append({"id": f"{title} (P.{page})", "val": val_for_agg, "calc": "計入總帳"})
-
-        # --- 2.4 運費核對 (動態解析 XPC=1) ---
-        u_fr = matched_rule["freight"]
-        if ("計入" in u_fr or (is_body and "未再生" in title)) and "豁免" not in u_fr:
-            fr_divisor = 1.0
-            fr_match = re.search(r"(\d+)PC=1", u_fr)
-            if fr_match: fr_divisor = float(fr_match.group(1))
             
-            val_for_fr = actual_item_qty / fr_divisor
-            freight_actual_sum += val_for_fr
-            freight_details.append({"id": f"{title} (P.{page})", "val": val_for_fr, "calc": "計入運費"})
+            # 🧽 清洗籃子標題，確保比對時無視空格
+            s_title_clean = clean_text(s_title)
+            
+            # 判斷籃子類型 (使用清洗後的字串)
+            # 例如：即使籃子叫 "ROLL 車修"，變成 "ROLL車修" 後就能匹配到關鍵字
+            is_basket_disassembly = "拆裝" in s_title_clean or "組裝" in s_title_clean
+            is_basket_machining = "ROLL車修" in s_title_clean
+            is_basket_welding = "ROLL銲補" in s_title_clean
+            
+            # 🛑 鐵律一：拆裝籃子
+            if is_basket_disassembly:
+                # 規則：全卷含 "組裝" 或 "拆裝" 的項目 (使用 title_clean)
+                if "組裝" in title_clean or "拆裝" in title_clean:
+                    match = True
+            
+            # 🛑 鐵律二：車修籃子
+            elif is_basket_machining:
+                # 規則：全卷 (軸頸 或 本體) + (再生 或 未再生)
+                has_part = "軸頸" in title_clean or "本體" in title_clean
+                has_action = "再生" in title_clean or "未再生" in title_clean
+                if has_part and has_action:
+                    match = True
+            
+            # 🛑 鐵律三：銲補籃子
+            elif is_basket_welding:
+                # 規則：全卷 (軸頸 或 本體) + (銲補)
+                has_part = "軸頸" in title_clean or "本體" in title_clean
+                if has_part and "銲補" in title_clean:
+                    match = True
+            
+            # 🟢 其他籃子 (Fallback)
+            else:
+                # Fuzzy match 本身對空格比較寬容，但給它清洗過的字串會更準
+                if fuzz.partial_ratio(s_title_clean, title_clean) > 90:
+                    match = True
 
-    # 3. 結算異常報告
+            # 如果命中，就丟進籃子
+            if match:
+                data["actual"] += actual_item_qty
+                data["details"].append({"id": f"{raw_title} (P.{page})", "val": actual_item_qty, "calc": "計入"})
+
+        # --- 2.4 運費核對 ---
+        if "本體" in title_clean or "計入" in title_clean or "運費" in title_clean:
+             if "豁免" not in title_clean:
+                freight_actual_sum += actual_item_qty
+                freight_details.append({"id": f"{raw_title}", "val": actual_item_qty, "calc": "計入運費"})
+
+    # 3. 結算異常
     for s_title, data in global_sum_tracker.items():
         if abs(data["actual"] - data["target"]) > 0.01 and data["target"] > 0:
-            icon = "🚚" if "運費" in s_title else "🔍"
             accounting_issues.append({
-                "page": "總表", "item": s_title, "issue_type": "統計不符",
-                "common_reason": f"標註 {data['target']} != 加總 {data['actual']}",
-                "failures": [{"id": f"{icon} 基準", "val": data["target"]}] + data["details"] + [{"id": "🧮 總計", "val": data["actual"]}]
+                "page": "總表", "item": s_title, "issue_type": "統計不符(總帳)",
+                "common_reason": f"標註 {data['target']} != 實際 {data['actual']}",
+                "failures": [{"id": "🔍 基準", "val": data["target"]}] + data["details"] + [{"id": "🧮 實際", "val": data["actual"]}]
             })
 
     if abs(freight_actual_sum - freight_target) > 0.01 and freight_target > 0:
         accounting_issues.append({
             "page": "總表", "item": "運費核對", "issue_type": "統計不符(運費)",
-            "common_reason": f"基準 {freight_target} != 加總 {freight_actual_sum}",
-            "failures": [{"id": "🚚 基準", "val": freight_target}] + freight_details + [{"id": "🧮 總計", "val": freight_actual_sum}]
+            "common_reason": f"基準 {freight_target} != 實際 {freight_actual_sum}",
+            "failures": [{"id": "🚚 基準", "val": freight_target}] + freight_details + [{"id": "🧮 實際", "val": freight_actual_sum}]
         })
         
     return accounting_issues
