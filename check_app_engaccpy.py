@@ -433,89 +433,167 @@ def python_numerical_audit(dimension_data):
     if not dimension_data: return []
 
     for item in dimension_data:
+        # 1. 取得數據 (DS 格式)
         ds = str(item.get("ds", ""))
         if not ds: continue
         raw_entries = [p.split(":") for p in ds.split("|") if ":" in p]
         
         title = str(item.get("item_title", "")).replace(" ", "").replace('"', "")
-        raw_spec = str(item.get("std_spec", "")).replace('"', "")
         cat = str(item.get("category", "")).strip()
         page_num = item.get("page", "?")
+        raw_spec = str(item.get("std_spec", "")).replace('"', "")
+        
+        # 2. 🛡️ 數據清洗與 mm 定位
+        mm_nums = [float(n) for n in re.findall(r"(\d+\.?\d*)\s*mm", raw_spec)]
+        all_nums = [float(n) for n in re.findall(r"(\d+\.?\d*)", raw_spec)]
+        noise = [350.0, 300.0, 200.0, 145.0, 130.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+        # 免死金牌：緊貼 mm 的數字不准過濾
+        clean_std = [n for n in all_nums if (n in mm_nums) or (n not in noise and n > 5)]
 
-        # 💡 [新增：Python 自動解析公差]
+        # 3. 💡 多重區間自動預算 (雙規格/多基準強力版)
         s_ranges = []
-        clean_part = raw_spec.replace(" ", "")
-        pm = re.search(r"(\d+\.?\d*)?±(\d+\.?\d*)", clean_part)
-        devs = re.findall(r"([+-]\d+\.?\d*)", clean_part)
-        mm_match = re.findall(r"(\d+\.?\d*)mm", clean_part)
-        clean_std = [float(n) for n in mm_match if float(n) > 5]
+        # 強化切分邏輯：加入逗號與頓號
+        spec_parts = re.split(r"[一二三四五六]|[123456]\.|\d+[\.、]|[;；,，]", raw_spec)
+        
+        for part in spec_parts:
+            # 暴力去空格、去換行
+            clean_part = part.replace(" ", "").replace("\n", "").strip()
+            if not clean_part: continue
+            
+            # --- 邏輯 A：優先處理 ± (如 300±0.1) ---
+            pm_match = re.search(r"(\d+\.?\d*)?±(\d+\.?\d*)", clean_part)
+            if pm_match:
+                b = float(pm_match.group(1)) if pm_match.group(1) else 0.0
+                o = float(pm_match.group(2))
+                s_ranges.append([round(b - o, 4), round(b + o, 4)])
+                continue 
 
-        if pm:
-            b = float(pm.group(1)) if pm.group(1) else 0.0
-            o = float(pm.group(2))
-            s_ranges.append([round(b - o, 4), round(b + o, 4)])
-        elif base_val := (clean_std[0] if clean_std else None):
-            if len(devs) >= 2:
-                calc_nums = [base_val + float(o) for o in devs]
-                s_ranges.append([round(min(calc_nums), 4), round(max(calc_nums), 4)])
+            # --- 邏輯 B：處理波浪號區間 (如 101.64~101.66) ---
+            tilde_match = re.search(r"(\d+\.?\d*)[~～-](\d+\.?\d*)", clean_part)
+            # 只有當兩個數字位數接近時才視為區間 (避免把 160-0.01 誤判為 160~0.01)
+            if tilde_match:
+                n1, n2 = float(tilde_match.group(1)), float(tilde_match.group(2))
+                if abs(n1 - n2) < n1 * 0.5: 
+                    s_ranges.append([round(min(n1, n2), 4), round(max(n1, n2), 4)])
+                    continue
 
+            # --- 邏輯 C：萬用多基準解析 (解決 160...130... 雙規格) ---
+            # 1. 找出這段文字裡所有的數字
+            all_numbers = re.findall(r"[-+]?\d+\.?\d*", clean_part)
+            if not all_numbers: continue
+
+            # 2. 抓取所有偏移量 (例如 -0.014)
+            offsets = re.findall(r"([+-]\d+\.?\d*)", clean_part)
+            offset_vals = [float(o) for o in offsets]
+            
+            # 3. 抓取所有「可能是基準」的大數字 (大於10且不等於偏移量)
+            # 這是解決您問題的核心：同時抓出 160 和 130
+            base_vals = []
+            for n_str in all_numbers:
+                try:
+                    val = float(n_str)
+                    if val > 10.0 and val not in offset_vals: # 過濾掉像 0.03 這種小數
+                        base_vals.append(val)
+                except: continue
+            
+            # 4. 組合基準與偏移
+            for b_val in base_vals:
+                if offset_vals:
+                    # 如果有偏移量，計算範圍
+                    endpoints = [round(b_val + o, 4) for o in offset_vals]
+                    if len(endpoints) == 1: endpoints.append(b_val)
+                    s_ranges.append([min(endpoints), max(endpoints)])
+                else:
+                    # 只有單一數字，無公差 (例如只寫 160mm)
+                    s_ranges.append([b_val, b_val])
+                    
+        # 4. 💡 預算基準 (移出循環)
+        logic = item.get("sl", {})
+        l_type = logic.get("lt", "")
+        s_threshold = logic.get("t", 0)
+        
+        un_regen_target = None
+        if l_type in ["un_regen", "未再生"] or ("未再生" in (cat + title) and "軸頸" not in (cat + title)):
+            cands = [n for n in clean_std if n >= 120.0]
+            if s_threshold and float(s_threshold) >= 120.0: cands.append(float(s_threshold))
+            if cands: un_regen_target = max(cands)
+
+        # --- 5. 開始逐一判定 ---
         for entry in raw_entries:
             if len(entry) < 2: continue
-            rid, val_raw = entry[0].strip(), entry[1].strip()
-            if not val_raw or val_raw in ["N/A", "nan"]: continue
+            rid = str(entry[0]).strip().replace(" ", "")
+            val_raw = str(entry[1]).strip().replace(" ", "")
+            
+            if not val_raw or val_raw in ["N/A", "nan", "M10"]: continue
 
             try:
-                is_passed, reason, t_used, e_label = True, "", "N/A", "未知"
-                
-                # --- 7.1 壞軌偵測 ---
+                is_passed, reason, t_used, engine_label = True, "", "N/A", "未知"
+
+                # 壞軌偵測
                 if "[!]" in val_raw:
-                    is_passed, reason, val_str, val = False, "🛑數據損壞(壞軌)", "[!]", -999.0
+                    is_passed = False
+                    reason = "🛑數據損壞(壞軌)"
+                    val_str = "[!]"
+                    val = -999.0
                 else:
                     v_m = re.findall(r"\d+\.?\d*", val_raw)
                     val_str = v_m[0] if v_m else val_raw
                     val = float(val_str)
 
-                # --- 7.2 格式判定 ---
+                # 格式判定
                 if val_str != "[!]":
                     is_two_dec = "." in val_str and len(val_str.split(".")[-1]) == 2
                     is_pure_int = "." not in val_str
-                else: is_two_dec, is_pure_int = True, True
+                else:
+                    is_two_dec, is_pure_int = True, True 
 
-                # --- 7.3 判定邏輯 (銲補 > 未再生 > 精加工) ---
-                if "min_limit" in cat or "銲補" in (cat + title):
-                    e_label = "銲補"
-                    t_used = min(clean_std) if clean_std else "N/A"
+                # --- 判定邏輯分流 ---
+                if "min_limit" in l_type or "銲補" in (cat + title):
+                    engine_label = "銲補"
                     if not is_pure_int: is_passed, reason = False, "應為純整數"
-                    elif t_used != "N/A" and val < t_used: is_passed, reason = False, "數值不足"
+                    elif clean_std:
+                        t_used = min(clean_std, key=lambda x: abs(x - val))
+                        if val < t_used: is_passed, reason = False, "數值不足"
                 
-                elif "un_regen" in cat or "max_limit" in cat or "未再生" in (cat + title):
-                    if "軸頸" in (cat + title):
-                        e_label = "軸頸(上限)"
-                        target = max(clean_std) if clean_std else 0
-                        t_used = target
-                        if target > 0 and val > target: is_passed, reason = False, f"超過上限 {target}"
-                        if target > 0 and not is_pure_int: is_passed, reason = False, "應為純整數"
-                    else:
-                        e_label = "未再生(本體)"
-                        candidates = [n for n in clean_std if n >= 120.0]
-                        target = max(candidates) if candidates else 196.0
-                        t_used = target
-                        if val <= target and not is_pure_int: is_passed, reason = False, "應為整數"
-                        elif val > target and not is_two_dec: is_passed, reason = False, "應填兩位小數"
+                elif un_regen_target is not None:
+                    engine_label = "未再生"
+                    t_used = un_regen_target
+                    if val <= t_used:
+                        if not is_pure_int: is_passed, reason = False, "應為整數"
+                    elif not is_two_dec: 
+                        is_passed, reason = False, "應填兩位小數"
 
-                elif any(x in (cat + title) for x in ["再生", "精加工", "研磨", "車修", "組裝"]):
-                    e_label = "精加工"
-                    if not is_two_dec: is_passed, reason = False, "應填兩位小數"
+                elif l_type == "max_limit" or (("軸頸" in (cat + title)) and ("未再生" in (cat + title))):
+                    engine_label = "軸頸(上限)"
+                    candidates = [float(n) for n in (clean_std + [float(s_threshold) if s_threshold else 0])]
+                    target = max(candidates) if candidates else 0
+                    t_used = target
+                    if target > 0:
+                        if not is_pure_int: is_passed, reason = False, "應為純整數"
+                        elif val > target: is_passed, reason = False, f"超過上限 {target}"
+
+                elif any(x in (cat + title) for x in ["再生", "精加工", "研磨", "車修", "組裝", "拆裝", "真圓度"]) and "未再生" not in (cat + title):
+                    engine_label = "精加工"
+                    if not is_two_dec:
+                        is_passed, reason = False, "應填兩位小數"
                     elif s_ranges:
                         t_used = str(s_ranges)
-                        if not any(r[0] <= val <= r[1] for r in s_ranges): is_passed, reason = False, "不在區間內"
+                        # 💡 核心修正：只要落在「任何一個」解析出的區間內，就算 Pass
+                        if not any(r[0] <= val <= r[1] for r in s_ranges): 
+                            is_passed, reason = False, "不在區間內"
 
                 if not is_passed:
                     key = (page_num, title, reason)
                     if key not in grouped_errors:
-                        grouped_errors[key] = {"page": page_num, "item": title, "issue_type": f"數值異常({e_label})", "common_reason": reason, "failures": []}
+                        grouped_errors[key] = {
+                            "page": page_num, "item": title, 
+                            "issue_type": f"異常({engine_label})", 
+                            "common_reason": reason, "failures": []
+                        }
                     grouped_errors[key]["failures"].append({"id": rid, "val": val_str, "target": f"基準:{t_used}"})
-            except: continue
+            except: 
+                continue
+                
     return list(grouped_errors.values())
     
 def python_accounting_audit(dimension_data, res_main):
@@ -909,6 +987,9 @@ if st.session_state.photo_gallery:
     trigger_analysis = start_btn or is_auto_start
 
     if trigger_analysis:
+        # ⚡️ 新增這行：強制清除上一筆的結果
+        st.session_state.analysis_result_cache = None 
+        
         st.session_state.auto_start_analysis = False
         total_start = time.time()
         
