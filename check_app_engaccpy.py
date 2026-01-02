@@ -823,7 +823,9 @@ if st.session_state.photo_gallery:
     if 'analysis_result_cache' not in st.session_state:
         st.session_state.analysis_result_cache = None
 
- if trigger_analysis:
+    trigger_analysis = start_btn or is_auto_start
+
+    if trigger_analysis:
         total_start = time.time()
         # 💡 建立專業狀態列，分開 AI 與 Python 進度
         with st.status("🚀 稽核任務啟動...", expanded=True) as status_box:
