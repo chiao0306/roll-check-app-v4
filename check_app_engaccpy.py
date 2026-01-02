@@ -372,27 +372,24 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
     try:
         genai.configure(api_key=api_key)
         
-        # 1. 設定生成配置 (強制 JSON + 提高 Token)
-        generation_config = {
-            "temperature": 0.1,
-            "max_output_tokens": 8192,
-            "response_mime_type": "application/json"
-        }
-        
-        # 2. 設定安全過濾 (⚡️ 關鍵修改：全部設為 BLOCK_NONE 以免被 OCR 雜訊誤殺)
-        from google.generativeai.types import HarmCategory, HarmBlockThreshold
-        safety_settings = {
-            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-        }
-
+        # ⚡️ 修正：嘗試加上 models/ 前綴並解除安全攔截
         model = genai.GenerativeModel(
-            model_name=model_name, 
-            generation_config=generation_config,
-            safety_settings=safety_settings  # <--- 加上這行
+            model_name=f"models/{model_name}" if "models/" not in model_name else model_name,
+            safety_settings={
+                "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
+                "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
+                "HARM_CATEGORY_SEXUALLY_EXPLICIT": "BLOCK_NONE",
+                "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
+            }
         )
+        
+        response = model.generate_content([system_prompt, combined_input], generation_config=generation_config)
+        
+        # ⚡️ 檢查是否有內容
+        if not response.text:
+            return {"job_no": "Error: AI 回傳內容為空", "issues": [], "dimension_data": []}
+
+        raw_content = response.text
         
         with st.spinner('🤖 AI 正在全力抄寫數據中... (數據量大時可能需要 30-60 秒)'):
             # 這裡把 system_prompt 和 user content 放在一起傳送
@@ -964,6 +961,7 @@ if st.session_state.photo_gallery:
                 combined_input += f"\n=== Page {i+1} ===\n{p.get('full_text','')}\n"
 
             res_main = agent_unified_check(combined_input, combined_input, GEMINI_KEY, main_model_name)
+            st.write("DEBUG - AI 回傳內容:", res_main) # ⚡️ 讓錯誤現形
             dim_data = res_main.get("dimension_data", [])
             python_numeric_issues = python_numerical_audit(dim_data)
             python_accounting_issues = python_accounting_audit(dim_data, res_main)
