@@ -576,7 +576,9 @@ def python_numerical_audit(dimension_data):
     
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官：絕對計數 (不去重) + 本體/軸頸分級示警
+    Python 會計官：權限分級版
+    1. 只有 "ROLL拆裝/車修/銲補" 三大天王籃子，才有資格啟動全卷掃描。
+    2. 其他籃子一律走 "同名模糊比對"，避免誤抓。
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -621,11 +623,7 @@ def python_accounting_audit(dimension_data, res_main):
         ids = [str(e[0]).strip() for e in data_list if len(e) > 0]
         id_counts = Counter(ids)
 
-        # --- 2.1 單項數量計算 (核心修正：絕對計數) ---
-        # 邏輯：不管本體還是軸頸，表格裡有幾行數據，就代表做了幾次工。
-        # 完全移除 set(ids) 去重邏輯。
-        
-        u_local = "" # 若未來有 rules 擴充可在此讀取
+        # --- 2.1 單項數量計算 (絕對計數) ---
         is_weight_mode = "KG" in title_clean.upper() or target_pc > 100
 
         if is_weight_mode:
@@ -643,15 +641,7 @@ def python_accounting_audit(dimension_data, res_main):
                     "failures": [{"id": "警告", "val": "[!]", "calc": "數據損毀"}]
                 })
         else:
-            # 🔢 數量模式 (PC/SET)
-            # 這裡只保留 "SET" 的特殊換算，其餘一律用 len(data_list)
-            # 也就是：AI 抄到 8 筆，這裡就是 8。
-            if "1SET=4PCS" in u_local: 
-                actual_item_qty = len(data_list) / 4
-            elif "1SET=2PCS" in u_local: 
-                actual_item_qty = len(data_list) / 2
-            else: 
-                actual_item_qty = len(data_list) # 👈 關鍵：不做任何去重
+            actual_item_qty = len(data_list) # 不去重，有幾行算幾行
 
         # 單項比對
         if actual_item_qty != target_pc and target_pc > 0:
@@ -665,9 +655,7 @@ def python_accounting_audit(dimension_data, res_main):
                 "source": "🐍 會計引擎"
             })
 
-        # --- 2.2 編號重複性示警 (分級處理) ---
-        
-        # A. 本體檢查：只要重複就不對 (Limit > 1)
+        # --- 2.2 編號重複性示警 ---
         if "本體" in title_clean:
              for rid, count in id_counts.items():
                 if count > 1:
@@ -676,8 +664,6 @@ def python_accounting_audit(dimension_data, res_main):
                         "common_reason": f"本體編號 {rid} 重複 {count} 次 (應為獨一)",
                         "failures": [{"id": rid, "val": count, "calc": "建議檢查"}]
                      })
-
-        # B. 軸頸檢查：允許一對，超過2次才叫 (Limit > 2)
         elif any(k in title_clean for k in ["軸頸", "內孔", "JOURNAL"]):
              for rid, count in id_counts.items():
                 if count > 2:
@@ -687,34 +673,42 @@ def python_accounting_audit(dimension_data, res_main):
                         "failures": [{"id": rid, "val": count, "calc": "建議檢查"}]
                      })
 
-        # --- 2.3 總表對帳 (鐵律版) ---
+        # --- 2.3 總表對帳 (權限分級版) ---
         for s_title, data in global_sum_tracker.items():
             match = False
             s_title_clean = clean_text(s_title)
             
-            is_basket_disassembly = "拆裝" in s_title_clean or "組裝" in s_title_clean
-            is_basket_machining = "ROLL車修" in s_title_clean
-            is_basket_welding = "ROLL銲補" in s_title_clean
+            # 🛑 權限檢查：只有包含 "ROLL..." 的籃子才是三大天王
+            is_main_disassembly = "ROLL拆裝" in s_title_clean # 必須包含 "ROLL拆裝"
+            is_main_machining = "ROLL車修" in s_title_clean   # 必須包含 "ROLL車修"
+            is_main_welding = "ROLL銲補" in s_title_clean     # 必須包含 "ROLL銲補"
+
+            # === 優先級一：三大天王 (全卷掃描) ===
             
-            # 鐵律一：拆裝
-            if is_basket_disassembly:
+            if is_main_disassembly:
+                # 規則：全卷含 "組裝" 或 "拆裝"
                 if "組裝" in title_clean or "拆裝" in title_clean: match = True
             
-            # 鐵律二：車修 (軸頸/本體 + 再生/未再生)
-            elif is_basket_machining:
+            elif is_main_machining:
+                # 規則：全卷 (軸頸 或 本體) + (再生 或 未再生)
                 has_part = "軸頸" in title_clean or "本體" in title_clean
                 has_action = "再生" in title_clean or "未再生" in title_clean
                 if has_part and has_action: match = True
             
-            # 鐵律三：銲補 (軸頸/本體 + 銲補)
-            elif is_basket_welding:
+            elif is_main_welding:
+                # 規則：全卷 (軸頸 或 本體) + (銲補)
                 has_part = "軸頸" in title_clean or "本體" in title_clean
                 if has_part and "銲補" in title_clean: match = True
             
-            # 其他 (Fallback)
+            # === 優先級二：普通籃子 (同名核對) ===
+            # 如果不是三大天王 (例如 "本體銲補"、"軸頸再生")，就走這條路
             else:
-                if fuzz.partial_ratio(s_title_clean, title_clean) > 90: match = True
+                # 使用 Fuzzy Match 進行同名核對
+                # 因為 "本體銲補" 跟 "軸頸銲補" 相似度不高，所以不會誤抓
+                if fuzz.partial_ratio(s_title_clean, title_clean) > 90:
+                    match = True
 
+            # 如果命中，就丟進籃子
             if match:
                 data["actual"] += actual_item_qty
                 data["details"].append({"id": f"{raw_title} (P.{page})", "val": actual_item_qty, "calc": "計入"})
@@ -722,7 +716,6 @@ def python_accounting_audit(dimension_data, res_main):
         # --- 2.4 運費核對 ---
         if "本體" in title_clean or "計入" in title_clean or "運費" in title_clean:
              if "豁免" not in title_clean:
-                # 這裡一樣直接加總 actual_item_qty (8支就是8支運費)
                 freight_actual_sum += actual_item_qty
                 freight_details.append({"id": f"{raw_title}", "val": actual_item_qty, "calc": "計入運費"})
 
