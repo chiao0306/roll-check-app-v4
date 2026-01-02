@@ -441,7 +441,6 @@ def python_numerical_audit(dimension_data):
         
         # 2. 🛡️ 數據清洗
         all_nums = [float(n) for n in re.findall(r"[-+]?\d+\.?\d*", raw_spec.replace(" ", ""))]
-        # 只過濾像是項次的小數字，保留大尺寸
         noise = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 0.0] 
         clean_std = [n for n in all_nums if (n not in noise and n > 10)]
 
@@ -450,10 +449,11 @@ def python_numerical_audit(dimension_data):
         spec_parts = re.split(r"[一二三四五六]|[;；]", raw_spec)
         
         for part in spec_parts:
-            clean_part = part.replace(" ", "").replace("\n", "").strip()
+            # ⚡️ 修正點：移除 "mm" 與 "MM"，讓 "135mm~129mm" 變成 "135~129"
+            clean_part = part.replace(" ", "").replace("\n", "").replace("mm", "").replace("MM", "").strip()
             if not clean_part: continue
             
-            # 邏輯 A：優先處理 ±
+            # 邏輯 A：優先處理 ± (如 300±0.1)
             pm_match = re.search(r"(\d+\.?\d*)?±(\d+\.?\d*)", clean_part)
             if pm_match:
                 b = float(pm_match.group(1)) if pm_match.group(1) else 0.0
@@ -461,15 +461,17 @@ def python_numerical_audit(dimension_data):
                 s_ranges.append([round(b - o, 4), round(b + o, 4)])
                 continue
 
-            # 邏輯 B：處理波浪號區間
+            # 邏輯 B：處理波浪號區間 (如 135~129)
+            # 現在移除了 mm，這裡就能成功抓到 [129, 135] 了！
             tilde_match = re.search(r"(\d+\.?\d*)[~～-](\d+\.?\d*)", clean_part)
             if tilde_match:
                 n1, n2 = float(tilde_match.group(1)), float(tilde_match.group(2))
+                # 防呆：避免把 160-0.01 (公差) 誤判為 160~0.01 (區間)
                 if abs(n1 - n2) < n1 * 0.5: 
                     s_ranges.append([round(min(n1, n2), 4), round(max(n1, n2), 4)])
                     continue
 
-            # 邏輯 C：智慧配對
+            # 邏輯 C：智慧配對 (解決 140 -0.01, -0.03)
             all_tokens = re.findall(r"[-+]?\d+\.?\d*", clean_part)
             if not all_tokens: continue
 
@@ -523,7 +525,6 @@ def python_numerical_audit(dimension_data):
                 else:
                     is_two_dec, is_pure_int = True, True 
 
-                # 判定邏輯
                 if "min_limit" in cat or "銲補" in (cat + title):
                     engine_label = "銲補"
                     if not is_pure_int: is_passed, reason = False, "應為純整數"
@@ -554,6 +555,7 @@ def python_numerical_audit(dimension_data):
                         is_passed, reason = False, "應填兩位小數"
                     elif s_ranges:
                         t_used = str(s_ranges)
+                        # 💡 核心：只要符合任何一個解析出的區間就算合格
                         if not any(r[0] <= val <= r[1] for r in s_ranges): 
                             is_passed, reason = False, "不在區間內"
 
@@ -564,12 +566,13 @@ def python_numerical_audit(dimension_data):
                             "page": page_num, "item": title, 
                             "issue_type": f"異常({engine_label})", 
                             "common_reason": reason, "failures": [],
-                            "source": "🐍 工程引擎" # 👈 兇手就是少了這一行！補上後就不會顯示空標籤了
+                            "source": "🐍 工程引擎"
                         }
                     grouped_errors[key]["failures"].append({"id": rid, "val": val_str, "target": f"基準:{t_used}"})
             except: continue
                 
     return list(grouped_errors.values())
+
     
 def python_accounting_audit(dimension_data, res_main):
     """
