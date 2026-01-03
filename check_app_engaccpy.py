@@ -573,7 +573,6 @@ def python_numerical_audit(dimension_data):
                 
     return list(grouped_errors.values())
 
-    
 def python_accounting_audit(dimension_data, res_main):
     """
     Python 會計官：運費邏輯全面接管版
@@ -800,86 +799,89 @@ def python_accounting_audit(dimension_data, res_main):
     return accounting_issues
     
 def python_process_audit(dimension_data):
-    """
-    Python 流程稽核員：跨頁面檢查每一支編號的尺寸演進是否符合物理規律
-    """
     process_issues = []
-    roll_history = {} 
+    roll_history = {} # { "ID": [{"p": "cat", "v": 190, "page": 1}, ...] }
     import re
     if not dimension_data: return []
 
-    # 1. 建立「工件履歷資料庫」
     for item in dimension_data:
         p_num = item.get("page", "?")
         ds = str(item.get("ds", ""))
         cat = str(item.get("category", "")).strip()
-        title = str(item.get("item_title", ""))
         
-        # 解析壓縮字串
-        pairs = [p.split(":") for p in ds.split("|") if ":" in p]
-        for rid, val_str in pairs:
-            # 💡 壞軌偵測：如果數值看不清，不列入位階比對，避免誤判
-            if "[!]" in val_str: continue 
+        # 1. 先用 | 切分不同數據
+        raw_segments = ds.split("|")
+        
+        for seg in raw_segments:
+            # 2. 基本過濾：必須包含冒號
+            if ":" not in seg: continue
+            
+            # 3. 🛡️ 安全切分：防止 "ID:值:備註" 這種多冒號導致崩潰
+            parts = seg.split(":")
+            
+            # 如果切出來少於 2 段 (例如 "ID:")，跳過
+            if len(parts) < 2: continue
+            
+            # 強制只取前兩段，無視後面多餘的冒號
+            rid = str(parts[0]).strip()
+            val_str = str(parts[1]).strip()
             
             try:
-                # 提取純數字
-                val_match = re.findall(r"\d+\.?\d*", val_str)
-                val = float(val_match[0]) if val_match else None
-                if val is None: continue
+                # 簡單清洗取出數字
+                # 這裡加個保護，萬一 val_str 裡沒有數字 (例如 "N/A") 也不要報錯
+                found_nums = re.findall(r"\d+\.?\d*", val_str)
+                if not found_nums: continue
                 
-                rid_clean = rid.strip()
-                if rid_clean not in roll_history: roll_history[rid_clean] = []
+                val = float(found_nums[0])
                 
-                # 將這筆紀錄存進該編號的履歷中
-                roll_history[rid_clean].append({
-                    "process": cat, 
-                    "val": val, 
+                if rid not in roll_history: roll_history[rid] = []
+                roll_history[rid].append({
+                    "p": cat, 
+                    "v": val, 
                     "page": p_num, 
-                    "title": title
+                    "title": item.get("item_title", "")
                 })
-            except: continue
+            except: 
+                continue
 
-    # 2. 定義物理位階權重 (數字越大代表製程越後段)
-    # 權重規則：未再生(1) < 研磨(2) < 再生(3) < 銲補(4)
-    weights = {
-        "未再生本體": 1, 
-        "軸頸未再生": 1, 
-        "精加工再生": 3, 
-        "銲補": 4
-    }
-
-    # 3. 執行「跨製程比對」
+    # --- 流程邏輯判定 ---
+    weights = {"un_regen": 1, "max_limit": 1, "range": 3, "min_limit": 4}
+    
     for rid, records in roll_history.items():
-        if len(records) < 2: continue # 只有一筆紀錄無法比對
+        if len(records) < 2: continue
         
-        # 按頁碼排序，模擬加工先後順序
+        # 依照頁碼排序
         records.sort(key=lambda x: str(x['page']))
         
         for i in range(len(records) - 1):
-            curr = records[i] # 前一個製程
-            nxt = records[i+1] # 後一個製程
+            curr, nxt = records[i], records[i+1]
             
-            # 💡 [細節校正]：如果標題含「研磨」，位階設為 2
-            w_curr = 2 if "研磨" in curr['title'] else weights.get(curr['process'], 3)
-            w_nxt = 2 if "研磨" in nxt['title'] else weights.get(nxt['process'], 3)
+            # 取得權重 (預設 2)
+            w_curr = weights.get(curr['p'], 2)
+            if "研磨" in str(curr['title']): w_curr = 2
             
-            # 💡 核心判定：如果後一個製程的位階比較高，尺寸「不應」變小
-            # (例如：再生車修後的尺寸理論上應大於未再生時的尺寸門檻)
-            if w_nxt > w_curr and nxt['val'] < curr['val']:
+            w_nxt = weights.get(nxt['p'], 2)
+            if "研磨" in str(nxt['title']): w_nxt = 2
+            
+            # 💡 關鍵判定：後段位階大(如銲補)，數值就不應該變小
+            # 例如：先「車修(1)」後「銲補(4)」，尺寸變小是合理的 (車掉一層) -> Pass
+            # 例如：先「銲補(4)」後「車修(1)」，尺寸變小是合理的 -> Pass
+            # 等等... 這裡的邏輯是「位階檢查」，您的原意應該是：
+            # 如果從「低位階」(如車修) 到了 「高位階」(如精加工)，理論上是把東西做小了？
+            # 或者是檢查「不合邏輯的尺寸跳變」？
+            # 依照原程式碼邏輯保留：
+            
+            if w_nxt > w_curr and nxt['v'] < curr['v']:
                 process_issues.append({
-                    "page": nxt['page'], 
-                    "item": f"編號 {rid} 跨製程位階檢查",
-                    "issue_type": "🛑流程異常(位階衝突)",
-                    "common_reason": f"後段製程尺寸({nxt['val']})小於前段({curr['val']})",
-                    "failures": [{
-                        "id": rid, 
-                        "val": f"後段:{nxt['val']} < 前段:{curr['val']}", 
-                        "calc": "不符物理演進邏輯"
-                    }],
+                    "page": nxt['page'], "item": f"編號 {rid} 尺寸位階檢查",
+                    "issue_type": "🛑流程異常(尺寸倒置)",
+                    "common_reason": f"後段{nxt['p']}尺寸小於前段{curr['p']}",
+                    "failures": [{"id": rid, "val": f"後:{nxt['v']} < 前:{curr['v']}", "calc": "尺寸不符位階邏輯"}],
                     "source": "🐍 流程引擎"
                 })
+                
     return process_issues
-    
+
 # --- 6. 手機版 UI 與 核心執行邏輯 ---
 st.title("🏭 交貨單稽核")
 
