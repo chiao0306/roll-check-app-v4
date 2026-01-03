@@ -385,24 +385,21 @@ def python_header_check(photo_gallery):
     
 def assign_category_by_python(item_title):
     """
-    取代 AI Prompt 的分類決策邏輯 (LEVEL 1/2/3)
-    輸入標題，回傳 Python 判定的 category 字串。
+    Python 分類官 (新增關鍵字：粗車、精車)
     """
-    # 🧽 預處理：轉大寫、去空白，方便關鍵字比對
+    # 🧽 預處理
     t = str(item_title).upper().replace(" ", "").replace("\n", "").replace('"', "")
     
     # --- LEVEL 1：銲補與裝配 (最高優先) ---
-    # 標題含「銲補」、「銲接」 -> min_limit
     if any(k in t for k in ["銲補", "銲接", "WELD"]):
         return "min_limit"
     
-    # 標題含「組裝」、「拆裝」、「裝配」、「真圓度」 -> range
     if any(k in t for k in ["組裝", "拆裝", "裝配", "真圓度", "ASSY"]):
         return "range"
 
-    # --- LEVEL 2：未再生判定 (含車修) ---
-    # 標題含「未再生」
-    if "未再生" in t or "UN_REGEN" in t:
+    # --- LEVEL 2：未再生判定 (含粗車) ---
+    # ⚡️ [新增] 關鍵字：粗車
+    if any(k in t for k in ["未再生", "UN_REGEN", "粗車"]):
         # a. 含「軸頸」 -> max_limit
         if any(k in t for k in ["軸頸", "內孔", "JOURNAL"]):
             return "max_limit"
@@ -410,13 +407,12 @@ def assign_category_by_python(item_title):
         else:
             return "un_regen"
 
-    # --- LEVEL 3：精加工判定 ---
-    # 標題不含「未再生」，且包含「再生」、「研磨」... -> range
-    # 其實這可以當作預設值 (Default)，只要不是上面幾種，通常就是精加工
-    if any(k in t for k in ["再生", "研磨", "精加工", "車修", "KEYWAY", "GRIND", "MACHIN"]):
+    # --- LEVEL 3：精加工判定 (含精車) ---
+    # ⚡️ [新增] 關鍵字：精車
+    if any(k in t for k in ["再生", "研磨", "精加工", "車修", "KEYWAY", "GRIND", "MACHIN", "精車"]):
         return "range"
 
-    return "unknown" # 真的抓不到就回傳未知
+    return "unknown"
 
 # --- 5. 總稽核 Agent (雙核心引擎版：Gemini + OpenAI) ---
 def agent_unified_check(combined_input, full_text_for_search, api_key, model_name):
@@ -704,10 +700,7 @@ def python_numerical_audit(dimension_data):
 
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官：全能版
-    1. 規則來源：直讀 rules.xlsx。
-    2. 單項核對：支援「1SET=N PCS」換算，以及「豁免」不檢查功能。
-    3. 運費核對：支援「豁免」、「XPC=1」換算及自動計入。
+    Python 會計官 (新增關鍵字：粗車、精車)
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -715,11 +708,9 @@ def python_accounting_audit(dimension_data, res_main):
     import re
     import pandas as pd 
 
-    # 🧽 真空清洗工具
     def clean_text(text):
         return str(text).replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
 
-    # 安全轉型工具
     def safe_float(value):
         if value is None or str(value).upper() == 'NULL': return 0.0
         if "[!]" in str(value): return "BAD_DATA" 
@@ -740,8 +731,7 @@ def python_accounting_audit(dimension_data, res_main):
                     "u_fr": str(row.get('Unit_Rule_Freight', '')).strip(),
                     "u_agg": str(row.get('Unit_Rule_Agg', '')).strip()
                 }
-    except:
-        pass 
+    except: pass 
 
     # 1. 取得對帳基準
     summary_rows = res_main.get("summary_rows", [])
@@ -749,7 +739,6 @@ def python_accounting_audit(dimension_data, res_main):
         s['title']: {"target": safe_float(s['target']), "actual": 0, "details": []} 
         for s in summary_rows if s.get('title')
     }
-    
     freight_target = safe_float(res_main.get("freight_target", 0))
     freight_actual_sum = 0
     freight_details = []
@@ -761,7 +750,7 @@ def python_accounting_audit(dimension_data, res_main):
         page = item.get("page", "?")
         target_pc = safe_float(item.get("item_pc_target", 0)) 
         
-        # --- 🔍 查找 Excel 規則 ---
+        # 查找規則
         rule_set = rules_map.get(title_clean)
         if not rule_set and rules_map:
             best_score = 0
@@ -770,22 +759,18 @@ def python_accounting_audit(dimension_data, res_main):
                 if score > 95 and score > best_score:
                     best_score = score
                     rule_set = v
-        
         u_local = rule_set.get("u_local", "") if rule_set else ""
         u_fr = rule_set.get("u_fr", "") if rule_set else ""
 
+        # 數據解壓縮
         ds = str(item.get("ds", ""))
         data_list = [pair.split(":") for pair in ds.split("|") if ":" in pair]
         if not data_list: continue
-        
         ids = [str(e[0]).strip() for e in data_list if len(e) > 0]
         id_counts = Counter(ids)
 
-        # --- 2.1 單項數量計算 (含豁免邏輯) ---
-        
-        # ⚡️ [新增] 豁免權判斷
+        # 2.1 單項數量 (含豁免)
         is_local_exempt = "豁免" in str(u_local)
-
         is_weight_mode = "KG" in title_clean.upper() or target_pc > 100
         
         if is_weight_mode:
@@ -796,8 +781,6 @@ def python_accounting_audit(dimension_data, res_main):
                 if temp_val == "BAD_DATA": has_bad_sector = True
                 else: current_sum += temp_val
             actual_item_qty = current_sum
-            
-            # 即使是重量模式，如果設了豁免，也不報錯
             if has_bad_sector and not is_local_exempt:
                 accounting_issues.append({
                     "page": page, "item": raw_title, "issue_type": "⚠️數據損毀",
@@ -805,9 +788,7 @@ def python_accounting_audit(dimension_data, res_main):
                     "failures": [{"id": "警告", "val": "[!]", "calc": "數據損毀"}]
                 })
         else:
-            # 🔢 數量模式
             conv_match = re.search(r"1\s*SET\s*=\s*(\d+)\s*(?:PCS|PC)?", u_local, re.IGNORECASE)
-            
             if conv_match:
                 divisor = float(conv_match.group(1))
                 actual_item_qty = len(data_list) / divisor
@@ -816,46 +797,34 @@ def python_accounting_audit(dimension_data, res_main):
             else:
                 actual_item_qty = len(data_list)
 
-        # ⚡️ [修改] 只有在「沒有豁免權」的時候才報警
         if not is_local_exempt and actual_item_qty != target_pc and target_pc > 0:
             accounting_issues.append({
                 "page": page, "item": raw_title, "issue_type": "統計不符(單項)",
-                "common_reason": f"標題 {target_pc}PC != 內文 {actual_item_qty} (規則:{u_local if u_local else '無'})",
-                "failures": [
-                    {"id": "目標", "val": target_pc, "calc": "標題"},
-                    {"id": "實際", "val": actual_item_qty, "calc": "核算值"}
-                ],
+                "common_reason": f"標題 {target_pc}PC != 內文 {actual_item_qty}",
+                "failures": [{"id": "目標", "val": target_pc}, {"id": "實際", "val": actual_item_qty}],
                 "source": "🐍 會計引擎"
             })
 
-        # --- 2.2 編號重複性示警 (維持原樣) ---
+        # 2.2 重複性示警
         if "本體" in title_clean:
              for rid, count in id_counts.items():
                 if count > 1:
-                     accounting_issues.append({
-                        "page": page, "item": raw_title, "issue_type": "⚠️編號重複警示(本體)",
-                        "common_reason": f"本體編號 {rid} 重複 {count} 次",
-                        "failures": [{"id": rid, "val": count, "calc": "建議檢查"}]
-                     })
+                     accounting_issues.append({"page": page, "item": raw_title, "issue_type": "⚠️編號重複警示(本體)", "common_reason": f"本體 {rid} 重複 {count}次", "failures": []})
         elif any(k in title_clean for k in ["軸頸", "內孔", "JOURNAL"]):
              for rid, count in id_counts.items():
                 if count > 2:
-                     accounting_issues.append({
-                        "page": page, "item": raw_title, "issue_type": "⚠️編號重複警示(軸頸)",
-                        "common_reason": f"軸頸編號 {rid} 出現 {count} 次",
-                        "failures": [{"id": rid, "val": count, "calc": "建議檢查"}]
-                     })
+                     accounting_issues.append({"page": page, "item": raw_title, "issue_type": "⚠️編號重複警示(軸頸)", "common_reason": f"軸頸 {rid} 重複 {count}次", "failures": []})
 
-        # --- 2.3 運費計算 (維持原樣) ---
+        # 2.3 運費計算 (擴充關鍵字)
         is_fr_exempt = "豁免" in str(u_fr)
         fr_conv_match = re.search(r"(\d+)\s*(?:PC|SET|PCS)?\s*=\s*1", str(u_fr), re.IGNORECASE)
-        is_default_target = "本體" in title_clean and "未再生" in title_clean
+        # ⚡️ [新增] 運費預設目標判定：本體 + (未再生 OR 粗車)
+        is_default_target = "本體" in title_clean and ("未再生" in title_clean or "粗車" in title_clean)
 
         freight_val_for_item = 0.0
         freight_note = ""
 
-        if is_fr_exempt:
-            freight_val_for_item = 0.0
+        if is_fr_exempt: freight_val_for_item = 0.0
         elif fr_conv_match:
             divisor = float(fr_conv_match.group(1))
             freight_val_for_item = actual_item_qty / divisor
@@ -868,7 +837,7 @@ def python_accounting_audit(dimension_data, res_main):
             freight_actual_sum += freight_val_for_item
             freight_details.append({"id": f"{raw_title}", "val": freight_val_for_item, "calc": freight_note})
 
-        # --- 2.4 總表對帳 (維持原樣) ---
+        # 2.4 總表對帳 (全面擴充關鍵字)
         for s_title, data in global_sum_tracker.items():
             match = False
             s_title_clean = clean_text(s_title)
@@ -876,17 +845,22 @@ def python_accounting_audit(dimension_data, res_main):
             if "運費" in s_title_clean:
                 if freight_val_for_item > 0:
                     data["actual"] += freight_val_for_item
-                    data["details"].append({"id": f"{raw_title} (P.{page})", "val": freight_val_for_item, "calc": freight_note})
+                    data["details"].append({"id": f"{raw_title}", "val": freight_val_for_item, "calc": freight_note})
                 continue 
             
+            # 總表籃子的屬性
             req_body = "本體" in s_title_clean
             req_journal = any(k in s_title_clean for k in ["軸頸", "內孔", "JOURNAL"])
-            req_unregen = "未再生" in s_title_clean
-            req_regen_only = "再生" in s_title_clean and not req_unregen
+            # ⚡️ [新增] 籃子如果有「粗車」或「未再生」都算 Level 1
+            req_unregen = "未再生" in s_title_clean or "粗車" in s_title_clean
+            # ⚡️ [新增] 籃子如果有「精車」或「再生」都算 Level 3
+            req_regen_only = ("再生" in s_title_clean or "精車" in s_title_clean) and not req_unregen
             
+            # 單項的屬性
             is_item_body = "本體" in title_clean
             is_item_journal = any(k in title_clean for k in ["軸頸", "內孔", "JOURNAL"])
-            is_item_unregen = "未再生" in title_clean
+            # ⚡️ [新增] 單項屬性判定
+            is_item_unregen = "未再生" in title_clean or "粗車" in title_clean
             
             is_main_disassembly = "ROLL拆裝" in s_title_clean 
             is_main_machining = "ROLL車修" in s_title_clean   
@@ -896,7 +870,8 @@ def python_accounting_audit(dimension_data, res_main):
                 if "組裝" in title_clean or "拆裝" in title_clean: match = True
             elif is_main_machining:
                 has_part = "軸頸" in title_clean or "本體" in title_clean
-                has_action = "再生" in title_clean or "未再生" in title_clean
+                # ⚡️ [新增] 車修的定義：包含 (再生/精車) 或 (未再生/粗車)
+                has_action = any(k in title_clean for k in ["再生", "精車", "未再生", "粗車"])
                 if has_part and has_action: match = True
             elif is_main_welding:
                 has_part = "軸頸" in title_clean or "本體" in title_clean
@@ -935,25 +910,21 @@ def python_accounting_audit(dimension_data, res_main):
     
 def python_process_audit(dimension_data):
     """
-    Python 流程引擎：雙軌溯源 + 尺寸階層檢查
-    1. 雙軌制：本體與軸頸分開追蹤。
-    2. 四大工序：未再生(1) -> 銲補(2) -> 再生(3) -> 研磨(4)。
-    3. 溯源檢查：高階工序必須具備所有低階工序的歷史紀錄。
-    4. 尺寸檢查：未再生 < 研磨 < 再生 < 銲補。
+    Python 流程引擎 (新增關鍵字：粗車、精車)
+    1. 粗車 = 未再生 (Stage 1)
+    2. 精車 = 再生 (Stage 3)
     """
     process_issues = []
     import re
     
     # 定義工序與名稱
     STAGE_MAP = {
-        1: "未再生車修",
+        1: "未再生/粗車",
         2: "銲補",
-        3: "再生車修",
+        3: "再生/精車",
         4: "研磨"
     }
 
-    # 1. 建立歸戶帳本
-    # 結構: history[(ID, Track)] = { Stage_Num: { "val": 數值, "page": 頁碼, "title": 標題 } }
     history = {} 
 
     if not dimension_data: return []
@@ -963,31 +934,32 @@ def python_process_audit(dimension_data):
         title = str(item.get("item_title", "")).strip()
         ds = str(item.get("ds", ""))
         
-        # --- A. 軌道判斷 (Track Detection) ---
+        # --- A. 軌道判斷 ---
         track = "Unknown"
         if "本體" in title:
             track = "本體"
         elif any(k in title for k in ["軸頸", "內孔", "JOURNAL"]):
             track = "軸頸"
         else:
-            continue # 沒寫部位的通常不參與嚴格流程檢查
+            continue 
 
-        # --- B. 工序判斷 (Stage Detection) ---
+        # --- B. 工序判斷 (關鍵字擴充) ---
         stage = 0
-        # 優先順序很重要，避免關鍵字誤判
+        
         if "研磨" in title:
             stage = 4
         elif "銲補" in title or "銲接" in title:
             stage = 2
-        elif "未再生" in title:
+        # ⚡️ [新增] 粗車 = Stage 1
+        elif "未再生" in title or "粗車" in title:
             stage = 1
-        elif "再生" in title: # 排除未再生後的再生
+        # ⚡️ [新增] 精車 = Stage 3 (需放在未再生之後判斷，避免部分字串重疊，雖此例還好但保險起見)
+        elif "再生" in title or "精車" in title: 
             stage = 3
         
-        if stage == 0: continue # 非四大工序不追蹤
+        if stage == 0: continue 
 
-        # --- C. 數據解析 ---
-        # 支援多筆數據格式 "ID:值|ID:值"
+        # --- C. 數據解析 (維持不變) ---
         segments = ds.split("|")
         for seg in segments:
             parts = seg.split(":")
@@ -996,75 +968,52 @@ def python_process_audit(dimension_data):
             rid = parts[0].strip()
             val_str = parts[1].strip()
             
-            # 嘗試抓取數值
             nums = re.findall(r"\d+\.?\d*", val_str)
             if not nums: continue
             val = float(nums[0])
             
-            # 歸檔
             key = (rid, track)
             if key not in history: history[key] = {}
-            
-            # 若同一工序有多次 (如多次銲補)，這裡簡單取「最後一次」(頁碼較大者)
-            # 或者覆蓋最新的
             history[key][stage] = {
                 "val": val,
                 "page": p_num,
                 "title": title
             }
 
-    # 2. 執行核心邏輯檢查
+    # 2. 執行核心邏輯檢查 (邏輯維持不變，僅依賴上方 stage 分類)
     for (rid, track), stages_data in history.items():
-        
-        present_stages = sorted(stages_data.keys()) # 目前有的工序，如 [1, 2, 4]
+        present_stages = sorted(stages_data.keys())
         if not present_stages: continue
+        max_stage = present_stages[-1]
         
-        max_stage = present_stages[-1] # 只看做到哪裡，例如做到 4(研磨)
-        
-        # === 邏輯一：溯源檢查 (Traceability) ===
-        # 規則：如果有 S4，則必須有 1, 2, 3。如果有 S3，則必須有 1, 2。
-        # 也就是：範圍 [1 ~ max_stage] 之間的所有整數都必須存在
-        
+        # 溯源檢查
         missing_stages = []
         for req_s in range(1, max_stage):
             if req_s not in stages_data:
                 missing_stages.append(STAGE_MAP[req_s])
         
         if missing_stages:
-            # 抓出最後一站的資訊來報錯
             last_info = stages_data[max_stage]
             process_issues.append({
                 "page": last_info['page'],
                 "item": f"{last_info['title']}",
                 "issue_type": "🛑溯源異常(缺漏工序)",
-                "common_reason": f"[{track}] 編號 {rid} 進度已至【{STAGE_MAP[max_stage]}】，但缺乏前置工序：{', '.join(missing_stages)}",
+                "common_reason": f"[{track}] {rid} 進度至【{STAGE_MAP[max_stage]}】，缺前置：{', '.join(missing_stages)}",
                 "failures": [{"id": rid, "val": "缺漏", "calc": "履歷不完整"}],
                 "source": "🐍 流程引擎"
             })
 
-        # === 邏輯二：尺寸大小檢查 (Size Logic) ===
-        # 規則：S1(未) < S4(研) < S3(再) < S2(銲)
-        # 我們定義「預期大小等級」
-        size_rank = {
-            1: 10, # 未再生 (最小)
-            4: 20, # 研磨
-            3: 30, # 再生車修
-            2: 40  # 銲補 (最大)
-        }
+        # 尺寸檢查
+        size_rank = { 1: 10, 4: 20, 3: 30, 2: 40 }
         
-        # 兩兩比對所有存在的工序
         for i in range(len(present_stages)):
             for j in range(i + 1, len(present_stages)):
                 s_a = present_stages[i]
                 s_b = present_stages[j]
-                
                 info_a = stages_data[s_a]
                 info_b = stages_data[s_b]
                 
-                # 判斷預期關係
-                # 若 Rank(A) < Rank(B)，則 Val(A) 應該 < Val(B)
                 expect_a_smaller = size_rank[s_a] < size_rank[s_b]
-                
                 is_violation = False
                 if expect_a_smaller:
                     if info_a['val'] >= info_b['val']: is_violation = True
@@ -1072,14 +1021,12 @@ def python_process_audit(dimension_data):
                     if info_a['val'] <= info_b['val']: is_violation = True
                     
                 if is_violation:
-                    # 組合錯誤訊息
                     sign = "<" if expect_a_smaller else ">"
-                    
                     process_issues.append({
-                        "page": info_b['page'], # 報在後面那個工序的頁面
-                        "item": f"[{track}] {rid} 尺寸邏輯檢查",
+                        "page": info_b['page'],
+                        "item": f"[{track}] {rid} 尺寸邏輯",
                         "issue_type": "🛑流程異常(尺寸倒置)",
-                        "common_reason": f"尺寸邏輯錯誤：{STAGE_MAP[s_a]} ({info_a['val']}) 應 {sign} {STAGE_MAP[s_b]} ({info_b['val']})",
+                        "common_reason": f"{STAGE_MAP[s_a]} ({info_a['val']}) 應 {sign} {STAGE_MAP[s_b]} ({info_b['val']})",
                         "failures": [
                             {"id": STAGE_MAP[s_a], "val": info_a['val'], "calc": "前工序"},
                             {"id": STAGE_MAP[s_b], "val": info_b['val'], "calc": "後工序"}
