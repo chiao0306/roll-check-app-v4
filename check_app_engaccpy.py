@@ -101,91 +101,80 @@ with st.sidebar:
         on_change=update_url_param
     )
 
-# --- Excel 規則讀取函數 (雙視角對照版) ---
+# --- Excel 規則讀取函數 (專業極簡版) ---
 @st.cache_data
 def get_dynamic_rules(ocr_text, debug_mode=False):
     try:
-        # 讀取 Excel
         df = pd.read_excel("rules.xlsx")
         df.columns = [c.strip() for c in df.columns]
         ocr_text_clean = str(ocr_text).upper().replace(" ", "").replace("\n", "")
         
-        ai_prompt_list = []    # 給 AI 的 (精簡)
-        debug_view_list = []   # 給人看的 (完整對照)
+        ai_prompt_list = []    # 給 AI 的 (純文字)
+        debug_view_list = []   # 給人看的 (排版清潔)
 
         for index, row in df.iterrows():
             item_name = str(row.get('Item_Name', '')).strip()
-            # 跳過空值或通用規則
             if not item_name or "(通用)" in item_name: continue
             
-            # 模糊匹配
             score = fuzz.partial_ratio(item_name.upper().replace(" ", ""), ocr_text_clean)
             if score >= 85:
-                # 1. 抓取所有資料
-                spec = str(row.get('Standard_Spec', ''))
-                logic = str(row.get('Logic_Prompt', ''))
-                u_fr = str(row.get('Unit_Rule_Freight', ''))
-                u_loc = str(row.get('Unit_Rule_Local', ''))
-                u_agg = str(row.get('Unit_Rule_Agg', ''))
+                # 取值與清洗
+                def clean(v): return str(v).strip() if v and str(v) != 'nan' else None
                 
-                # 簡單清洗函式 (把 nan 轉成 None)
-                def clean(v): return v if v != 'nan' and v else None
-                
-                val_spec = clean(spec)
-                val_logic = clean(logic)
-                val_fr = clean(u_fr)
-                val_loc = clean(u_loc)
-                val_agg = clean(u_agg)
+                spec = clean(row.get('Standard_Spec', ''))
+                logic = clean(row.get('Logic_Prompt', ''))
+                u_fr = clean(row.get('Unit_Rule_Freight', ''))
+                u_loc = clean(row.get('Unit_Rule_Local', ''))
+                u_agg = clean(row.get('Unit_Rule_Agg', ''))
 
-                # --- A. 建構 AI Prompt 字串 (維持精簡，只給規格) ---
+                # --- A. 建構 AI Prompt (維持不變) ---
                 if not debug_mode:
-                    if val_spec or val_logic:
-                        desc = f"- **[參考資訊] {item_name}**\n"
-                        if val_spec: desc += f"  - 標準規格: {val_spec}\n"
-                        if val_logic: desc += f"  - 注意事項: {val_logic}\n"
+                    if spec or logic:
+                        desc = f"- [參考資訊] {item_name}\n"
+                        if spec: desc += f"  - 標準規格: {spec}\n"
+                        if logic: desc += f"  - 注意事項: {logic}\n"
                         ai_prompt_list.append(desc)
                 
-                # --- B. 建構 Debug 顯示字串 (人類視角：AI 與 Python 同台顯示) ---
+                # --- B. 建構 Debug 顯示 (去除圖案，改用表格感排版) ---
                 else:
-                    # 標題區
-                    block = f"#### 🔩 項目：{item_name} (匹配度 {score}%)\n"
+                    # 使用 Markdown 的引用區塊 (>) 來做層級區分，看起來很乾淨
+                    block = f"#### ■ {item_name} (匹配度 {score}%)\n"
                     
-                    # 左手：AI 看到的
-                    block += "**🤖 AI 讀取到的 (Prompt輸入):**\n"
-                    if val_spec or val_logic:
-                        if val_spec: block += f"- 📝 標準規格: `{val_spec}`\n"
-                        if val_logic: block += f"- ⚠️ 注意事項: `{val_logic}`\n"
+                    # AI 區塊
+                    block += "**[ AI Prompt 輸入 ]**\n"
+                    if spec or logic:
+                        if spec: block += f"- 規格標準 : `{spec}`\n"
+                        if logic: block += f"- 注意事項 : `{logic}`\n"
                     else:
-                        block += "- (無針對 AI 的規則 - AI 將依賴通用能力)\n"
+                        block += "- (無特定輸入)\n"
 
-                    # 右手：Python 看到的
-                    block += "\n**🐍 Python 讀取到的 (硬邏輯):**\n"
+                    # Python 區塊
+                    block += "\n**[ Python 硬邏輯設定 ]**\n"
                     has_py = False
-                    if val_fr: 
-                        block += f"- 🚚 運費規則: `{val_fr}` (用於運費計算)\n"
+                    if u_fr: 
+                        block += f"- 運費邏輯 : `{u_fr}`\n"
                         has_py = True
-                    if val_loc:
-                        block += f"- 🔢 單項規則: `{val_loc}` (用於數量核對)\n"
+                    if u_loc:
+                        block += f"- 單項規則 : `{u_loc}`\n"
                         has_py = True
-                    if val_agg:
-                        block += f"- 📊 聚合規則: `{val_agg}` (用於總表對帳)\n"
+                    if u_agg:
+                        block += f"- 聚合規則 : `{u_agg}`\n"
                         has_py = True
                     
                     if not has_py:
-                        block += "- (無特殊 Python 規則 - 走預設邏輯)\n"
+                        block += "- (使用預設邏輯)\n"
                     
-                    block += "\n---\n" # 分隔線
+                    block += "\n---\n"
                     debug_view_list.append(block)
 
-        # 回傳結果
         if debug_mode:
-            if not debug_view_list: return "🔍 未偵測到符合 `rules.xlsx` 的特定項目。"
+            if not debug_view_list: return "無特定規則命中。"
             return "\n".join(debug_view_list)
         else:
             return "\n".join(ai_prompt_list) if ai_prompt_list else ""
 
     except Exception as e:
-        return f"❌ 讀取規則檔時發生錯誤: {e}"
+        return f"讀取錯誤: {e}"
 
 # --- 4. 核心函數：Azure 神之眼 ---
 def extract_layout_with_azure(file_obj, endpoint, key):
@@ -1328,62 +1317,61 @@ if st.session_state.photo_gallery:
             status_box.update(label="✅ 分析完成！", state="complete", expanded=False)
             st.rerun()
 
-        # --- 💡 [顯示結果區塊] 美化整合版 ---
+           # --- 💡 [顯示結果區塊] 專業清爽版 ---
     if st.session_state.analysis_result_cache:
         cache = st.session_state.analysis_result_cache
         all_issues = cache.get('all_issues', [])
         
-        # 頂部狀態列
-        st.success(f"工令: {cache['job_no']} | ⏱️ {cache['total_duration']:.1f}s")
-        st.info(f"💰 本次成本: NT$ {cache['cost_twd']:.2f} (In: {cache['total_in']:,} / Out: {cache['total_out']:,})")
-        st.caption(f"細節耗時: Azure OCR {cache['ocr_duration']:.1f}s | AI 分析 {cache['time_eng']:.1f}s")
-        
-        # 1. 既有的：查看 Excel 規則
-        with st.expander("🔍 查看 AI 讀取到的 Excel 規則 (Debug)"):
+        # 1. 頂部狀態條 (維持原生樣式，最乾淨)
+        st.success(f"工令單號: {cache['job_no']}   |   耗時: {cache['total_duration']:.1f}s   |   成本: NT$ {cache['cost_twd']:.2f}")
+
+        # 2. 規則檢視 (Debug)
+        with st.expander("🔍 檢視 Excel 規則與邏輯參數", expanded=False):
             rules_text = get_dynamic_rules(cache.get('full_text_for_search',''), debug_mode=True)
             st.markdown(rules_text)
                 
-        # 2. ⭐️ [大升級] 查看 AI 抄錄原始數據 (精美版)
-        with st.expander("🔬 查看 AI 抄錄原始數據 (完整儀表板)", expanded=False):
+        # 3. 原始數據檢視 (去除圖案，改用數據表格)
+        with st.expander("📊 檢視 AI 抄錄原始數據", expanded=False):
             
-            # Part A: 關鍵指標 (Dashboard Style)
-            st.markdown("#### 1. 總表與運費概況")
-            c1, c2, c3 = st.columns(3)
+            # A. 關鍵指標摘要 (用 DataFrame 顯示，字體統一且整齊)
+            st.markdown("**1. 核心指標摘要**")
             
-            # 工令
-            c1.metric("🏭 工令單號", cache.get("job_no", "N/A"))
-            
-            # 運費 (加上顏色燈號)
             f_target = cache.get('freight_target', 0)
-            c2.metric("🚚 運費 Target", f"{f_target}", 
-                      delta="有抓到" if f_target > 0 else "未偵測到", 
-                      delta_color="normal" if f_target > 0 else "off")
+            sum_rows_len = len(cache.get("summary_rows", []))
             
-            # 總表行數
+            # 製作一個乾淨的單行表格
+            summary_df = pd.DataFrame([{
+                "工令單號": cache.get("job_no", "N/A"),
+                "運費 Target (PC)": f_target,
+                "運費偵測狀態": "有抓到" if f_target > 0 else "未偵測",
+                "總表行數": sum_rows_len,
+                "總表狀態": "正常" if sum_rows_len > 0 else "空值"
+            }])
+            st.dataframe(summary_df, hide_index=True, use_container_width=True)
+
+            st.divider()
+
+            # B. 總表清單
+            st.markdown("**2. 左上角統計表 (Summary Rows)**")
             sum_rows = cache.get("summary_rows", [])
-            c3.metric("📑 總表行數", f"{len(sum_rows)}", 
-                      delta="正常" if sum_rows else "空值", 
-                      delta_color="normal" if sum_rows else "off")
             
-            st.divider() # 分隔線
-
-            # Part B: 總表表格化 (Table View)
-            st.markdown("#### 2. 左上角統計表明細 (Summary Rows)")
             if sum_rows:
-                # 這裡直接畫出表格，方便核對 AI 到底把籃子名字抄成什麼
-                st.table(sum_rows)
+                # 轉成 DataFrame 顯示，比 st.table 更緊湊好讀
+                df_sum = pd.DataFrame(sum_rows)
+                # 重新命名欄位讓它更專業
+                df_sum.rename(columns={"title": "項目名稱", "target": "實交數量"}, inplace=True)
+                st.dataframe(df_sum, hide_index=True, use_container_width=True)
             else:
-                st.warning("⚠️ AI 回報：變數 `summary_rows` 為空，未偵測到左上角表格！")
+                st.caption("無數據 (變數 summary_rows 為空)")
 
-            st.divider() # 分隔線
+            st.divider()
 
-            # Part C: 詳細項目數據 (JSON View)
-            st.markdown("#### 3. 各頁面尺寸抄錄明細 (Dimension Data)")
-            st.caption("👇 這裡是 AI 針對每一頁、每一個項目抄錄的詳細 JSON 結構：")
-            st.json(cache.get("ai_extracted_data", []))
+            # C. JSON 詳細資料
+            st.markdown("**3. 全卷詳細抄錄數據 (JSON)**")
+            st.json(cache.get("ai_extracted_data", []), expanded=False)
 
-        # 3. 既有的：Python Debug 資料
-        with st.expander("🐍 查看 Python 硬邏輯偵測結果 (Debug)", expanded=False):
+        # 4. Python Debug
+        with st.expander("🐍 Python 硬邏輯偵測結果", expanded=False):
             if cache.get('python_debug_data'):
                 st.dataframe(cache['python_debug_data'], use_container_width=True, hide_index=True)
             else:
