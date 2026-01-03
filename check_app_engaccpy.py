@@ -317,12 +317,11 @@ def python_header_check(photo_gallery):
                 
     return issues, extracted_data
 
+# --- 5. 總稽核 Agent (雙核心引擎版：Gemini + OpenAI) ---
 def agent_unified_check(combined_input, full_text_for_search, api_key, model_name):
-    import re
-    # 讀取 Excel 規則 (供 Python 後端查表使用)
+    # 1. 準備 Prompt (規則與指令)
     dynamic_rules = get_dynamic_rules(full_text_for_search)
 
-    # 1. 整合您的【工程級精密 Prompt】 - 🔇 靜音版 (移除 AI 判斷功能)
     system_prompt = f"""
     你是一位極度嚴謹的中鋼機械品管【數據抄錄員】。你必須像「電腦程式」一樣執行任務。
     
@@ -330,94 +329,129 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
 
     ---
 
-    #### ⚔️ 模組 A：工程尺寸數據提取 (AI 任務：純抄錄)
+    #### ⚔️ 模組 A：工程尺寸數據提取 (AI 任務：抄錄)
     1. **規格抄錄 (std_spec)**：精確抄錄標題中含 `mm`、`±`、`+`、`-` 的原始文字。
-    2. **數據抄錄 (ds)**：格式為 `"ID:值|ID:值"`。
-       - **⚠️ 絕對完整原則 (Anti-Deduplication)**：表格裡有幾行數據，就必須輸出幾組 `ID:值`。
-       - **🚫 嚴禁合併重複 ID**：一支輥輪通常有兩個軸頸，若表格顯示兩次 `Y5612001`，你必須輸出兩次！
-         - 錯誤範例：`"Y5612001:98"` (只寫一次)
-         - 正確範例：`"Y5612001:98|Y5612001:98"` (完整保留)
-       - **字串保護**：禁止簡化數字。`349.90` 必寫 `"349.90"`。
-       - **壞軌標記 [!]**：若儲存格辨識不良（汙點/字跡黏連/反光），嚴禁猜測，直接標記為 `[!]`。
-    
+    2. **數據抄錄 (ds)**：格式 `"ID:值|ID:值"`。禁止簡化，`349.90` 必寫 `"349.90"`。
     3. **項目分類決策流程 (由上至下執行，命中即停止)**：
         - **LEVEL 1：銲補與裝配判定 (最高優先)**
           * 標題含「銲補」、「銲接」 -> `min_limit`。
           * 標題含「組裝」、「拆裝」、「裝配」、「真圓度」 -> `range`。
+         
         - **LEVEL 2：未再生判定 (含車修)**
           * 標題含「未再生」三字時：
             a. 含「軸頸」 -> `max_limit`。
             b. 不含「軸頸」(本體) -> `un_regen`。
-          * (💡 注意：此類項目即便包含「車修」字眼，也必須鎖定在 LEVEL 2)。
+          * (💡 注意：此類項目即使包含「車修」字眼，也必須鎖定在 LEVEL 2，嚴禁進入下一個層級)。
+         
         - **LEVEL 3：精加工判定**
           * 標題不含「未再生」，且包含「再生」、「研磨」、「精加工」、「車修加工」、「KEYWAY」 -> `range`。
 
-    #### 💰 模組 B：會計指標提取 (AI 任務：純抄錄)
-    1. **統計表**：抄錄左上角統計表每一行名稱與實交數量到 `summary_rows`。
-    2. **指標提取**：提取運費項次與標題括號內的 PC 數。
+    4. **數據抄錄 (字串保護模式)**：
+       - **禁止簡化**：實測值若顯示 `349.90`，必須輸出 `"349.90"`。
+       - **格式**：所有實測值必須包裹成雙引號字串。`["RollID", "實測值字串"]`。
+       - **🚫 遇到干擾不鑽牛角尖**：若儲存格內的數值因手寫塗改、圓圈遮擋、污點、字跡黏連或光線反光，導致你無法「100% 確定」原始打印數字時，**嚴禁腦補或猜測**。
+       - **壞軌標記 [BAD]**：請將該筆數值直接標記為 `[!]`。
+       - **範例**：若 ID 清楚但數值模糊 -> `"V100:[!]"`；若整個儲存格都看不清 -> `"[!] : [!]"`。
+       - **跳過策略**：一旦標記為 `[!]`，請立即跳到下一格，不要浪費 Token 描述雜訊。
+
+    #### 💰 模組 B：會計指標提取 (AI 任務：抄錄)
+    1. **統計表**：抄錄統計表每一行名稱與實交數量到 `summary_rows`。
+    2. **運費與指標**：提取運費項次與標題括號內的 PC 數。你不需抄錄規則文字。
+
+    #### ⚖️ 模組 C：流程稽核 (AI 任務：判定)
+    1. **位階檢查**：`未再生 < 研磨 < 再生 < 銲補`。若跨頁面後段尺寸小於前段（銲補除外），報 `🛑流程異常`。
 
     ---
-    #### 📝 輸出規範 (極簡 JSON Format)
-    必須回傳單一合法 JSON。
-    ⚠️ 絕對禁止回傳 accounting_rules, sl 以及 issues 欄位。
-    
-    格式如下：
+
+    ### 📝 輸出規範 (Output Format)
+    必須回傳單一 JSON。統計不符時必須「逐行拆分」來源明細。
+
     {{
       "job_no": "工令",
-      "summary_rows": [ {{ "title": "名稱", "target": 數字 }} ],
-      "freight_target": 數字,
+      "summary_rows": [ {{ "title": "名", "target": 數字 }} ],
+      "freight_target": 0,
+      "issues": [ 
+         {{ "page": "頁碼", "item": "項目", "issue_type": "統計不符 / 🛑流程異常", "common_reason": "原因", "failures": [] }}
+      ],
       "dimension_data": [
          {{
-           "page": 數字, "item_title": "標題", "category": "分類名稱", 
-           "item_pc_target": 數字, "std_spec": "規格文字", "ds": "ID:值|ID:值" 
+           "page": 數字, "item_title": "標題", "category": "分類名稱", "item_pc_target": 0,
+           "accounting_rules": {{ "local": "", "agg": "", "freight": "" }},
+           "sl": {{ "lt": "分類標籤", "t": 0 }},
+           "std_spec": "原始規格文字",
+           "ds": "ID:值|ID:值" 
          }}
       ]
     }}
     """
     
+    # 2. 判斷要使用哪一顆引擎
+    raw_content = ""
+    
+    # --- 引擎 A: OpenAI GPT 系列 ---
+    if "gpt" in model_name.lower():
+        try:
+            # 必須使用全域變數 OPENAI_KEY，因為傳入的 api_key 參數通常是 GEMINI_KEY
+            openai_key = st.secrets.get("OPENAI_KEY", "")
+            if not openai_key:
+                return {"job_no": "Error: 缺少 OPENAI_KEY", "issues": [], "dimension_data": []}
+                
+            client = OpenAI(api_key=openai_key)
+            
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": combined_input}
+                ],
+                temperature=0.0,
+                response_format={"type": "json_object"} # GPT-4o 支援強制 JSON 模式
+            )
+            raw_content = response.choices[0].message.content
+            
+            # 模擬 Token 用量 (OpenAI 格式不同，這裡做個簡單轉換以便統一顯示)
+            input_tokens = response.usage.prompt_tokens
+            output_tokens = response.usage.completion_tokens
+            
+        except Exception as e:
+            return {"job_no": f"OpenAI Error: {str(e)}", "issues": [], "dimension_data": []}
+
+    # --- 引擎 B: Google Gemini 系列 ---
+    else:
+        try:
+            genai.configure(api_key=api_key) # 這裡用傳入的 GEMINI_KEY
+            generation_config = {"response_mime_type": "application/json", "temperature": 0.0}
+            model = genai.GenerativeModel(model_name)
+            
+            # Gemini 2.0 可能需要不同的呼叫方式，這裡保持通用接口
+            response = model.generate_content([system_prompt, combined_input], generation_config=generation_config)
+            raw_content = response.text
+            
+            input_tokens = response.usage_metadata.prompt_token_count
+            output_tokens = response.usage_metadata.candidates_token_count
+            
+        except Exception as e:
+            return {"job_no": f"Gemini Error: {str(e)}", "issues": [], "dimension_data": []}
+
+    # 3. 統一解析與回傳
     try:
-        genai.configure(api_key=api_key)
-        
-        model = genai.GenerativeModel(
-            model_name=model_name,
-            generation_config={
-                "response_mime_type": "application/json",
-                "temperature": 0.0,
-                "max_output_tokens": 16384
-            }
-        )
-        
-        with st.spinner('🤖 總稽核 Agent 正在進行數據轉錄 (強制完整模式)...'):
-            response = model.generate_content([system_prompt, combined_input])
-        
-        raw_content = response.text.strip()
-        
-        # 🛡️ 強化解析
+        # 🛡️ 超級解析器：防止 AI 輸出帶有 Markdown 標籤或廢話
+        import re
         json_match = re.search(r"\{.*\}", raw_content, re.DOTALL)
         if json_match:
             raw_content = json_match.group()
             
         parsed_data = json.loads(raw_content)
         
-        # 記錄消耗 Token
+        # 統一 Token 用量格式
         parsed_data["_token_usage"] = {
-            "input": response.usage_metadata.prompt_token_count, 
-            "output": response.usage_metadata.candidates_token_count
+            "input": input_tokens, 
+            "output": output_tokens
         }
         return parsed_data
 
-    except json.JSONDecodeError as e:
-        st.error(f"❌ JSON 解析失敗！")
-        with st.expander("👀 查看導致錯誤的 AI 原始回應"):
-            if 'raw_content' in locals():
-                st.code(raw_content)
-            elif 'response' in locals():
-                st.code(response.text)
-        return {"job_no": "JSON Error", "issues": [], "dimension_data": []}
-
     except Exception as e:
-        st.error(f"❌ 系統發生錯誤: {str(e)}")
-        return {"job_no": f"Error: {str(e)}", "issues": [], "dimension_data": []}
+        return {"job_no": f"JSON Parsing Error: {str(e)}", "issues": [], "dimension_data": []}
 
 # --- 重點：Python 引擎獨立於 agent 函式之外 ---
 
