@@ -358,7 +358,7 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
     # 1. 準備 Prompt (規則與指令)
     dynamic_rules = get_dynamic_rules(full_text_for_search)
 
-    system_prompt = f"""
+        system_prompt = f"""
     你是一位極度嚴謹的中鋼機械品管【數據抄錄員】。你必須像「電腦程式」一樣執行任務。
     
     {dynamic_rules}
@@ -384,26 +384,21 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
     1. **統計表**：抄錄統計表每一行名稱與實交數量到 `summary_rows`。
     2. **運費與指標**：提取運費項次與標題括號內的 PC 數。你不需抄錄規則文字。
 
-    #### ⚖️ 模組 C：流程稽核 (AI 任務：判定)
-    1. **位階檢查**：`未再生 < 研磨 < 再生 < 銲補`。若跨頁面後段尺寸小於前段（銲補除外），報 `🛑流程異常`。
-
     ---
 
     ### 📝 輸出規範 (Output Format)
-    必須回傳單一 JSON。統計不符時必須「逐行拆分」來源明細。
+    必須回傳單一 JSON。注意：AI 不需回傳流程異常，僅需回傳原始數據。
 
     {{
       "job_no": "工令",
       "summary_rows": [ {{ "title": "名", "target": 數字 }} ],
       "freight_target": 0,
-      "issues": [ 
-         {{ "page": "頁碼", "item": "項目", "issue_type": "統計不符 / 🛑流程異常", "common_reason": "原因", "failures": [] }}
-      ],
+      "issues": [], 
       "dimension_data": [
          {{
-           "page": 數字, "item_title": "標題", "category": "分類名稱", "item_pc_target": 0,
+           "page": 數字, "item_title": "標題", "category": null, "item_pc_target": 0,
            "accounting_rules": {{ "local": "", "agg": "", "freight": "" }},
-           "sl": {{ "lt": "分類標籤", "t": 0 }},
+           "sl": {{ "lt": "null", "t": 0 }},
            "std_spec": "原始規格文字",
            "ds": "ID:值|ID:值" 
          }}
