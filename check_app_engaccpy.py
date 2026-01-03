@@ -72,8 +72,9 @@ with st.sidebar:
         "Gemini 2.5 Flash": "models/gemini-2.5-flash",
         "Gemini 2.5 Flash Lite": "gemini-2.5-flash-lite",
         "Gemini 2.5 Pro": "models/gemini-2.5-pro",
-        "GPT-5": "models/gpt-5",
-        "GPT-5 Mini": "models/gpt-5-mini",
+        "GPT-5 Mini": "models/gpt-5-mini-2025-08-07",
+        "GPT-5 Nano": "models/gpt-5-nano-2025-08-07",
+        
     }
     options_list = list(model_options.keys())
     
