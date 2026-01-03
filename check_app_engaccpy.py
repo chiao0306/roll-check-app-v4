@@ -101,10 +101,11 @@ with st.sidebar:
         on_change=update_url_param
     )
 
-# --- Excel 規則讀取函數 (單一代理整合版) ---
+# --- Excel 規則讀取函數 (極簡版：只給規格) ---
 @st.cache_data
 def get_dynamic_rules(ocr_text, debug_mode=False):
     try:
+        # 還是要讀 Excel，因為要抓規格給 AI 參考 (增加 OCR 容錯率)
         df = pd.read_excel("rules.xlsx")
         df.columns = [c.strip() for c in df.columns]
         ocr_text_clean = str(ocr_text).upper().replace(" ", "").replace("\n", "")
@@ -112,30 +113,29 @@ def get_dynamic_rules(ocr_text, debug_mode=False):
 
         for index, row in df.iterrows():
             item_name = str(row.get('Item_Name', '')).strip()
-            # 💡 跳過原本的「(通用)」項目，只抓特規
             if not item_name or "(通用)" in item_name: continue
             
-            # 使用模糊匹配判斷是否為當前處理的項目
+            # 模糊匹配
             score = fuzz.partial_ratio(item_name.upper().replace(" ", ""), ocr_text_clean)
             if score >= 85:
-                # 提取特規資訊
+                # ⭐️ 改動重點：只抓取「規格」給 AI，其他會計規則通通不給了
                 spec = str(row.get('Standard_Spec', ''))
-                logic = str(row.get('Logic_Prompt', ''))
-                u_local = str(row.get('Unit_Rule_Local', ''))
-                u_agg = str(row.get('Unit_Rule_Agg', ''))
-                u_freight = str(row.get('Unit_Rule_Freight', ''))
+                logic = str(row.get('Logic_Prompt', '')) # 例外指令還是留著，萬一有特殊情況
                 
-                desc = f"- **[特定項目規則] {item_name}**\n"
-                if spec != 'nan' and spec: desc += f"  - [強制規格]: {spec}\n"
-                if logic != 'nan' and logic: desc += f"  - [例外指令]: {logic}\n"
-                if u_local != 'nan' and u_local: desc += f"  - [會計單項]: {u_local}\n"
-                if u_agg != 'nan' and u_agg: desc += f"  - [會計聚合]: {u_agg}\n"
-                if u_freight != 'nan' and u_freight: desc += f"  - [會計運費]: {u_freight}\n"
+                desc = f"- **[參考資訊] {item_name}**\n"
+                if spec != 'nan' and spec: desc += f"  - 標準規格: {spec} (若模糊不清可參考此值)\n"
+                if logic != 'nan' and logic: desc += f"  - 注意事項: {logic}\n"
+                
+                # 運費、單位規則...通通不加進 Prompt 了！
+                
                 specific_rules.append(desc)
         
-        return "\n".join(specific_rules) if specific_rules else "無特定專案規則，請依照通用憲法執行。"
+        if not specific_rules and debug_mode:
+            return "無特定規則命中。"
+            
+        return "\n".join(specific_rules)
     except Exception as e:
-        return f"讀取規則檔時發生錯誤: {e}"
+        return "" # 讀不到就算了，不影響 AI 抄寫
         
 # --- 4. 核心函數：Azure 神之眼 ---
 def extract_layout_with_azure(file_obj, endpoint, key):
