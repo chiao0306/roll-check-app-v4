@@ -159,12 +159,38 @@ def extract_layout_with_azure(file_obj, endpoint, key):
     
     if result.tables:
         for idx, table in enumerate(result.tables):
+            # 1. 取得頁碼 (保留原邏輯)
             page_num = "Unknown"
             if table.bounding_regions: page_num = table.bounding_regions[0].page_number
-            markdown_output += f"\n### Table {idx + 1} (Page {page_num}):\n"
+            
+            # =========================================================
+            # 🔍 [新增] 智慧標籤偵測：在處理表格前，先判斷它是誰
+            # =========================================================
+            table_tag = "未知表格"
+            
+            # 技巧：抓取表格「第一列 (row_index=0)」的所有文字來判斷
+            # 這樣不用讀完整張表，只要看表頭就知道它是總表還是明細
+            first_cells = [c.content for c in table.cells if c.row_index == 0]
+            first_row_text = "".join(first_cells)
+            
+            # 定義關鍵字 (您可以根據實際表格微調)
+            summary_keywords = ["實交", "申請", "名稱及規範", "完成交貨日期", "存放位置"]
+            detail_keywords = ["規範標準", "檢驗紀錄", "實測", "編號", "尺寸", "W3 #", "公差"]
+
+            if any(k in first_row_text for k in summary_keywords):
+                table_tag = "SUMMARY_TABLE (總表)"
+            elif any(k in first_row_text for k in detail_keywords):
+                table_tag = "DETAIL_TABLE (明細表)"
+            
+            # 📝 [修改] 輸出標頭：這裡不再只寫 Table X，而是加上我們判斷的標籤
+            # 加上 "===" 是為了讓 Prompt 裡的「注意範圍」指令能精準鎖定
+            markdown_output += f"\n\n=== [{table_tag} | Page {page_num}] ===\n"
+            # =========================================================
+
             rows = {}
             stop_processing_table = False 
             
+            # --- 以下保留您原本的 Cell 處理邏輯，完全不用動 ---
             for cell in table.cells:
                 if stop_processing_table: break
                 content = cell.content.replace("\n", " ").strip()
@@ -193,7 +219,7 @@ def extract_layout_with_azure(file_obj, endpoint, key):
                     for c in range(max_col + 1): 
                         row_cells.append(rows[r].get(c, ""))
                     markdown_output += "| " + " | ".join(row_cells) + " |\n"
-    
+
     if result.content:
         match = re.search(r"(?:項次|Page|頁次|NO\.)[:\s]*(\d+)\s*[/／]\s*\d+", result.content, re.IGNORECASE)
         if match:
@@ -366,6 +392,8 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
     ---
 
     #### ⚔️ 模組 A：工程尺寸數據提取 (AI 任務：純抄錄)
+    ⚠️ **注意範圍**：你只能從標記為 `=== [DETAIL_TABLE (明細表)] ===` 的區域提取數據。
+
     1. **規格抄錄 (std_spec)**：精確抄錄標題中含 `mm`、`±`、`+`、`-` 的原始文字。
     
     2. **標題抄錄 (item_title)**：⚠️ 極度重要！必須完整抄錄項目標題，**嚴禁遺漏**「未再生」、「銲補」、「車修」、「軸頸」等關鍵字。（因為後端程式將依賴標題進行分類）。
@@ -381,7 +409,8 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
        - **跳過策略**：一旦標記為 `[!]`，請立即跳到下一格，不要浪費 Token 描述雜訊。
 
     #### 💰 模組 B：會計指標提取 (AI 任務：抄錄)
-    1. **統計表**：抄錄統計表每一行名稱與實交數量到 `summary_rows`。
+    ⚠️ **注意範圍**：你只能從標記為 `=== [SUMMARY_TABLE (總表)] ===` 的區域提取數據。
+    1. **統計表**：請鎖定 `實交數量` 欄位。抄錄每一行的「名稱」與「實交數量」到 `summary_rows`。
     2. **運費與指標**：提取運費項次與標題括號內的 PC 數。你不需抄錄規則文字。
 
     ---
