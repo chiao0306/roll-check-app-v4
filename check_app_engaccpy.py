@@ -766,7 +766,7 @@ def python_accounting_audit(dimension_data, res_main):
                 if has_part and "銲補" in title_clean: match = True
             else:
                 # 優先級二：普通籃子
-                if fuzz.partial_ratio(s_title_clean, title_clean) > 90:
+                if fuzz.partial_ratio(s_title_clean, title_clean) > 98:
                     match = True
                     if req_body and not is_item_body: match = False
                     elif req_journal and not is_item_journal: match = False
