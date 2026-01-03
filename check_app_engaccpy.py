@@ -1120,6 +1120,41 @@ if st.session_state.photo_gallery:
                 
         with st.expander("🔬 查看 AI 抄錄原始數據", expanded=False):
             st.json(cache.get("ai_extracted_data", []))
+            
+     # ========================================================
+    # 👇 [新增] 這是你要多加的「工程師看板」按鈕，貼在舊的按鈕下面
+    # ========================================================
+        with st.expander("📊 [工程師看板] 總表與運費詳細檢視"):
+        # 抓取資料
+        target_data_new = st.session_state.get('analysis_result_cache')
+        
+        if target_data_new:
+            # 1. 頂部關鍵數據 (運費是不是 0 看這裡最快)
+            st.markdown("#### 1. 核心數據狀態")
+            m1, m2, m3 = st.columns(3)
+            m1.metric("🏭 工令單號", target_data_new.get("job_no", "N/A"))
+            
+            # 特別標示運費，如果是 0 會很明顯
+            f_target = target_data_new.get('freight_target', 0)
+            m2.metric("🚚 運費 Target", f"{f_target}", delta="有抓到" if f_target > 0 else "未偵測到", delta_color="normal")
+            
+            row_count = len(target_data_new.get("summary_rows", []))
+            m3.metric("📑 總表行數", f"{row_count}", delta="正常" if row_count > 0 else "空值", delta_color="off")
+
+            st.divider()
+
+            # 2. 總表表格化 (用來檢查 AI 有沒有把運費籃子抄進去)
+            st.markdown("#### 2. AI 抄到的左上角總表 (Summary Rows)")
+            summary_rows = target_data_new.get("summary_rows", [])
+            
+            if summary_rows:
+                # 這裡會直接畫出表格，方便你看 "title" 到底長怎樣
+                st.table(summary_rows)
+            else:
+                st.error("❌ AI 變數 `summary_rows` 為空！它沒看到左上角的表格。")
+                
+        else:
+            st.info("請先執行分析，這裡才會顯示數據。")
 
         with st.expander("🐍 查看 Python 硬邏輯偵測結果 (Debug)", expanded=False):
             if cache.get('python_debug_data'):
