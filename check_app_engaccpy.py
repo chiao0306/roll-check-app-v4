@@ -1112,11 +1112,12 @@ if st.session_state.photo_gallery:
             status_box.update(label="✅ 分析完成！", state="complete", expanded=False)
             st.rerun()
 
-    # --- 💡 [顯示結果區塊] ---
+        # --- 💡 [顯示結果區塊] 美化整合版 ---
     if st.session_state.analysis_result_cache:
         cache = st.session_state.analysis_result_cache
         all_issues = cache.get('all_issues', [])
         
+        # 頂部狀態列
         st.success(f"工令: {cache['job_no']} | ⏱️ {cache['total_duration']:.1f}s")
         st.info(f"💰 本次成本: NT$ {cache['cost_twd']:.2f} (In: {cache['total_in']:,} / Out: {cache['total_out']:,})")
         st.caption(f"細節耗時: Azure OCR {cache['ocr_duration']:.1f}s | AI 分析 {cache['time_eng']:.1f}s")
@@ -1126,35 +1127,46 @@ if st.session_state.photo_gallery:
             rules_text = get_dynamic_rules(cache.get('full_text_for_search',''), debug_mode=True)
             st.markdown(rules_text)
                 
-        # 2. 既有的：查看 JSON (保留不動)
-        with st.expander("🔬 查看 AI 抄錄原始數據", expanded=False):
-            st.json(cache.get("ai_extracted_data", []))
+        # 2. ⭐️ [大升級] 查看 AI 抄錄原始數據 (精美版)
+        with st.expander("🔬 查看 AI 抄錄原始數據 (完整儀表板)", expanded=False):
             
-        # 3. ⭐️ [新增] 工程師看板：總表與運費詳細檢視 (貼在這裡！)
-        with st.expander("📊 [工程師看板] 總表與運費詳細檢視"):
-            st.markdown("#### 1. 核心數據狀態")
-            m1, m2, m3 = st.columns(3)
-            m1.metric("🏭 工令單號", cache.get("job_no", "N/A"))
+            # Part A: 關鍵指標 (Dashboard Style)
+            st.markdown("#### 1. 總表與運費概況")
+            c1, c2, c3 = st.columns(3)
             
-            # 運費檢視
+            # 工令
+            c1.metric("🏭 工令單號", cache.get("job_no", "N/A"))
+            
+            # 運費 (加上顏色燈號)
             f_target = cache.get('freight_target', 0)
-            m2.metric("🚚 運費 Target", f"{f_target}", delta="有抓到" if f_target > 0 else "未偵測到", delta_color="normal")
+            c2.metric("🚚 運費 Target", f"{f_target}", 
+                      delta="有抓到" if f_target > 0 else "未偵測到", 
+                      delta_color="normal" if f_target > 0 else "off")
             
-            # 總表行數檢視
+            # 總表行數
             sum_rows = cache.get("summary_rows", [])
-            row_count = len(sum_rows)
-            m3.metric("📑 總表行數", f"{row_count}", delta="正常" if row_count > 0 else "空值", delta_color="off")
+            c3.metric("📑 總表行數", f"{len(sum_rows)}", 
+                      delta="正常" if sum_rows else "空值", 
+                      delta_color="normal" if sum_rows else "off")
+            
+            st.divider() # 分隔線
 
-            st.divider()
-
-            # 總表表格化
-            st.markdown("#### 2. AI 抄到的左上角總表 (Summary Rows)")
+            # Part B: 總表表格化 (Table View)
+            st.markdown("#### 2. 左上角統計表明細 (Summary Rows)")
             if sum_rows:
+                # 這裡直接畫出表格，方便核對 AI 到底把籃子名字抄成什麼
                 st.table(sum_rows)
             else:
-                st.error("❌ AI 變數 `summary_rows` 為空！它沒看到左上角的表格。")
+                st.warning("⚠️ AI 回報：變數 `summary_rows` 為空，未偵測到左上角表格！")
 
-        # 4. 既有的：Python Debug 資料
+            st.divider() # 分隔線
+
+            # Part C: 詳細項目數據 (JSON View)
+            st.markdown("#### 3. 各頁面尺寸抄錄明細 (Dimension Data)")
+            st.caption("👇 這裡是 AI 針對每一頁、每一個項目抄錄的詳細 JSON 結構：")
+            st.json(cache.get("ai_extracted_data", []))
+
+        # 3. 既有的：Python Debug 資料
         with st.expander("🐍 查看 Python 硬邏輯偵測結果 (Debug)", expanded=False):
             if cache.get('python_debug_data'):
                 st.dataframe(cache['python_debug_data'], use_container_width=True, hide_index=True)
