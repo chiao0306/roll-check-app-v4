@@ -423,7 +423,7 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
     # 1. 準備 Prompt (規則與指令)
     dynamic_rules = get_dynamic_rules(full_text_for_search)
 
-        system_prompt = f"""
+    system_prompt = f"""
     你是一位極度嚴謹的中鋼機械品管【數據抄錄員】。你必須像「電腦程式」一樣執行任務。
     
     {dynamic_rules}
