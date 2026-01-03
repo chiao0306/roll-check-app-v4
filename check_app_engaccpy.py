@@ -1317,29 +1317,30 @@ if st.session_state.photo_gallery:
             status_box.update(label="✅ 分析完成！", state="complete", expanded=False)
             st.rerun()
 
-           # --- 💡 [顯示結果區塊] 專業清爽版 ---
+               # --- 💡 [顯示結果區塊] 最終調整版 ---
     if st.session_state.analysis_result_cache:
         cache = st.session_state.analysis_result_cache
         all_issues = cache.get('all_issues', [])
         
-        # 1. 頂部狀態條 (維持原生樣式，最乾淨)
-        st.success(f"工令單號: {cache['job_no']}   |   耗時: {cache['total_duration']:.1f}s   |   成本: NT$ {cache['cost_twd']:.2f}")
+        # 1. 頂部狀態條 (復原為舊版樣式：分層顯示更清晰)
+        st.success(f"工令: {cache['job_no']} | ⏱️ {cache['total_duration']:.1f}s")
+        st.info(f"💰 本次成本: NT$ {cache['cost_twd']:.2f} (In: {cache['total_in']:,} / Out: {cache['total_out']:,})")
+        st.caption(f"細節耗時: Azure OCR {cache['ocr_duration']:.1f}s | AI 分析 {cache['time_eng']:.1f}s")
 
         # 2. 規則檢視 (Debug)
         with st.expander("🔍 檢視 Excel 規則與邏輯參數", expanded=False):
             rules_text = get_dynamic_rules(cache.get('full_text_for_search',''), debug_mode=True)
             st.markdown(rules_text)
                 
-        # 3. 原始數據檢視 (去除圖案，改用數據表格)
+        # 3. 原始數據檢視
         with st.expander("📊 檢視 AI 抄錄原始數據", expanded=False):
             
-            # A. 關鍵指標摘要 (用 DataFrame 顯示，字體統一且整齊)
+            # A. 關鍵指標摘要
             st.markdown("**1. 核心指標摘要**")
             
             f_target = cache.get('freight_target', 0)
             sum_rows_len = len(cache.get("summary_rows", []))
             
-            # 製作一個乾淨的單行表格
             summary_df = pd.DataFrame([{
                 "工令單號": cache.get("job_no", "N/A"),
                 "運費 Target (PC)": f_target,
@@ -1356,9 +1357,7 @@ if st.session_state.photo_gallery:
             sum_rows = cache.get("summary_rows", [])
             
             if sum_rows:
-                # 轉成 DataFrame 顯示，比 st.table 更緊湊好讀
                 df_sum = pd.DataFrame(sum_rows)
-                # 重新命名欄位讓它更專業
                 df_sum.rename(columns={"title": "項目名稱", "target": "實交數量"}, inplace=True)
                 st.dataframe(df_sum, hide_index=True, use_container_width=True)
             else:
@@ -1366,9 +1365,9 @@ if st.session_state.photo_gallery:
 
             st.divider()
 
-            # C. JSON 詳細資料
+            # C. JSON 詳細資料 (⭐️ 修改點：設定為 expanded=True 預設展開)
             st.markdown("**3. 全卷詳細抄錄數據 (JSON)**")
-            st.json(cache.get("ai_extracted_data", []), expanded=False)
+            st.json(cache.get("ai_extracted_data", []), expanded=True)
 
         # 4. Python Debug
         with st.expander("🐍 Python 硬邏輯偵測結果", expanded=False):
@@ -1377,6 +1376,7 @@ if st.session_state.photo_gallery:
             else:
                 st.caption("無偵測資料")
 
+        # ... (以下判定結論顯示與卡片循環顯示保持不變，若您下方還有程式碼請保留) ...
         # 判定結論顯示
         real_errors = [i for i in all_issues if "未匹配" not in i.get('issue_type', '')]
         if not all_issues:
@@ -1393,7 +1393,7 @@ if st.session_state.photo_gallery:
                 c1, c2 = st.columns([3, 1])
                 source_label = item.get('source', '')
                 issue_type = item.get('issue_type', '異常')
-                c1.markdown(f"**P.{item.get('page', '?')} | {item.get('item')}**  `{source_label}`")
+                c1.markdown(f"**P.{item.get('page', '?')} | {item.get('item')}** `{source_label}`")
                 
                 if any(kw in issue_type for kw in ["統計", "數量", "流程"]):
                     c2.error(f"🛑 {issue_type}")
@@ -1416,6 +1416,7 @@ if st.session_state.photo_gallery:
                     st.dataframe(table_data, use_container_width=True, hide_index=True)
         
         st.divider()
+
         # 下載按鈕與原文展開
         # ... (這裡接你原本剩下的代碼即可，也要記得縮排往左移)
         current_job_no = cache.get('job_no', 'Unknown')
