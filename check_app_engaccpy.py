@@ -101,42 +101,92 @@ with st.sidebar:
         on_change=update_url_param
     )
 
-# --- Excel 規則讀取函數 (極簡版：只給規格) ---
+# --- Excel 規則讀取函數 (雙視角對照版) ---
 @st.cache_data
 def get_dynamic_rules(ocr_text, debug_mode=False):
     try:
-        # 還是要讀 Excel，因為要抓規格給 AI 參考 (增加 OCR 容錯率)
+        # 讀取 Excel
         df = pd.read_excel("rules.xlsx")
         df.columns = [c.strip() for c in df.columns]
         ocr_text_clean = str(ocr_text).upper().replace(" ", "").replace("\n", "")
-        specific_rules = []
+        
+        ai_prompt_list = []    # 給 AI 的 (精簡)
+        debug_view_list = []   # 給人看的 (完整對照)
 
         for index, row in df.iterrows():
             item_name = str(row.get('Item_Name', '')).strip()
+            # 跳過空值或通用規則
             if not item_name or "(通用)" in item_name: continue
             
             # 模糊匹配
             score = fuzz.partial_ratio(item_name.upper().replace(" ", ""), ocr_text_clean)
             if score >= 85:
-                # ⭐️ 改動重點：只抓取「規格」給 AI，其他會計規則通通不給了
+                # 1. 抓取所有資料
                 spec = str(row.get('Standard_Spec', ''))
-                logic = str(row.get('Logic_Prompt', '')) # 例外指令還是留著，萬一有特殊情況
+                logic = str(row.get('Logic_Prompt', ''))
+                u_fr = str(row.get('Unit_Rule_Freight', ''))
+                u_loc = str(row.get('Unit_Rule_Local', ''))
+                u_agg = str(row.get('Unit_Rule_Agg', ''))
                 
-                desc = f"- **[參考資訊] {item_name}**\n"
-                if spec != 'nan' and spec: desc += f"  - 標準規格: {spec} (若模糊不清可參考此值)\n"
-                if logic != 'nan' and logic: desc += f"  - 注意事項: {logic}\n"
+                # 簡單清洗函式 (把 nan 轉成 None)
+                def clean(v): return v if v != 'nan' and v else None
                 
-                # 運費、單位規則...通通不加進 Prompt 了！
+                val_spec = clean(spec)
+                val_logic = clean(logic)
+                val_fr = clean(u_fr)
+                val_loc = clean(u_loc)
+                val_agg = clean(u_agg)
+
+                # --- A. 建構 AI Prompt 字串 (維持精簡，只給規格) ---
+                if not debug_mode:
+                    if val_spec or val_logic:
+                        desc = f"- **[參考資訊] {item_name}**\n"
+                        if val_spec: desc += f"  - 標準規格: {val_spec}\n"
+                        if val_logic: desc += f"  - 注意事項: {val_logic}\n"
+                        ai_prompt_list.append(desc)
                 
-                specific_rules.append(desc)
-        
-        if not specific_rules and debug_mode:
-            return "無特定規則命中。"
-            
-        return "\n".join(specific_rules)
+                # --- B. 建構 Debug 顯示字串 (人類視角：AI 與 Python 同台顯示) ---
+                else:
+                    # 標題區
+                    block = f"#### 🔩 項目：{item_name} (匹配度 {score}%)\n"
+                    
+                    # 左手：AI 看到的
+                    block += "**🤖 AI 讀取到的 (Prompt輸入):**\n"
+                    if val_spec or val_logic:
+                        if val_spec: block += f"- 📝 標準規格: `{val_spec}`\n"
+                        if val_logic: block += f"- ⚠️ 注意事項: `{val_logic}`\n"
+                    else:
+                        block += "- (無針對 AI 的規則 - AI 將依賴通用能力)\n"
+
+                    # 右手：Python 看到的
+                    block += "\n**🐍 Python 讀取到的 (硬邏輯):**\n"
+                    has_py = False
+                    if val_fr: 
+                        block += f"- 🚚 運費規則: `{val_fr}` (用於運費計算)\n"
+                        has_py = True
+                    if val_loc:
+                        block += f"- 🔢 單項規則: `{val_loc}` (用於數量核對)\n"
+                        has_py = True
+                    if val_agg:
+                        block += f"- 📊 聚合規則: `{val_agg}` (用於總表對帳)\n"
+                        has_py = True
+                    
+                    if not has_py:
+                        block += "- (無特殊 Python 規則 - 走預設邏輯)\n"
+                    
+                    block += "\n---\n" # 分隔線
+                    debug_view_list.append(block)
+
+        # 回傳結果
+        if debug_mode:
+            if not debug_view_list: return "🔍 未偵測到符合 `rules.xlsx` 的特定項目。"
+            return "\n".join(debug_view_list)
+        else:
+            return "\n".join(ai_prompt_list) if ai_prompt_list else ""
+
     except Exception as e:
-        return "" # 讀不到就算了，不影響 AI 抄寫
-        
+        return f"❌ 讀取規則檔時發生錯誤: {e}"
+
 # --- 4. 核心函數：Azure 神之眼 ---
 def extract_layout_with_azure(file_obj, endpoint, key):
     client = DocumentIntelligenceClient(endpoint=endpoint, credential=AzureKeyCredential(key))
