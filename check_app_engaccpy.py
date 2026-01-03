@@ -1085,6 +1085,8 @@ if st.session_state.photo_gallery:
             
             # 5. 存檔與完成
             usage = res_main.get("_token_usage", {"input": 0, "output": 0})
+            
+            # ⭐️ [關鍵修正] 這裡必須把 freight_target 和 summary_rows 存進去，不然顯示時會抓不到！
             st.session_state.analysis_result_cache = {
                 "job_no": res_main.get("job_no", "Unknown"),
                 "all_issues": all_issues,
@@ -1094,8 +1096,14 @@ if st.session_state.photo_gallery:
                 "total_out": usage.get("output", 0),
                 "ocr_duration": ocr_duration,
                 "time_eng": time.time() - total_start - ocr_duration,
+                
                 "ai_extracted_data": dim_data,
                 "python_debug_data": python_debug_data,
+                
+                # 👇 這裡是我幫您補上的，為了新的看板功能
+                "freight_target": res_main.get("freight_target", 0),
+                "summary_rows": res_main.get("summary_rows", []),
+                
                 "full_text_for_search": combined_input,
                 "combined_input": combined_input
             }
@@ -1104,7 +1112,7 @@ if st.session_state.photo_gallery:
             status_box.update(label="✅ 分析完成！", state="complete", expanded=False)
             st.rerun()
 
-    # --- 💡 [重大修正] 顯示結果區塊：必須與 if trigger_analysis 平級 ---
+    # --- 💡 [顯示結果區塊] ---
     if st.session_state.analysis_result_cache:
         cache = st.session_state.analysis_result_cache
         all_issues = cache.get('all_issues', [])
@@ -1113,49 +1121,40 @@ if st.session_state.photo_gallery:
         st.info(f"💰 本次成本: NT$ {cache['cost_twd']:.2f} (In: {cache['total_in']:,} / Out: {cache['total_out']:,})")
         st.caption(f"細節耗時: Azure OCR {cache['ocr_duration']:.1f}s | AI 分析 {cache['time_eng']:.1f}s")
         
-        # 展開頁面
+        # 1. 既有的：查看 Excel 規則
         with st.expander("🔍 查看 AI 讀取到的 Excel 規則 (Debug)"):
             rules_text = get_dynamic_rules(cache.get('full_text_for_search',''), debug_mode=True)
             st.markdown(rules_text)
                 
+        # 2. 既有的：查看 JSON (保留不動)
         with st.expander("🔬 查看 AI 抄錄原始數據", expanded=False):
             st.json(cache.get("ai_extracted_data", []))
             
-     # ========================================================
-    # 👇 [新增] 這是你要多加的「工程師看板」按鈕，貼在舊的按鈕下面
-    # ========================================================
+        # 3. ⭐️ [新增] 工程師看板：總表與運費詳細檢視 (貼在這裡！)
         with st.expander("📊 [工程師看板] 總表與運費詳細檢視"):
-        # 抓取資料
-        target_data_new = st.session_state.get('analysis_result_cache')
-        
-        if target_data_new:
-            # 1. 頂部關鍵數據 (運費是不是 0 看這裡最快)
             st.markdown("#### 1. 核心數據狀態")
             m1, m2, m3 = st.columns(3)
-            m1.metric("🏭 工令單號", target_data_new.get("job_no", "N/A"))
+            m1.metric("🏭 工令單號", cache.get("job_no", "N/A"))
             
-            # 特別標示運費，如果是 0 會很明顯
-            f_target = target_data_new.get('freight_target', 0)
+            # 運費檢視
+            f_target = cache.get('freight_target', 0)
             m2.metric("🚚 運費 Target", f"{f_target}", delta="有抓到" if f_target > 0 else "未偵測到", delta_color="normal")
             
-            row_count = len(target_data_new.get("summary_rows", []))
+            # 總表行數檢視
+            sum_rows = cache.get("summary_rows", [])
+            row_count = len(sum_rows)
             m3.metric("📑 總表行數", f"{row_count}", delta="正常" if row_count > 0 else "空值", delta_color="off")
 
             st.divider()
 
-            # 2. 總表表格化 (用來檢查 AI 有沒有把運費籃子抄進去)
+            # 總表表格化
             st.markdown("#### 2. AI 抄到的左上角總表 (Summary Rows)")
-            summary_rows = target_data_new.get("summary_rows", [])
-            
-            if summary_rows:
-                # 這裡會直接畫出表格，方便你看 "title" 到底長怎樣
-                st.table(summary_rows)
+            if sum_rows:
+                st.table(sum_rows)
             else:
                 st.error("❌ AI 變數 `summary_rows` 為空！它沒看到左上角的表格。")
-                
-        else:
-            st.info("請先執行分析，這裡才會顯示數據。")
 
+        # 4. 既有的：Python Debug 資料
         with st.expander("🐍 查看 Python 硬邏輯偵測結果 (Debug)", expanded=False):
             if cache.get('python_debug_data'):
                 st.dataframe(cache['python_debug_data'], use_container_width=True, hide_index=True)
