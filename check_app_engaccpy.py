@@ -423,7 +423,7 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
     # 1. 準備 Prompt (規則與指令)
     dynamic_rules = get_dynamic_rules(full_text_for_search)
 
-    system_prompt = f"""
+        system_prompt = f"""
     你是一位極度嚴謹的中鋼機械品管【數據抄錄員】。你必須像「電腦程式」一樣執行任務。
     
     {dynamic_rules}
@@ -432,14 +432,18 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
 
     #### ⚔️ 模組 A：工程尺寸數據提取 (AI 任務：純抄錄)
     ⚠️ **注意範圍**：你只能從標記為 `=== [DETAIL_TABLE (明細表)] ===` 的區域提取數據。
-
+    
     1. **規格抄錄 (std_spec)**：精確抄錄標題中含 `mm`、`±`、`+`、`-` 的原始文字。
     
-    2. **標題抄錄 (item_title)**：⚠️ 極度重要！必須完整抄錄項目標題，**嚴禁遺漏**「未再生」、「銲補」、「車修」、「軸頸」等關鍵字。（因為後端程式將依賴標題進行分類）。
+    2. **標題抄錄 (item_title)**：⚠️ 極度重要！必須完整抄錄項目標題，**嚴禁遺漏**「未再生」、「銲補」、「車修」、「軸頸」等關鍵字。
     
-    3. **分類 (category)**：**請直接回傳 `null`**。不要進行任何分類決策，分類將由 Python 後端處理。
+    3. **目標數量提取 (item_pc_target)**：
+       - 請從標題中提取括號內的數量要求（例如標題含 `(4SET)` 則提取 `4`，`(10PC)` 則提取 `10`）。
+       - 若無括號標註數量，請填 `0`。
 
-    4. **數據抄錄 (ds) 與 字串保護規範**：
+    4. **分類 (category)**：**請直接回傳 `null`**。由後端程式判定。
+
+    5. **數據抄錄 (ds) 與 字串保護規範**：
        - **格式**：輸出為 `"ID:值|ID:值"` 的字串格式。
        - **禁止簡化**：實測值若顯示 `349.90`，必須輸出 `"349.90"`，保留尾數 0。
        - **🚫 遇到干擾不鑽牛角尖**：若儲存格內的數值因手寫塗改、圓圈遮擋、污點、字跡黏連或光線反光，導致你無法「100% 確定」原始打印數字時，**嚴禁腦補或猜測**。
@@ -449,8 +453,9 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
 
     #### 💰 模組 B：會計指標提取 (AI 任務：抄錄)
     ⚠️ **注意範圍**：你只能從標記為 `=== [SUMMARY_TABLE (總表)] ===` 的區域提取數據。
+    
     1. **統計表**：請鎖定 `實交數量` 欄位。抄錄每一行的「名稱」與「實交數量」到 `summary_rows`。
-    2. **運費與指標**：提取運費項次與標題括號內的 PC 數。你不需抄錄規則文字。
+    (無需額外提取運費或特殊指標，只要完整抄錄表格行項目即可)
 
     ---
 
@@ -460,11 +465,12 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
     {{
       "job_no": "工令",
       "summary_rows": [ {{ "title": "名", "target": 數字 }} ],
-      "freight_target": 0,
+      "freight_target": 0, 
       "issues": [], 
       "dimension_data": [
          {{
-           "page": 數字, "item_title": "標題", "category": null, "item_pc_target": 0,
+           "page": 數字, "item_title": "標題", "category": null, 
+           "item_pc_target": 0,
            "accounting_rules": {{ "local": "", "agg": "", "freight": "" }},
            "sl": {{ "lt": "null", "t": 0 }},
            "std_spec": "原始規格文字",
@@ -473,7 +479,7 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
       ]
     }}
     """
-    
+
     # 2. 判斷要使用哪一顆引擎
     raw_content = ""
     
