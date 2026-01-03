@@ -859,87 +859,159 @@ def python_accounting_audit(dimension_data, res_main):
     return accounting_issues
     
 def python_process_audit(dimension_data):
+    """
+    Python 流程引擎：雙軌溯源 + 尺寸階層檢查
+    1. 雙軌制：本體與軸頸分開追蹤。
+    2. 四大工序：未再生(1) -> 銲補(2) -> 再生(3) -> 研磨(4)。
+    3. 溯源檢查：高階工序必須具備所有低階工序的歷史紀錄。
+    4. 尺寸檢查：未再生 < 研磨 < 再生 < 銲補。
+    """
     process_issues = []
-    roll_history = {} # { "ID": [{"p": "cat", "v": 190, "page": 1}, ...] }
     import re
+    
+    # 定義工序與名稱
+    STAGE_MAP = {
+        1: "未再生車修",
+        2: "銲補",
+        3: "再生車修",
+        4: "研磨"
+    }
+
+    # 1. 建立歸戶帳本
+    # 結構: history[(ID, Track)] = { Stage_Num: { "val": 數值, "page": 頁碼, "title": 標題 } }
+    history = {} 
+
     if not dimension_data: return []
 
     for item in dimension_data:
         p_num = item.get("page", "?")
+        title = str(item.get("item_title", "")).strip()
         ds = str(item.get("ds", ""))
-        cat = str(item.get("category", "")).strip()
         
-        # 1. 先用 | 切分不同數據
-        raw_segments = ds.split("|")
+        # --- A. 軌道判斷 (Track Detection) ---
+        track = "Unknown"
+        if "本體" in title:
+            track = "本體"
+        elif any(k in title for k in ["軸頸", "內孔", "JOURNAL"]):
+            track = "軸頸"
+        else:
+            continue # 沒寫部位的通常不參與嚴格流程檢查
+
+        # --- B. 工序判斷 (Stage Detection) ---
+        stage = 0
+        # 優先順序很重要，避免關鍵字誤判
+        if "研磨" in title:
+            stage = 4
+        elif "銲補" in title or "銲接" in title:
+            stage = 2
+        elif "未再生" in title:
+            stage = 1
+        elif "再生" in title: # 排除未再生後的再生
+            stage = 3
         
-        for seg in raw_segments:
-            # 2. 基本過濾：必須包含冒號
-            if ":" not in seg: continue
-            
-            # 3. 🛡️ 安全切分：防止 "ID:值:備註" 這種多冒號導致崩潰
+        if stage == 0: continue # 非四大工序不追蹤
+
+        # --- C. 數據解析 ---
+        # 支援多筆數據格式 "ID:值|ID:值"
+        segments = ds.split("|")
+        for seg in segments:
             parts = seg.split(":")
-            
-            # 如果切出來少於 2 段 (例如 "ID:")，跳過
             if len(parts) < 2: continue
             
-            # 強制只取前兩段，無視後面多餘的冒號
-            rid = str(parts[0]).strip()
-            val_str = str(parts[1]).strip()
+            rid = parts[0].strip()
+            val_str = parts[1].strip()
             
-            try:
-                # 簡單清洗取出數字
-                # 這裡加個保護，萬一 val_str 裡沒有數字 (例如 "N/A") 也不要報錯
-                found_nums = re.findall(r"\d+\.?\d*", val_str)
-                if not found_nums: continue
-                
-                val = float(found_nums[0])
-                
-                if rid not in roll_history: roll_history[rid] = []
-                roll_history[rid].append({
-                    "p": cat, 
-                    "v": val, 
-                    "page": p_num, 
-                    "title": item.get("item_title", "")
-                })
-            except: 
-                continue
+            # 嘗試抓取數值
+            nums = re.findall(r"\d+\.?\d*", val_str)
+            if not nums: continue
+            val = float(nums[0])
+            
+            # 歸檔
+            key = (rid, track)
+            if key not in history: history[key] = {}
+            
+            # 若同一工序有多次 (如多次銲補)，這裡簡單取「最後一次」(頁碼較大者)
+            # 或者覆蓋最新的
+            history[key][stage] = {
+                "val": val,
+                "page": p_num,
+                "title": title
+            }
 
-    # --- 流程邏輯判定 ---
-    weights = {"un_regen": 1, "max_limit": 1, "range": 3, "min_limit": 4}
-    
-    for rid, records in roll_history.items():
-        if len(records) < 2: continue
+    # 2. 執行核心邏輯檢查
+    for (rid, track), stages_data in history.items():
         
-        # 依照頁碼排序
-        records.sort(key=lambda x: str(x['page']))
+        present_stages = sorted(stages_data.keys()) # 目前有的工序，如 [1, 2, 4]
+        if not present_stages: continue
         
-        for i in range(len(records) - 1):
-            curr, nxt = records[i], records[i+1]
-            
-            # 取得權重 (預設 2)
-            w_curr = weights.get(curr['p'], 2)
-            if "研磨" in str(curr['title']): w_curr = 2
-            
-            w_nxt = weights.get(nxt['p'], 2)
-            if "研磨" in str(nxt['title']): w_nxt = 2
-            
-            # 💡 關鍵判定：後段位階大(如銲補)，數值就不應該變小
-            # 例如：先「車修(1)」後「銲補(4)」，尺寸變小是合理的 (車掉一層) -> Pass
-            # 例如：先「銲補(4)」後「車修(1)」，尺寸變小是合理的 -> Pass
-            # 等等... 這裡的邏輯是「位階檢查」，您的原意應該是：
-            # 如果從「低位階」(如車修) 到了 「高位階」(如精加工)，理論上是把東西做小了？
-            # 或者是檢查「不合邏輯的尺寸跳變」？
-            # 依照原程式碼邏輯保留：
-            
-            if w_nxt > w_curr and nxt['v'] < curr['v']:
-                process_issues.append({
-                    "page": nxt['page'], "item": f"編號 {rid} 尺寸位階檢查",
-                    "issue_type": "🛑流程異常(尺寸倒置)",
-                    "common_reason": f"後段{nxt['p']}尺寸小於前段{curr['p']}",
-                    "failures": [{"id": rid, "val": f"後:{nxt['v']} < 前:{curr['v']}", "calc": "尺寸不符位階邏輯"}],
-                    "source": "🐍 流程引擎"
-                })
+        max_stage = present_stages[-1] # 只看做到哪裡，例如做到 4(研磨)
+        
+        # === 邏輯一：溯源檢查 (Traceability) ===
+        # 規則：如果有 S4，則必須有 1, 2, 3。如果有 S3，則必須有 1, 2。
+        # 也就是：範圍 [1 ~ max_stage] 之間的所有整數都必須存在
+        
+        missing_stages = []
+        for req_s in range(1, max_stage):
+            if req_s not in stages_data:
+                missing_stages.append(STAGE_MAP[req_s])
+        
+        if missing_stages:
+            # 抓出最後一站的資訊來報錯
+            last_info = stages_data[max_stage]
+            process_issues.append({
+                "page": last_info['page'],
+                "item": f"{last_info['title']}",
+                "issue_type": "🛑溯源異常(缺漏工序)",
+                "common_reason": f"[{track}] 編號 {rid} 進度已至【{STAGE_MAP[max_stage]}】，但缺乏前置工序：{', '.join(missing_stages)}",
+                "failures": [{"id": rid, "val": "缺漏", "calc": "履歷不完整"}],
+                "source": "🐍 流程引擎"
+            })
+
+        # === 邏輯二：尺寸大小檢查 (Size Logic) ===
+        # 規則：S1(未) < S4(研) < S3(再) < S2(銲)
+        # 我們定義「預期大小等級」
+        size_rank = {
+            1: 10, # 未再生 (最小)
+            4: 20, # 研磨
+            3: 30, # 再生車修
+            2: 40  # 銲補 (最大)
+        }
+        
+        # 兩兩比對所有存在的工序
+        for i in range(len(present_stages)):
+            for j in range(i + 1, len(present_stages)):
+                s_a = present_stages[i]
+                s_b = present_stages[j]
                 
+                info_a = stages_data[s_a]
+                info_b = stages_data[s_b]
+                
+                # 判斷預期關係
+                # 若 Rank(A) < Rank(B)，則 Val(A) 應該 < Val(B)
+                expect_a_smaller = size_rank[s_a] < size_rank[s_b]
+                
+                is_violation = False
+                if expect_a_smaller:
+                    if info_a['val'] >= info_b['val']: is_violation = True
+                else:
+                    if info_a['val'] <= info_b['val']: is_violation = True
+                    
+                if is_violation:
+                    # 組合錯誤訊息
+                    sign = "<" if expect_a_smaller else ">"
+                    
+                    process_issues.append({
+                        "page": info_b['page'], # 報在後面那個工序的頁面
+                        "item": f"[{track}] {rid} 尺寸邏輯檢查",
+                        "issue_type": "🛑流程異常(尺寸倒置)",
+                        "common_reason": f"尺寸邏輯錯誤：{STAGE_MAP[s_a]} ({info_a['val']}) 應 {sign} {STAGE_MAP[s_b]} ({info_b['val']})",
+                        "failures": [
+                            {"id": STAGE_MAP[s_a], "val": info_a['val'], "calc": "前工序"},
+                            {"id": STAGE_MAP[s_b], "val": info_b['val'], "calc": "後工序"}
+                        ],
+                        "source": "🐍 流程引擎"
+                    })
+
     return process_issues
 
 # --- 6. 手機版 UI 與 核心執行邏輯 ---
