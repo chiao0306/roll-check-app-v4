@@ -947,9 +947,10 @@ def python_accounting_audit(dimension_data, res_main):
     
 def python_process_audit(dimension_data):
     """
-    Python 流程引擎 (新增關鍵字：粗車、精車)
+    Python 流程引擎 (通用原因合併版)
     1. 粗車 = 未再生 (Stage 1)
     2. 精車 = 再生 (Stage 3)
+    3. 修改：common_reason 不再包含 ID，以便前端卡片合併。
     """
     process_issues = []
     import re
@@ -980,23 +981,20 @@ def python_process_audit(dimension_data):
         else:
             continue 
 
-        # --- B. 工序判斷 (關鍵字擴充) ---
+        # --- B. 工序判斷 ---
         stage = 0
-        
         if "研磨" in title:
             stage = 4
         elif "銲補" in title or "銲接" in title:
             stage = 2
-        # ⚡️ [新增] 粗車 = Stage 1
         elif "未再生" in title or "粗車" in title:
             stage = 1
-        # ⚡️ [新增] 精車 = Stage 3 (需放在未再生之後判斷，避免部分字串重疊，雖此例還好但保險起見)
         elif "再生" in title or "精車" in title: 
             stage = 3
         
         if stage == 0: continue 
 
-        # --- C. 數據解析 (維持不變) ---
+        # --- C. 數據解析 ---
         segments = ds.split("|")
         for seg in segments:
             parts = seg.split(":")
@@ -1017,13 +1015,13 @@ def python_process_audit(dimension_data):
                 "title": title
             }
 
-    # 2. 執行核心邏輯檢查 (邏輯維持不變，僅依賴上方 stage 分類)
+    # 2. 執行核心邏輯檢查
     for (rid, track), stages_data in history.items():
         present_stages = sorted(stages_data.keys())
         if not present_stages: continue
         max_stage = present_stages[-1]
         
-        # 溯源檢查
+        # === 邏輯一：溯源檢查 ===
         missing_stages = []
         for req_s in range(1, max_stage):
             if req_s not in stages_data:
@@ -1031,16 +1029,19 @@ def python_process_audit(dimension_data):
         
         if missing_stages:
             last_info = stages_data[max_stage]
+            # ⚡️ [修改點] common_reason 移除 {rid}，改成通用描述
+            # 舊: f"[{track}] {rid} 進度至..." -> 不能合併
+            # 新: f"[{track}] 進度至..." -> 可以合併！
             process_issues.append({
                 "page": last_info['page'],
-                "item": f"{last_info['title']}",
+                "item": f"{last_info['title']}", # 保留標題，如果標題不同還是會分開，這通常是好事
                 "issue_type": "🛑溯源異常(缺漏工序)",
-                "common_reason": f"[{track}] {rid} 進度至【{STAGE_MAP[max_stage]}】，缺前置：{', '.join(missing_stages)}",
+                "common_reason": f"[{track}] 進度至【{STAGE_MAP[max_stage]}】，缺前置：{', '.join(missing_stages)}",
                 "failures": [{"id": rid, "val": "缺漏", "calc": "履歷不完整"}],
                 "source": "🐍 流程引擎"
             })
 
-        # 尺寸檢查
+        # === 邏輯二：尺寸檢查 ===
         size_rank = { 1: 10, 4: 20, 3: 30, 2: 40 }
         
         for i in range(len(present_stages)):
@@ -1059,14 +1060,15 @@ def python_process_audit(dimension_data):
                     
                 if is_violation:
                     sign = "<" if expect_a_smaller else ">"
+                    # ⚡️ [修改點] 同樣移除 common_reason 裡的 ID
                     process_issues.append({
                         "page": info_b['page'],
-                        "item": f"[{track}] {rid} 尺寸邏輯",
+                        "item": f"[{track}] 尺寸邏輯檢查", # 這裡把 item 也改通用一點，確保跨頁合併
                         "issue_type": "🛑流程異常(尺寸倒置)",
-                        "common_reason": f"{STAGE_MAP[s_a]} ({info_a['val']}) 應 {sign} {STAGE_MAP[s_b]} ({info_b['val']})",
+                        "common_reason": f"尺寸邏輯錯誤：{STAGE_MAP[s_a]} 應 {sign} {STAGE_MAP[s_b]}",
                         "failures": [
-                            {"id": STAGE_MAP[s_a], "val": info_a['val'], "calc": "前工序"},
-                            {"id": STAGE_MAP[s_b], "val": info_b['val'], "calc": "後工序"}
+                            {"id": f"{rid} ({STAGE_MAP[s_a]})", "val": info_a['val'], "calc": "前工序"},
+                            {"id": f"{rid} ({STAGE_MAP[s_b]})", "val": info_b['val'], "calc": "後工序"}
                         ],
                         "source": "🐍 流程引擎"
                     })
