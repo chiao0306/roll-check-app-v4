@@ -413,6 +413,43 @@ def assign_category_by_python(item_title):
         return "range"
 
     return "unknown"
+    
+def consolidate_issues(issues):
+    """
+    🗂️ 異常合併器：將「項目」、「錯誤類型」、「原因」完全相同的異常合併成一張卡片
+    """
+    grouped = {}
+    
+    for i in issues:
+        # 1. 產生合併鑰匙 (Key)：項目 + 類型 + 原因
+        # 這樣確保只有真正一樣的問題才會被並在一起
+        key = (i.get('item', ''), i.get('issue_type', ''), i.get('common_reason', ''))
+        
+        if key not in grouped:
+            # 初始化：複製第一筆資料
+            grouped[key] = i.copy()
+            # 把頁碼轉成 Set 集合 (避免重複)
+            grouped[key]['pages_set'] = {str(i.get('page', '?'))}
+            # 確保 failures 是獨立的 list
+            grouped[key]['failures'] = i.get('failures', []).copy()
+        else:
+            # 合併：把新的頁碼加進去
+            grouped[key]['pages_set'].add(str(i.get('page', '?')))
+            # 合併：把新的證據 (failures) 加到表格裡
+            grouped[key]['failures'].extend(i.get('failures', []))
+            
+    # 2. 轉回 List 並整理頁碼格式
+    result = []
+    for key, val in grouped.items():
+        # 頁碼排序：讓它顯示 P.1, P.3, P.5 而不是亂跳
+        sorted_pages = sorted(list(val['pages_set']), key=lambda x: int(x) if x.isdigit() else 999)
+        val['page'] = ", ".join(sorted_pages) # 變成字串 "1, 3, 5"
+        
+        # 移除暫存的 set
+        del val['pages_set']
+        result.append(val)
+        
+    return result
 
 # --- 5. 總稽核 Agent (雙核心引擎版：Gemini + OpenAI) ---
 def agent_unified_check(combined_input, full_text_for_search, api_key, model_name):
@@ -1346,15 +1383,28 @@ if st.session_state.photo_gallery:
         else:
             st.error(f"發現 {len(real_errors)} 類異常")
 
-        # 卡片循環顯示
-        for item in all_issues:
+                # ... (前略：判定結論顯示區塊) ...
+
+        # ⚡️ [新增] 執行合併：在顯示前先瘦身
+        consolidated_list = consolidate_issues(all_issues)
+
+        # 卡片循環顯示 (改用 consolidated_list)
+        for item in consolidated_list:
             with st.container(border=True):
                 c1, c2 = st.columns([3, 1])
                 source_label = item.get('source', '')
                 issue_type = item.get('issue_type', '異常')
-                c1.markdown(f"**P.{item.get('page', '?')} | {item.get('item')}** `{source_label}`")
                 
-                if any(kw in issue_type for kw in ["統計", "數量", "流程"]):
+                # 頁碼顯示優化：如果是多頁，加個 "P." 前綴
+                page_str = item.get('page', '?')
+                if "," in page_str:
+                    page_display = f"Pages: {page_str}"
+                else:
+                    page_display = f"P.{page_str}"
+
+                c1.markdown(f"**{page_display} | {item.get('item')}** `{source_label}`")
+                
+                if any(kw in issue_type for kw in ["統計", "數量", "流程", "溯源"]):
                     c2.error(f"🛑 {issue_type}")
                 else:
                     c2.warning(f"⚠️ {issue_type}")
@@ -1364,6 +1414,7 @@ if st.session_state.photo_gallery:
                 failures = item.get('failures', [])
                 if failures:
                     table_data = []
+                    # 這裡稍微優化一下表格，如果有重複的證據可以過濾，或者全部列出
                     for f in failures:
                         if isinstance(f, dict):
                             table_data.append({
@@ -1372,6 +1423,10 @@ if st.session_state.photo_gallery:
                                 "標準/備註": f.get('target', ''),
                                 "狀態": f.get('calc', '')
                             })
+                    
+                    # 簡單去重 (Optional)：如果覺得表格裡重複資訊太多，可以加這行
+                    # table_data = [dict(t) for t in {tuple(d.items()) for d in table_data}]
+                    
                     st.dataframe(table_data, use_container_width=True, hide_index=True)
         
         st.divider()
