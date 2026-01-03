@@ -1315,30 +1315,26 @@ if st.session_state.photo_gallery:
             status_box.update(label="✅ 分析完成！", state="complete", expanded=False)
             st.rerun()
 
-               # --- 💡 [顯示結果區塊] 最終調整版 ---
+            # --- 💡 [顯示結果區塊] 數量同步修正版 ---
     if st.session_state.analysis_result_cache:
         cache = st.session_state.analysis_result_cache
         all_issues = cache.get('all_issues', [])
         
-        # 1. 頂部狀態條 (復原為舊版樣式：分層顯示更清晰)
+        # 1. 頂部狀態條
         st.success(f"工令: {cache['job_no']} | ⏱️ {cache['total_duration']:.1f}s")
         st.info(f"💰 本次成本: NT$ {cache['cost_twd']:.2f} (In: {cache['total_in']:,} / Out: {cache['total_out']:,})")
         st.caption(f"細節耗時: Azure OCR {cache['ocr_duration']:.1f}s | AI 分析 {cache['time_eng']:.1f}s")
 
-        # 2. 規則檢視 (Debug)
+        # 2. 規則檢視
         with st.expander("🔍 檢視 Excel 規則與邏輯參數", expanded=False):
             rules_text = get_dynamic_rules(cache.get('full_text_for_search',''), debug_mode=True)
             st.markdown(rules_text)
                 
         # 3. 原始數據檢視
         with st.expander("📊 檢視 AI 抄錄原始數據", expanded=False):
-            
-            # A. 關鍵指標摘要
             st.markdown("**1. 核心指標摘要**")
-            
             f_target = cache.get('freight_target', 0)
             sum_rows_len = len(cache.get("summary_rows", []))
-            
             summary_df = pd.DataFrame([{
                 "工令單號": cache.get("job_no", "N/A"),
                 "運費 Target (PC)": f_target,
@@ -1347,23 +1343,18 @@ if st.session_state.photo_gallery:
                 "總表狀態": "正常" if sum_rows_len > 0 else "空值"
             }])
             st.dataframe(summary_df, hide_index=True, use_container_width=True)
-
             st.divider()
 
-            # B. 總表清單
             st.markdown("**2. 左上角統計表 (Summary Rows)**")
             sum_rows = cache.get("summary_rows", [])
-            
             if sum_rows:
                 df_sum = pd.DataFrame(sum_rows)
                 df_sum.rename(columns={"title": "項目名稱", "target": "實交數量"}, inplace=True)
                 st.dataframe(df_sum, hide_index=True, use_container_width=True)
             else:
                 st.caption("無數據 (變數 summary_rows 為空)")
-
             st.divider()
 
-            # C. JSON 詳細資料 (⭐️ 修改點：設定為 expanded=True 預設展開)
             st.markdown("**3. 全卷詳細抄錄數據 (JSON)**")
             st.json(cache.get("ai_extracted_data", []), expanded=True)
 
@@ -1374,32 +1365,38 @@ if st.session_state.photo_gallery:
             else:
                 st.caption("無偵測資料")
 
-        # ... (以下判定結論顯示與卡片循環顯示保持不變，若您下方還有程式碼請保留) ...
-        # 判定結論顯示
-        real_errors = [i for i in all_issues if "未匹配" not in i.get('issue_type', '')]
+        # ========================================================
+        # ⚡️ [修正重點]：先進行合併，再根據合併後的清單來計算數量
+        # ========================================================
+        
+        # 1. 執行合併 (把 51 個異常壓縮成 N 類)
+        consolidated_list = consolidate_issues(all_issues)
+
+        # 2. 過濾出「真正的錯誤」 (排除僅是未匹配規則的警告)
+        # 注意：我們是在 consolidated_list 上做篩選，這樣數量才會對
+        real_errors_consolidated = [i for i in consolidated_list if "未匹配" not in i.get('issue_type', '')]
+
+        # 3. 顯示結論 (使用合併後的數量)
         if not all_issues:
             st.balloons()
             st.success("✅ 全數合格！")
-        elif not real_errors:
-            st.success(f"✅ 數值合格！ (但有 {len(all_issues)} 個項目未匹配規則)")
+        elif not real_errors_consolidated:
+            # 這裡用 len(consolidated_list) 代表還有幾個黃色警告
+            st.success(f"✅ 數值合格！ (但有 {len(consolidated_list)} 類項目未匹配規則)")
         else:
-            st.error(f"發現 {len(real_errors)} 類異常")
+            # 這裡顯示紅色的異常「類別」數量
+            st.error(f"發現 {len(real_errors_consolidated)} 類異常")
 
-                # ... (前略：判定結論顯示區塊) ...
-
-        # ⚡️ [新增] 執行合併：在顯示前先瘦身
-        consolidated_list = consolidate_issues(all_issues)
-
-        # 卡片循環顯示 (改用 consolidated_list)
+        # 4. 卡片循環顯示 (使用合併後的清單)
         for item in consolidated_list:
             with st.container(border=True):
                 c1, c2 = st.columns([3, 1])
                 source_label = item.get('source', '')
                 issue_type = item.get('issue_type', '異常')
                 
-                # 頁碼顯示優化：如果是多頁，加個 "P." 前綴
+                # 頁碼顯示優化
                 page_str = item.get('page', '?')
-                if "," in page_str:
+                if "," in str(page_str):
                     page_display = f"Pages: {page_str}"
                 else:
                     page_display = f"P.{page_str}"
@@ -1416,7 +1413,6 @@ if st.session_state.photo_gallery:
                 failures = item.get('failures', [])
                 if failures:
                     table_data = []
-                    # 這裡稍微優化一下表格，如果有重複的證據可以過濾，或者全部列出
                     for f in failures:
                         if isinstance(f, dict):
                             table_data.append({
@@ -1425,15 +1421,10 @@ if st.session_state.photo_gallery:
                                 "標準/備註": f.get('target', ''),
                                 "狀態": f.get('calc', '')
                             })
-                    
-                    # 簡單去重 (Optional)：如果覺得表格裡重複資訊太多，可以加這行
-                    # table_data = [dict(t) for t in {tuple(d.items()) for d in table_data}]
-                    
                     st.dataframe(table_data, use_container_width=True, hide_index=True)
         
         st.divider()
-
-        # 下載按鈕與原文展開
+        
         # ... (這裡接你原本剩下的代碼即可，也要記得縮排往左移)
         current_job_no = cache.get('job_no', 'Unknown')
         safe_job_no = current_job_no.replace("/", "_").replace("\\", "_").strip()
