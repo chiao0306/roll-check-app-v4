@@ -1020,7 +1020,7 @@ def python_accounting_audit(dimension_data, res_main):
                     data["details"].append({"id": raw_title, "val": freight_val, "calc": f_note})
                 continue 
             
-            match_A = (fuzz.partial_ratio(s_clean, title_clean) > 90)
+            match_A = (fuzz.partial_ratio(s_clean, title_clean) > 95)
             
             match_B = False
             is_dis = "ROLL拆裝" in s_clean
