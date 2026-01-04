@@ -1521,7 +1521,7 @@ if st.session_state.photo_gallery:
                 "job_no": res_main.get("job_no", "Unknown"),
                 "all_issues": all_issues,
                 "total_duration": time.time() - total_start,
-                "cost_twd": (usage.get("input", 0)*0.5 + usage.get("output", 0)*3.0) / 1000000 * 32.5,
+                "cost_twd": (usage.get("input", 0)*0.5 + usage.get("output", 0)*2.5) / 1000000 * 32.5,
                 "total_in": usage.get("input", 0),
                 "total_out": usage.get("output", 0),
                 "ocr_duration": ocr_duration,
