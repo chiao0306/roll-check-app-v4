@@ -848,9 +848,11 @@ def python_numerical_audit(dimension_data):
     
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官 (頁碼顯示修復版)
-    1. 總表對帳：現在會顯示具體的總表頁碼 (如 P.2)，不再只顯示 "P.總表"。
-    2. 保留所有先前的智慧邏輯 (同分匹配、脫殼、焊/銲通用)。
+    Python 會計官 (總表核對規則升級版 v5)
+    1. Unit_Rule_Agg 支援雙參數語法： "模式, 換算" (例如: "A, 2=1" 或 "豁免")
+       - 模式: A(強制一般比對), B(強制籃子), 豁免(不計入)
+       - 換算: X=Y (X個實體 = Y個總表計數)
+    2. 保留所有先前的智慧修復 (智慧脫殼、防彈清洗、同分決勝、頁碼顯示)。
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -881,18 +883,18 @@ def python_accounting_audit(dimension_data, res_main):
                 rules_map[clean_text(iname)] = {
                     "u_local": str(row.get('Unit_Rule_Local', '')).strip(),
                     "u_fr": str(row.get('Unit_Rule_Freight', '')).strip(),
-                    "u_agg": str(row.get('Unit_Rule_Agg', '')).strip()
+                    "u_agg": str(row.get('Unit_Rule_Agg', '')).strip() # 讀取新定義的 Agg 規則
                 }
     except: pass 
 
-    # 1. 取得對帳基準 (⚡️ 修改點：紀錄 page)
+    # 1. 取得對帳基準
     summary_rows = res_main.get("summary_rows", [])
     global_sum_tracker = {
         s['title']: {
             "target": safe_float(s['target']), 
             "actual": 0, 
             "details": [],
-            "page": s.get('page', "總表")  # 這裡抓取 Prompt 傳回來的頁碼，抓不到則預設 "總表"
+            "page": s.get('page', "總表")
         } 
         for s in summary_rows if s.get('title')
     }
@@ -937,9 +939,12 @@ def python_accounting_audit(dimension_data, res_main):
         
         u_local = rule_set.get("u_local", "") if rule_set else ""
         u_fr = rule_set.get("u_fr", "") if rule_set else ""
+        u_agg = rule_set.get("u_agg", "") if rule_set else "" # 取得總表規則
 
+        # 正規化
         u_local_norm = u_local.upper().replace(" ", "").replace("　", "").replace("＝", "=").replace("：", "=").replace(":", "=")
         u_fr_norm = u_fr.upper().replace(" ", "").replace("　", "").replace("＝", "=").replace("：", "=").replace(":", "=")
+        # u_agg 不需要像這樣去空格，因為我們要用逗號分割
 
         ds = str(item.get("ds", ""))
         data_list = [pair.split(":") for pair in ds.split("|") if ":" in pair]
@@ -947,7 +952,7 @@ def python_accounting_audit(dimension_data, res_main):
         ids = [str(e[0]).strip() for e in data_list if len(e) > 0]
         id_counts = Counter(ids)
 
-        # 2.1 單項數量計算
+        # === 2.1 單項數量計算 (Local) ===
         is_local_exempt = "豁免" in u_local
         is_weight_mode = "KG" in title_clean.upper() or target_pc > 100
         
@@ -969,7 +974,6 @@ def python_accounting_audit(dimension_data, res_main):
                 })
         else:
             conv_match = re.search(r"1SET=(\d+\.?\d*)", u_local_norm)
-            
             if conv_match:
                 divisor = float(conv_match.group(1))
                 if divisor == 0: divisor = 1 
@@ -987,7 +991,7 @@ def python_accounting_audit(dimension_data, res_main):
                 "source": "🐍 會計引擎"
             })
 
-        # 2.2 重複性示警
+        # === 2.2 重複性示警 ===
         if "本體" in title_clean:
              for rid, count in id_counts.items():
                 if count > 1:
@@ -997,7 +1001,7 @@ def python_accounting_audit(dimension_data, res_main):
                 if count > 2:
                      accounting_issues.append({"page": page, "item": raw_title, "issue_type": "⚠️編號重複警示(軸頸)", "common_reason": f"軸頸 {rid} 重複 {count}次", "failures": []})
 
-        # 2.3 運費計算
+        # === 2.3 運費計算 (Freight) ===
         is_fr_exempt = "豁免" in u_fr
         fr_conv_match = re.search(r"(\d+)[:=]1", u_fr_norm)
         is_default_target = "本體" in title_clean and ("未再生" in title_clean or "粗車" in title_clean)
@@ -1018,55 +1022,110 @@ def python_accounting_audit(dimension_data, res_main):
             freight_actual_sum += freight_val_for_item
             freight_details.append({"id": f"{raw_title}", "val": freight_val_for_item, "calc": freight_note})
 
-        # 2.4 總表對帳
+        # === 2.4 總表對帳 (⚡️ 修改重點：解析 Agg 規則) ===
+        
+        # A. 解析 Unit_Rule_Agg (格式: "A, 2=1" 或 "B" 或 "豁免")
+        agg_mode = "DEFAULT" # 預設: 自動判斷
+        agg_divisor = 1.0    # 預設: 1=1 (不換算)
+        
+        if u_agg:
+            # 清洗並分割
+            parts = str(u_agg).upper().replace(" ", "").split(",")
+            for p in parts:
+                if "豁免" in p or "EXEMPT" in p:
+                    agg_mode = "EXEMPT"
+                elif p == "A":
+                    agg_mode = "A" # 強制一般比對
+                elif p == "B":
+                    agg_mode = "B" # 強制籃子 (通常此為預設，但可明確指定)
+                elif "=" in p:
+                    # 解析 X=Y (例如 2=1)
+                    match = re.search(r"(\d+)\=(\d+)", p)
+                    if match:
+                        left = float(match.group(1))
+                        right = float(match.group(2))
+                        if left > 0:
+                            # 換算比例: 實際數量 / 左 * 右
+                            # 2=1 => 實際/2*1 => 0.5倍
+                            agg_divisor = left / right
+
+        # B. 應用豁免
+        if agg_mode == "EXEMPT":
+            continue # 🚀 直接跳過此項目的總表對帳
+
+        # C. 計算計入總表的數量 (應用換算)
+        qty_for_agg = actual_item_qty / agg_divisor
+        
+        # D. 開始對帳迴圈
         for s_title, data in global_sum_tracker.items():
             match = False
             s_title_clean = clean_text(s_title)
+            
+            # (運費欄位獨立處理，不參與 A/B 模式)
             if "運費" in s_title_clean:
                 if freight_val_for_item > 0:
                     data["actual"] += freight_val_for_item
                     data["details"].append({"id": f"{raw_title}", "val": freight_val_for_item, "calc": freight_note})
                 continue 
             
-            req_body = "本體" in s_title_clean
-            req_journal = any(k in s_title_clean for k in ["軸頸", "內孔", "JOURNAL"])
-            req_unregen = "未再生" in s_title_clean or "粗車" in s_title_clean
-            req_regen_only = ("再生" in s_title_clean or "精車" in s_title_clean) and not req_unregen
+            # --- 模式邏輯分流 ---
             
-            is_item_body = "本體" in title_clean
-            is_item_journal = any(k in title_clean for k in ["軸頸", "內孔", "JOURNAL"])
-            is_item_unregen = "未再生" in title_clean or "粗車" in title_clean
-            
+            # 籃子條件定義 (供 B 模式與 Default 使用)
             is_main_disassembly = "ROLL拆裝" in s_title_clean 
             is_main_machining = "ROLL車修" in s_title_clean   
             is_main_welding = "ROLL銲補" in s_title_clean or "ROLL焊補" in s_title_clean 
 
-            if is_main_disassembly:
-                if "組裝" in title_clean or "拆裝" in title_clean: match = True
-            elif is_main_machining:
-                has_part = "軸頸" in title_clean or "本體" in title_clean
-                has_action = any(k in title_clean for k in ["再生", "精車", "未再生", "粗車"])
-                if has_part and has_action: match = True
-            elif is_main_welding:
-                has_part = "軸頸" in title_clean or "本體" in title_clean
-                if has_part and ("銲補" in title_clean or "焊" in title_clean): match = True
-            else:
-                if fuzz.partial_ratio(s_title_clean, title_clean) > 90:
+            # 單項屬性定義
+            is_item_body = "本體" in title_clean
+            is_item_journal = any(k in title_clean for k in ["軸頸", "內孔", "JOURNAL"])
+            has_action_machining = any(k in title_clean for k in ["再生", "精車", "未再生", "粗車"])
+            has_action_welding = ("銲補" in title_clean or "焊" in title_clean)
+            is_item_assy = ("組裝" in title_clean or "拆裝" in title_clean)
+
+            # 🛑 模式 A: 強制一般比對 (跳過所有籃子邏輯)
+            if agg_mode == "A":
+                 # 只有名字很像才算
+                 if fuzz.partial_ratio(s_title_clean, title_clean) > 90:
                     match = True
-                    if req_body and not is_item_body: match = False
-                    elif req_journal and not is_item_journal: match = False
-                    if req_unregen and not is_item_unregen: match = False
-                    elif req_regen_only and is_item_unregen: match = False
+            
+            # 🚀 模式 B 或 Default: 籃子優先 + 名稱比對
+            else:
+                # 1. 嘗試進籃子
+                if is_main_disassembly:
+                    if is_item_assy: match = True
+                elif is_main_machining:
+                    if (is_item_body or is_item_journal) and has_action_machining: match = True
+                elif is_main_welding:
+                    if (is_item_body or is_item_journal) and has_action_welding: match = True
+                
+                # 2. 若沒進籃子，嘗試名稱比對 (Fallback)
+                if not match:
+                    if fuzz.partial_ratio(s_title_clean, title_clean) > 90:
+                        # 這裡要做一些負向排除，避免把「未再生」誤配到「再生」籃子 (若籃子有區分的話)
+                        # 您的總表籃子目前看起來是大鍋炒，所以這裡簡單處理即可
+                        
+                        # 簡單的防呆：如果總表寫"未再生"，但我這是"再生"，就不能配
+                        req_unregen = "未再生" in s_title_clean or "粗車" in s_title_clean
+                        req_regen_only = ("再生" in s_title_clean or "精車" in s_title_clean) and not req_unregen
+                        is_item_unregen = "未再生" in title_clean or "粗車" in title_clean
+                        
+                        match = True
+                        if req_unregen and not is_item_unregen: match = False
+                        elif req_regen_only and is_item_unregen: match = False
 
             if match:
-                data["actual"] += actual_item_qty
-                data["details"].append({"id": f"{raw_title} (P.{page})", "val": actual_item_qty, "calc": "計入"})
+                data["actual"] += qty_for_agg
+                # 備註顯示換算邏輯
+                calc_msg = "計入"
+                if agg_divisor != 1.0:
+                    calc_msg = f"計入 (/{agg_divisor:.1f})"
+                
+                data["details"].append({"id": f"{raw_title} (P.{page})", "val": qty_for_agg, "calc": calc_msg})
 
     # 3. 結算異常
     for s_title, data in global_sum_tracker.items():
         if abs(data["actual"] - data["target"]) > 0.01 and data["target"] > 0:
             accounting_issues.append({
-                # ⚡️ 修改點：使用 data["page"] 取代原本寫死的 "總表"
                 "page": data["page"],  
                 "item": s_title, 
                 "issue_type": "統計不符(總帳)",
