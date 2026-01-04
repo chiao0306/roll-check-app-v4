@@ -850,11 +850,12 @@ def python_numerical_audit(dimension_data):
     
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官 (v12: 原始數量邏輯修正版)
-    1. 修正「雙重除法」問題：
-       - 當 Agg 規則有寫換算 (如 "4=1") 時，強制使用「原始數據行數(Raw Count)」來計算，而非使用已經被 Local 規則除過的數字。
-       - 當 Agg 規則沒寫換算 (如 "A", "B") 時，才繼承 Local 規則計算出的數量。
-    2. 保留「互斥鎖」：防止未再生/再生/銲補互相跑錯籃子。
+    Python 會計官 (v13: 全方位互斥鎖版)
+    1. [動作互斥升級]: 建立「未再生 vs 再生 vs 銲補」三方互斥機制。
+       - 只要總表籃子屬性明確，就會強制踢除另外兩種屬性的項目 (例如: 總表未再生 -> 擋住 銲補 & 再生)。
+    2. [部位互斥新增]: 建立「本體 vs 軸頸」互斥機制。
+       - 若總表指定本體，擋住軸頸項目；若總表指定軸頸，擋住本體項目。
+    3. 保留 v12 的原始數量計算 (Raw Count) 與雙向換算邏輯。
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -933,24 +934,23 @@ def python_accounting_audit(dimension_data, res_main):
         ds = str(item.get("ds", ""))
         data_list = [pair.split(":") for pair in ds.split("|") if ":" in pair]
         
-        # ⚡️ [v12 核心]：定義原始數量 (Raw Count)
+        # 定義原始數量 (Raw Count)
         if not data_list: 
             raw_count = 0
         else:
             ids = [str(e[0]).strip() for e in data_list if len(e) > 0]
-            # 判斷是否去重計數 (PC=PC 或 本體)
             if "PC=PC" in u_local_norm or "本體" in title_clean:
                 raw_count = len(set(ids))
             else:
                 raw_count = len(data_list)
-                
+        
         id_counts = Counter([str(e[0]).strip() for e in data_list if len(e)>0])
 
         # === 2.1 單項數量 (Local) ===
         is_local_exempt = "豁免" in u_local
         is_weight_mode = "KG" in title_clean.upper() or target_pc > 100
         
-        actual_item_qty = 0 # 這是經過 Local 規則轉換後的數量
+        actual_item_qty = 0
         
         if is_weight_mode:
             current_sum = 0
@@ -963,14 +963,13 @@ def python_accounting_audit(dimension_data, res_main):
             if has_bad and not is_local_exempt:
                 accounting_issues.append({"page": page, "item": raw_title, "issue_type": "⚠️資料異常", "common_reason": "含無法辨識數值", "failures": [{"id": "警告", "val": "[!]", "calc": "異常"}]})
         else:
-            # Local 換算 (支援 1=4 或 4=1)
             conv_match = re.search(r"(\d+\.?\d*)[^\d=]*=[^\d=]*(\d+\.?\d*)", u_local_norm)
             if conv_match:
                 l, r = float(conv_match.group(1)), float(conv_match.group(2))
-                div = max(l, r) # 智慧取最大值做除數
+                div = max(l, r) 
                 actual_item_qty = raw_count / (div if div != 0 else 1)
             else:
-                actual_item_qty = raw_count # 沒規則就等於原始數量
+                actual_item_qty = raw_count
 
         if not is_local_exempt and abs(actual_item_qty - target_pc) > 0.01 and target_pc > 0:
             accounting_issues.append({"page": page, "item": raw_title, "issue_type": "統計不符(單項)", "common_reason": f"標題 {target_pc}PC != 內文 {actual_item_qty}", "failures": [{"id": "目標", "val": target_pc}, {"id": "實際", "val": actual_item_qty}], "source": "🐍 會計引擎"})
@@ -983,11 +982,7 @@ def python_accounting_audit(dimension_data, res_main):
              for rid, count in id_counts.items():
                 if count > 2: accounting_issues.append({"page": page, "item": raw_title, "issue_type": "⚠️編號重複(軸頸)", "common_reason": f"{rid} 重複 {count}次", "failures": []})
 
-        # 2.3 運費計算 (Freight)
-        # 運費通常也是看原始實體數量 (raw_count) 比較直觀，但這裡維持使用 actual_item_qty 除非您有特殊需求
-        # (通常運費是以 "個" 為單位，如果 Local 已經把 4個變成1組，運費可能要小心)
-        # 為了保險，運費這裡我們讓它看 "原始數量" + 規則
-        
+        # 2.3 運費計算
         is_fr_exempt = "豁免" in u_fr
         fr_conv_match = re.search(r"(\d+\.?\d*)[^\d=]*=[^\d=]*1", u_fr_norm)
         is_default_target = "本體" in title_clean and ("未再生" in title_clean or "粗車" in title_clean)
@@ -997,11 +992,9 @@ def python_accounting_audit(dimension_data, res_main):
         if is_fr_exempt: freight_val = 0.0
         elif fr_conv_match:
             div = float(fr_conv_match.group(1))
-            # 使用原始數量來算運費 (避免被 Local 規則影響)
             freight_val = raw_count / div
             f_note = f"計入 (/{int(div)})"
         elif is_default_target:
-            # 預設看 Local 算出來的 (通常這時候 Local=Raw)
             freight_val = actual_item_qty 
             f_note = "計入"
             
@@ -1009,10 +1002,10 @@ def python_accounting_audit(dimension_data, res_main):
             freight_actual_sum += freight_val
             freight_details.append({"id": f"{raw_title}", "val": freight_val, "calc": f_note})
 
-        # === 2.4 總表對帳 (Agg) - v12 邏輯核心 ===
+        # === 2.4 總表對帳 (Agg) - v13 全方位互斥鎖 ===
         agg_mode = "B" 
         agg_divisor = 1.0
-        has_agg_math = False # 標記是否有設定換算
+        has_agg_math = False
         
         if u_agg:
             parts = str(u_agg).upper().split(",")
@@ -1027,23 +1020,17 @@ def python_accounting_audit(dimension_data, res_main):
                     if match:
                         l, r = float(match.group(1)), float(match.group(2))
                         if l > 0: 
-                            # 支援 4=1 (4 raw -> 1 agg) 或 1=4
-                            # 這裡我們假設左邊是 Raw count
                             agg_divisor = l / r
                             has_agg_math = True
 
         if agg_mode == "EXEMPT": continue 
         
-        # ⚡️ [v12 邏輯分流]
+        # 數量計算分流
         if has_agg_math:
-            # 如果 Agg 規則有寫換算 (如 4=1)，我們使用「原始數量」來算
             qty_agg = raw_count / agg_divisor
         else:
-            # 如果 Agg 規則沒寫換算 (如 A)，我們繼承「單項核對的結果」
-            # (因為如果單項已經把 4個變成1組，總表通常也是要算1組)
             qty_agg = actual_item_qty
-            # 修正顯示訊息的除數
-            if agg_divisor == 1.0: agg_divisor = 1.0 # 重置
+            if agg_divisor == 1.0: agg_divisor = 1.0
 
         for s_title, data in global_sum_tracker.items():
             match = False
@@ -1055,10 +1042,9 @@ def python_accounting_audit(dimension_data, res_main):
                     data["details"].append({"id": raw_title, "val": freight_val, "calc": f_note})
                 continue 
             
-            # --- 1. A 模式 ---
-            match_A = (fuzz.partial_ratio(s_clean, title_clean) > 85)
+            # --- 模式匹配 ---
+            match_A = (fuzz.partial_ratio(s_clean, title_clean) > 90)
             
-            # --- 2. B 模式 ---
             match_B = False
             is_dis = "ROLL拆裝" in s_clean
             is_mac = "ROLL車修" in s_clean
@@ -1073,14 +1059,14 @@ def python_accounting_audit(dimension_data, res_main):
             elif is_mac and has_part and has_act_mac: match_B = True
             elif is_weld and has_part and has_act_weld: match_B = True
             
-            # --- 3. 初始匹配 ---
             if agg_mode == "A": initial_match = match_A
             elif agg_mode == "AB": initial_match = match_A or match_B
             else: initial_match = match_B if match_B else match_A
 
-            # --- 4. 互斥鎖 (Conflict Check) ---
+            # --- ⚡️ 全方位互斥鎖 (Conflict Check) ---
             final_match = initial_match
             if final_match:
+                # 1. 提取動作屬性
                 sum_unregen = "未再生" in s_clean or "粗車" in s_clean
                 sum_regen = ("再生" in s_clean or "精車" in s_clean) and not sum_unregen
                 sum_weld = "銲補" in s_clean or "焊" in s_clean
@@ -1089,18 +1075,34 @@ def python_accounting_audit(dimension_data, res_main):
                 item_regen = ("再生" in title_clean or "精車" in title_clean) and not item_unregen
                 item_weld = "銲補" in title_clean or "焊" in title_clean
 
-                if sum_weld and (item_unregen or item_regen) and not item_weld: final_match = False
-                elif sum_unregen and item_regen: final_match = False
-                elif sum_regen and item_unregen: final_match = False
+                # 2. 提取部位屬性
+                sum_body = "本體" in s_clean
+                sum_journal = any(k in s_clean for k in ["軸頸", "內孔", "JOURNAL"])
+                
+                item_body = "本體" in title_clean
+                item_journal = any(k in title_clean for k in ["軸頸", "內孔", "JOURNAL"])
 
-            # --- 5. 最終確認 ---
+                # --- 動作互斥規則 (Action Conflict) ---
+                # A. 總表是銲補 -> 踢除 (未再生 OR 再生) ※除非項目本身也是銲補
+                if sum_weld and (item_unregen or item_regen) and not item_weld: final_match = False
+                
+                # B. 總表是未再生 -> 踢除 (再生 OR 銲補)
+                elif sum_unregen and (item_regen or item_weld): final_match = False
+                
+                # C. 總表是再生 -> 踢除 (未再生 OR 銲補)
+                elif sum_regen and (item_unregen or item_weld): final_match = False
+
+                # --- 部位互斥規則 (Part Conflict) ---
+                # D. 總表指定本體 (且沒寫軸頸) -> 踢除 軸頸項目
+                if sum_body and not sum_journal and item_journal: final_match = False
+
+                # E. 總表指定軸頸 (且沒寫本體) -> 踢除 本體項目
+                if sum_journal and not sum_body and item_body: final_match = False
+
+            # --- 最終確認 ---
             if final_match:
                 data["actual"] += qty_agg
-                # 顯示邏輯微調
-                if has_agg_math:
-                    c_msg = f"計入 (/{agg_divisor:.1f})"
-                else:
-                    c_msg = "計入"
+                c_msg = f"計入 (/{agg_divisor:.1f})" if agg_divisor != 1.0 else "計入"
                 data["details"].append({"id": f"{raw_title} (P.{page})", "val": qty_agg, "calc": c_msg})
 
     # 3. 異常結算
