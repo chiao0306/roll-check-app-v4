@@ -385,30 +385,27 @@ def python_header_check(photo_gallery):
     
 def assign_category_by_python(item_title):
     """
-    Python 分類官 (新增關鍵字：粗車、精車)
+    Python 分類官 (關鍵字擴充：銲=焊)
     """
     # 🧽 預處理
     t = str(item_title).upper().replace(" ", "").replace("\n", "").replace('"', "")
     
     # --- LEVEL 1：銲補與裝配 (最高優先) ---
-    if any(k in t for k in ["銲補", "銲接", "WELD"]):
+    # ⚡️ [修改點] 新增 "焊"、"焊補"、"焊接"
+    if any(k in t for k in ["銲補", "銲接", "焊", "WELD"]):
         return "min_limit"
     
     if any(k in t for k in ["組裝", "拆裝", "裝配", "真圓度", "ASSY"]):
         return "range"
 
     # --- LEVEL 2：未再生判定 (含粗車) ---
-    # ⚡️ [新增] 關鍵字：粗車
     if any(k in t for k in ["未再生", "UN_REGEN", "粗車"]):
-        # a. 含「軸頸」 -> max_limit
         if any(k in t for k in ["軸頸", "內孔", "JOURNAL"]):
             return "max_limit"
-        # b. 不含「軸頸」(即本體) -> un_regen
         else:
             return "un_regen"
 
     # --- LEVEL 3：精加工判定 (含精車) ---
-    # ⚡️ [新增] 關鍵字：精車
     if any(k in t for k in ["再生", "研磨", "精加工", "車修", "KEYWAY", "GRIND", "MACHIN", "精車"]):
         return "range"
 
@@ -734,12 +731,11 @@ def python_numerical_audit(dimension_data):
             except: continue
                 
     return list(grouped_errors.values())
-
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官 (用語優化 + 完美匹配版)
-    1. 用語修正：將「壞軌/數據損毀」改為「資料異常請檢查」，更符合使用者直覺。
-    2. 核心邏輯：保留所有智慧匹配功能 (同分決勝負、智慧脫殼、防彈清洗)。
+    Python 會計官 (關鍵字擴充：銲=焊)
+    1. 總表對帳邏輯：支援 "ROLL焊補" 對應到 "ROLL銲補" 籃子。
+    2. 保留所有之前的智慧修復 (智慧脫殼、防彈清洗、同分決勝負)。
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -791,7 +787,7 @@ def python_accounting_audit(dimension_data, res_main):
         page = item.get("page", "?")
         target_pc = safe_float(item.get("item_pc_target", 0)) 
         
-        # --- 🔍 查找 Excel 規則 (保留完美邏輯) ---
+        # --- 🔍 查找 Excel 規則 ---
         rule_set = rules_map.get(title_clean)
         
         # 策略 A: 智慧脫殼
@@ -808,6 +804,7 @@ def python_accounting_audit(dimension_data, res_main):
                 score = fuzz.partial_ratio(k, title_clean)
                 current_len_diff = abs(len(k) - len(title_clean))
                 
+                # 維持 85 分門檻 (與 Debug 卡片一致)
                 if score > 85:
                     if score > best_score:
                         best_score = score
@@ -843,13 +840,12 @@ def python_accounting_audit(dimension_data, res_main):
                 else: current_sum += temp_val
             actual_item_qty = current_sum
             
-            # ⚡️ [修正] 顯示文字優化
             if has_bad_sector and not is_local_exempt:
                 accounting_issues.append({
                     "page": page, "item": raw_title, 
-                    "issue_type": "⚠️資料異常",  # 原本是 "數據損毀"
+                    "issue_type": "⚠️資料異常",
                     "common_reason": "包含無法辨識的數值/亂碼",
-                    "failures": [{"id": "警告", "val": "[!]", "calc": "資料異常請檢查"}] # 原本是 "數據損毀"
+                    "failures": [{"id": "警告", "val": "[!]", "calc": "資料異常請檢查"}]
                 })
         else:
             conv_match = re.search(r"1SET=(\d+\.?\d*)", u_local_norm)
@@ -921,9 +917,10 @@ def python_accounting_audit(dimension_data, res_main):
             is_item_journal = any(k in title_clean for k in ["軸頸", "內孔", "JOURNAL"])
             is_item_unregen = "未再生" in title_clean or "粗車" in title_clean
             
+            # ⚡️ [修改點] 總表籃子名稱辨識 (銲=焊)
             is_main_disassembly = "ROLL拆裝" in s_title_clean 
             is_main_machining = "ROLL車修" in s_title_clean   
-            is_main_welding = "ROLL銲補" in s_title_clean     
+            is_main_welding = "ROLL銲補" in s_title_clean or "ROLL焊補" in s_title_clean 
 
             if is_main_disassembly:
                 if "組裝" in title_clean or "拆裝" in title_clean: match = True
@@ -933,7 +930,8 @@ def python_accounting_audit(dimension_data, res_main):
                 if has_part and has_action: match = True
             elif is_main_welding:
                 has_part = "軸頸" in title_clean or "本體" in title_clean
-                if has_part and "銲補" in title_clean: match = True
+                # ⚡️ [修改點] 項目名稱辨識 (銲=焊)
+                if has_part and ("銲補" in title_clean or "焊" in title_clean): match = True
             else:
                 if fuzz.partial_ratio(s_title_clean, title_clean) > 90:
                     match = True
@@ -968,10 +966,10 @@ def python_accounting_audit(dimension_data, res_main):
 
 def python_process_audit(dimension_data):
     """
-    Python 流程引擎 (通用原因合併版)
+    Python 流程引擎 (關鍵字擴充：銲=焊)
     1. 粗車 = 未再生 (Stage 1)
-    2. 精車 = 再生 (Stage 3)
-    3. 修改：common_reason 不再包含 ID，以便前端卡片合併。
+    2. 銲補/焊補 = (Stage 2)
+    3. 精車 = 再生 (Stage 3)
     """
     process_issues = []
     import re
@@ -979,7 +977,7 @@ def python_process_audit(dimension_data):
     # 定義工序與名稱
     STAGE_MAP = {
         1: "未再生/粗車",
-        2: "銲補",
+        2: "銲補/焊補",
         3: "再生/精車",
         4: "研磨"
     }
@@ -1002,11 +1000,12 @@ def python_process_audit(dimension_data):
         else:
             continue 
 
-        # --- B. 工序判斷 ---
+        # --- B. 工序判斷 (⚡️ 修改點) ---
         stage = 0
         if "研磨" in title:
             stage = 4
-        elif "銲補" in title or "銲接" in title:
+        # ⚡️ [修改] 只要標題有 "銲" 或 "焊" 都算 Stage 2
+        elif any(k in title for k in ["銲補", "銲接", "焊"]):
             stage = 2
         elif "未再生" in title or "粗車" in title:
             stage = 1
@@ -1015,7 +1014,7 @@ def python_process_audit(dimension_data):
         
         if stage == 0: continue 
 
-        # --- C. 數據解析 ---
+        # --- C. 數據解析 (維持不變) ---
         segments = ds.split("|")
         for seg in segments:
             parts = seg.split(":")
@@ -1036,13 +1035,13 @@ def python_process_audit(dimension_data):
                 "title": title
             }
 
-    # 2. 執行核心邏輯檢查
+    # 2. 執行核心邏輯檢查 (維持不變)
     for (rid, track), stages_data in history.items():
         present_stages = sorted(stages_data.keys())
         if not present_stages: continue
         max_stage = present_stages[-1]
         
-        # === 邏輯一：溯源檢查 ===
+        # 溯源檢查
         missing_stages = []
         for req_s in range(1, max_stage):
             if req_s not in stages_data:
@@ -1050,19 +1049,16 @@ def python_process_audit(dimension_data):
         
         if missing_stages:
             last_info = stages_data[max_stage]
-            # ⚡️ [修改點] common_reason 移除 {rid}，改成通用描述
-            # 舊: f"[{track}] {rid} 進度至..." -> 不能合併
-            # 新: f"[{track}] 進度至..." -> 可以合併！
             process_issues.append({
                 "page": last_info['page'],
-                "item": f"{last_info['title']}", # 保留標題，如果標題不同還是會分開，這通常是好事
+                "item": f"{last_info['title']}",
                 "issue_type": "🛑溯源異常(缺漏工序)",
                 "common_reason": f"[{track}] 進度至【{STAGE_MAP[max_stage]}】，缺前置：{', '.join(missing_stages)}",
                 "failures": [{"id": rid, "val": "缺漏", "calc": "履歷不完整"}],
                 "source": "🐍 流程引擎"
             })
 
-        # === 邏輯二：尺寸檢查 ===
+        # 尺寸檢查
         size_rank = { 1: 10, 4: 20, 3: 30, 2: 40 }
         
         for i in range(len(present_stages)):
@@ -1081,10 +1077,9 @@ def python_process_audit(dimension_data):
                     
                 if is_violation:
                     sign = "<" if expect_a_smaller else ">"
-                    # ⚡️ [修改點] 同樣移除 common_reason 裡的 ID
                     process_issues.append({
                         "page": info_b['page'],
-                        "item": f"[{track}] 尺寸邏輯檢查", # 這裡把 item 也改通用一點，確保跨頁合併
+                        "item": f"[{track}] 尺寸邏輯檢查",
                         "issue_type": "🛑流程異常(尺寸倒置)",
                         "common_reason": f"尺寸邏輯錯誤：{STAGE_MAP[s_a]} 應 {sign} {STAGE_MAP[s_b]}",
                         "failures": [
