@@ -737,9 +737,10 @@ def python_numerical_audit(dimension_data):
 
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官 (寬容度同步版)
-    1. 門檻調整：將模糊匹配門檻從 90 調降至 85 (與 Debug 卡片標準一致)，解決「輥」看成「報」的 OCR 誤差。
-    2. 智慧脫殼：保留去除括號 (2SET) 的邏輯，確保降門檻後的安全性。
+    Python 會計官 (最終完美版)
+    1. 智慧匹配：加入「同分決勝負」機制。若分數相同，選擇長度差異最小的規則。
+       (解決 partial_ratio 導致 "輥輪" 與 "輥輪組裝" 同分的問題)
+    2. 包含所有之前的修復：智慧脫殼、防彈清洗、85分門檻。
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -791,29 +792,44 @@ def python_accounting_audit(dimension_data, res_main):
         page = item.get("page", "?")
         target_pc = safe_float(item.get("item_pc_target", 0)) 
         
-        # --- 🔍 查找 Excel 規則 (⚡️ 修正重點區) ---
+        # --- 🔍 查找 Excel 規則 (⚡️ 同分決勝負升級版) ---
         rule_set = rules_map.get(title_clean)
         
-        # 策略 A: 智慧脫殼 - 移除標題末尾的 (2SET), (1PC)
+        # 策略 A: 智慧脫殼
         if not rule_set:
             title_no_suffix = re.sub(r"[\(（].*?[\)）]", "", title_clean)
             rule_set = rules_map.get(title_no_suffix)
 
-        # 策略 B: 模糊匹配 - 門檻調降至 85
+        # 策略 B: 模糊匹配 (含長度權重)
         if not rule_set and rules_map:
             best_score = 0
+            best_len_diff = 999  # 記錄最小的長度差
+            
             for k, v in rules_map.items():
-                # 使用 partial_ratio 容忍錯字 (如 輥 -> 報)
-                # ⚡️ 將門檻從 90 降為 85，與 Debug 卡片 (get_dynamic_rules) 保持一致
                 score = fuzz.partial_ratio(k, title_clean)
-                if score > 85 and score > best_score:
-                    best_score = score
-                    rule_set = v
+                
+                # 計算長度差 (Target - Rule 的絕對值)
+                # 我們希望找到跟 target 長度最像的 rule
+                current_len_diff = abs(len(k) - len(title_clean))
+                
+                # 判斷邏輯：
+                # 1. 新分數更高 -> 直接換人
+                # 2. 分數一樣高 BUT 長度差更小 -> 換人 (這就是解決同分的關鍵)
+                if score > 85:
+                    if score > best_score:
+                        best_score = score
+                        best_len_diff = current_len_diff
+                        rule_set = v
+                    elif score == best_score:
+                        if current_len_diff < best_len_diff:
+                            best_len_diff = current_len_diff
+                            rule_set = v
+                            # 這裡不需要更新 best_score，因為是一樣的
         
         u_local = rule_set.get("u_local", "") if rule_set else ""
         u_fr = rule_set.get("u_fr", "") if rule_set else ""
 
-        # 字串正規化
+        # --- 以下邏輯保持不變 ---
         u_local_norm = u_local.upper().replace(" ", "").replace("　", "").replace("＝", "=").replace("：", "=").replace(":", "=")
         u_fr_norm = u_fr.upper().replace(" ", "").replace("　", "").replace("＝", "=").replace("：", "=").replace(":", "=")
 
@@ -842,7 +858,6 @@ def python_accounting_audit(dimension_data, res_main):
                     "failures": [{"id": "警告", "val": "[!]", "calc": "數據損毀"}]
                 })
         else:
-            # 🔢 數量模式
             conv_match = re.search(r"1SET=(\d+\.?\d*)", u_local_norm)
             
             if conv_match:
@@ -875,7 +890,6 @@ def python_accounting_audit(dimension_data, res_main):
         # 2.3 運費計算
         is_fr_exempt = "豁免" in u_fr
         fr_conv_match = re.search(r"(\d+)[:=]1", u_fr_norm)
-        
         is_default_target = "本體" in title_clean and ("未再生" in title_clean or "粗車" in title_clean)
 
         freight_val_for_item = 0.0
@@ -898,7 +912,6 @@ def python_accounting_audit(dimension_data, res_main):
         for s_title, data in global_sum_tracker.items():
             match = False
             s_title_clean = clean_text(s_title)
-            
             if "運費" in s_title_clean:
                 if freight_val_for_item > 0:
                     data["actual"] += freight_val_for_item
