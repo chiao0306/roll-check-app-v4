@@ -856,11 +856,12 @@ def python_numerical_audit(dimension_data):
     
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官 (v9: 內孔移除 + 強力數字解析版)
-    1. 移除「內孔」的自動籃子判定 (不再進入 ROLL車修)。
-    2. 升級規則解析引擎：忽略數字與等號之間的文字 (SET, PC, PCS, 個...)。
-       - "2SET=1PC" -> 解析為 2=1
-       - "4 PCS = 1" -> 解析為 4=1
+    Python 會計官 (v10: 互斥鎖修復版)
+    1. 修正 A 模式模糊比對過於寬鬆的問題：
+       新增「互斥鎖」邏輯，強制檢查動作屬性。
+       - 若總表是「銲補」，則「未再生/再生」項目即使名稱相似度 99% 也會被踢除。
+       - 若總表是「未再生」，則「再生」項目會被踢除。
+    2. 保留 AB 模式、換算邏輯與明細顯示功能。
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -933,10 +934,8 @@ def python_accounting_audit(dimension_data, res_main):
         u_fr = rule_set.get("u_fr", "") if rule_set else ""
         u_agg = rule_set.get("u_agg", "") if rule_set else ""
 
-        # 正規化：轉大寫，但不急著去空格，讓 regex 更有彈性
-        u_local_norm = u_local.upper().replace("＝", "=").replace("：", "=").replace(":", "=")
-        u_fr_norm = u_fr.upper().replace("＝", "=").replace("：", "=").replace(":", "=")
-        u_agg_norm = u_agg.upper().replace("＝", "=").replace("：", "=").replace(":", "=")
+        u_local_norm = u_local.upper().replace(" ", "").replace("　", "").replace("＝", "=").replace("：", "=").replace(":", "=")
+        u_fr_norm = u_fr.upper().replace(" ", "").replace("　", "").replace("＝", "=").replace("：", "=").replace(":", "=")
 
         ds = str(item.get("ds", ""))
         data_list = [pair.split(":") for pair in ds.split("|") if ":" in pair]
@@ -944,8 +943,7 @@ def python_accounting_audit(dimension_data, res_main):
         ids = [str(e[0]).strip() for e in data_list if len(e) > 0]
         id_counts = Counter(ids)
 
-        # === 2.1 單項數量 (Local) ===
-        # 邏輯：看數字對就好 (ex: 1SET=4PC -> 1...=...4)
+        # 2.1 單項數量
         is_local_exempt = "豁免" in u_local
         is_weight_mode = "KG" in title_clean.upper() or target_pc > 100
         
@@ -960,10 +958,7 @@ def python_accounting_audit(dimension_data, res_main):
             if has_bad and not is_local_exempt:
                 accounting_issues.append({"page": page, "item": raw_title, "issue_type": "⚠️資料異常", "common_reason": "含無法辨識數值", "failures": [{"id": "警告", "val": "[!]", "calc": "異常"}]})
         else:
-            # ⚡️ [更新] Regex: 找 "1" 開頭，忽略中間文字，找 "=" 後面的數字
-            # 支援: 1SET=3, 1=3, 1 SET = 3 PCS
             conv_match = re.search(r"1[^\d=]*=[^\d=]*(\d+\.?\d*)", u_local_norm)
-            
             if conv_match:
                 div = float(conv_match.group(1))
                 actual_item_qty = len(data_list) / (div if div != 0 else 1)
@@ -983,12 +978,9 @@ def python_accounting_audit(dimension_data, res_main):
              for rid, count in id_counts.items():
                 if count > 2: accounting_issues.append({"page": page, "item": raw_title, "issue_type": "⚠️編號重複(軸頸)", "common_reason": f"{rid} 重複 {count}次", "failures": []})
 
-        # === 2.3 運費計算 (Freight) ===
-        # 邏輯：看數字對就好 (ex: 4PC=1 -> 4...=...1)
+        # 2.3 運費
         is_fr_exempt = "豁免" in u_fr
-        # ⚡️ [更新] Regex: 找數字開頭，忽略中間文字，找 "=1"
         fr_conv_match = re.search(r"(\d+\.?\d*)[^\d=]*=[^\d=]*1", u_fr_norm)
-        
         is_default_target = "本體" in title_clean and ("未再生" in title_clean or "粗車" in title_clean)
         freight_val = 0.0
         f_note = ""
@@ -1006,12 +998,11 @@ def python_accounting_audit(dimension_data, res_main):
             freight_actual_sum += freight_val
             freight_details.append({"id": f"{raw_title}", "val": freight_val, "calc": f_note})
 
-        # === 2.4 總表對帳 (Agg) ===
+        # === 2.4 總表對帳 (含互斥鎖) ===
         agg_mode = "B" 
         agg_divisor = 1.0 
         
         if u_agg:
-            # 分割時也要小心，先用逗號切，再個別解析
             parts = str(u_agg).upper().split(",")
             for p in parts:
                 p_clean = p.replace(" ", "")
@@ -1020,8 +1011,6 @@ def python_accounting_audit(dimension_data, res_main):
                 elif p_clean == "A": agg_mode = "A"
                 elif p_clean == "B": agg_mode = "B"
                 elif "=" in p_clean:
-                    # ⚡️ [更新] Regex: 抓等號兩邊的數字，忽略中間的單位文字
-                    # 支援: 2SET=1PC, 2=1
                     match = re.search(r"(\d+\.?\d*)[^\d=]*=[^\d=]*(\d+\.?\d*)", p_clean)
                     if match:
                         l, r = float(match.group(1)), float(match.group(2))
@@ -1040,16 +1029,16 @@ def python_accounting_audit(dimension_data, res_main):
                     data["details"].append({"id": raw_title, "val": freight_val, "calc": f_note})
                 continue 
             
+            # --- 1. A 模式：名稱模糊比對 ---
             match_A = (fuzz.partial_ratio(s_clean, title_clean) > 90)
             
+            # --- 2. B 模式：籃子比對 ---
             match_B = False
             is_dis = "ROLL拆裝" in s_clean
             is_mac = "ROLL車修" in s_clean
             is_weld = "ROLL銲補" in s_clean or "ROLL焊補" in s_clean
             
-            # ⚡️ [更新] 移除「內孔」，只保留 本體、軸頸、JOURNAL
             has_part = "本體" in title_clean or any(k in title_clean for k in ["軸頸", "JOURNAL"])
-            
             has_act_mac = any(k in title_clean for k in ["再生", "精車", "未再生", "粗車"])
             has_act_weld = ("銲補" in title_clean or "焊" in title_clean)
             is_assy = ("組裝" in title_clean or "拆裝" in title_clean)
@@ -1058,18 +1047,39 @@ def python_accounting_audit(dimension_data, res_main):
             elif is_mac and has_part and has_act_mac: match_B = True
             elif is_weld and has_part and has_act_weld: match_B = True
             
-            if match_B:
-                req_unregen = "未再生" in s_clean or "粗車" in s_clean
-                req_regen_only = ("再生" in s_clean or "精車" in s_clean) and not req_unregen
-                is_unregen = "未再生" in title_clean or "粗車" in title_clean
-                if req_unregen and not is_unregen: match_B = False
-                elif req_regen_only and is_unregen: match_B = False
+            # --- 3. 初始匹配判定 ---
+            if agg_mode == "A": initial_match = match_A
+            elif agg_mode == "AB": initial_match = match_A or match_B
+            else: initial_match = match_B if match_B else match_A
 
-            if agg_mode == "A": match = match_A
-            elif agg_mode == "AB": match = match_A or match_B
-            else: match = match_B if match_B else match_A
+            # --- 4. ⚡️ 互斥鎖 (Conflict Check) ---
+            # 這是新的守門員：不管你是從 A 還是 B 進來的，都要通過這關
+            final_match = initial_match
+            
+            if final_match:
+                # 屬性提取 (總表 vs 項目)
+                sum_unregen = "未再生" in s_clean or "粗車" in s_clean
+                sum_regen = ("再生" in s_clean or "精車" in s_clean) and not sum_unregen
+                sum_weld = "銲補" in s_clean or "焊" in s_clean
+                
+                item_unregen = "未再生" in title_clean or "粗車" in title_clean
+                item_regen = ("再生" in title_clean or "精車" in title_clean) and not item_unregen
+                item_weld = "銲補" in title_clean or "焊" in title_clean
 
-            if match:
+                # 互斥規則 1: 總表是銲補，但項目是再生/未再生 -> 踢除
+                if sum_weld and (item_unregen or item_regen) and not item_weld:
+                    final_match = False
+                
+                # 互斥規則 2: 總表是未再生，但項目是再生 -> 踢除
+                elif sum_unregen and item_regen:
+                    final_match = False
+                
+                # 互斥規則 3: 總表是再生，但項目是未再生 -> 踢除
+                elif sum_regen and item_unregen:
+                    final_match = False
+
+            # --- 5. 最終確認 ---
+            if final_match:
                 data["actual"] += qty_agg
                 c_msg = f"計入 (/{agg_divisor:.1f})" if agg_divisor != 1.0 else "計入"
                 data["details"].append({"id": f"{raw_title} (P.{page})", "val": qty_agg, "calc": c_msg})
