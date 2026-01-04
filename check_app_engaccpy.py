@@ -1034,7 +1034,8 @@ def python_accounting_audit(dimension_data, res_main):
             is_mac = "ROLL車修" in s_clean
             is_weld = "ROLL銲補" in s_clean or "ROLL焊補" in s_clean
             
-            has_part = "本體" in title_clean or any(k in title_clean for k in ["軸頸", "內孔", "JOURNAL"])
+            # ⚡️ 修改後：移除 "內孔"，只保留本體、軸頸與 JOURNAL
+            has_part = "本體" in title_clean or any(k in title_clean for k in ["軸頸", "JOURNAL"])
             has_act_mac = any(k in title_clean for k in ["再生", "精車", "未再生", "粗車"])
             has_act_weld = ("銲補" in title_clean or "焊" in title_clean)
             is_assy = ("組裝" in title_clean or "拆裝" in title_clean)
