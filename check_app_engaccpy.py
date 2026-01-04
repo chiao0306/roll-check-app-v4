@@ -448,11 +448,9 @@ def python_engineering_audit(dimension_data):
 
 def assign_category_by_python(item_title):
     """
-    Python 分類官 (v5: 互斥鎖加強版)
-    1. 引入互斥邏輯：解決標題同時出現衝突關鍵字時的誤判。
-       - 規則：若標題含有「未再生/粗車」，則強制屏蔽「再生/精車」的判定。
-         (例如: "本體未再生 (後續再生)" -> 應判為 Un_regen，而非 Range)
-    2. 優先權：Excel強制規則 > 豁免 > 銲補 > 互斥判定 > 一般關鍵字。
+    Python 分類官 (v6: 錯字擴充版)
+    1. 關鍵字擴充：加入「鉀」= 銲補 (Min Limit)。
+    2. 保留 Excel 規則與互斥鎖邏輯。
     """
     import pandas as pd
     from thefuzz import fuzz
@@ -465,7 +463,7 @@ def assign_category_by_python(item_title):
     title_clean = clean_text(item_title)
     t = str(item_title).upper().replace(" ", "").replace("\n", "").replace('"', "")
 
-    # --- 1. 嘗試讀取 Excel 強制規則 (最高優先權) ---
+    # --- 1. 嘗試讀取 Excel 強制規則 ---
     try:
         df = pd.read_excel("rules.xlsx")
         df.columns = [c.strip() for c in df.columns]
@@ -498,29 +496,24 @@ def assign_category_by_python(item_title):
             fr = forced_rule.upper()
             if "豁免" in fr or "EXEMPT" in fr: return "exempt"
             if "再生" in fr or "精車" in fr or "RANGE" in fr: return "range"
-            if "銲" in fr or "焊" in fr or "MIN" in fr: return "min_limit" # 銲補優先
+            if "銲" in fr or "焊" in fr or "MIN" in fr: return "min_limit"
             if "軸頸" in fr or "MAX" in fr: return "max_limit"
             if "本體" in fr or "UN_REGEN" in fr: return "un_regen"
             
     except Exception: pass
 
-    # --- 2. ⚡️ 互斥鎖邏輯 (Conflict Check) ---
-    # 先分析具備哪些屬性
-    has_weld = any(k in t for k in ["銲補", "銲接", "焊", "WELD"])
+    # --- 2. ⚡️ 互斥鎖邏輯 ---
+    # ⚡️ [擴充] 加入 "鉀"
+    has_weld = any(k in t for k in ["銲補", "銲接", "焊", "WELD", "鉀"])
     has_unregen = any(k in t for k in ["未再生", "UN_REGEN", "粗車"])
     has_regen = any(k in t for k in ["再生", "研磨", "精加工", "車修", "KEYWAY", "GRIND", "MACHIN", "精車", "組裝", "拆裝", "裝配", "ASSY"])
     
-    # 互斥規則 A: 銲補最大 (一旦有銲補，通常就是驗 Min Limit，不管有沒有寫未再生)
-    if has_weld: return "min_limit"
+    if has_weld: return "min_limit" # 鉀補 -> Min Limit
 
-    # 互斥規則 B: 未再生 vs 再生
-    # 如果同時出現 (例如 "未再生車修")，我們希望它是 "Un_regen" (驗整數)，而不是 "Range"
     if has_unregen:
         if any(k in t for k in ["軸頸", "內孔", "JOURNAL"]): return "max_limit"
         return "un_regen"
 
-    # --- 3. 一般關鍵字判斷 (Fallback) ---
-    # 如果通過了上面的互斥鎖 (代表沒有銲補，也沒有未再生)，才看是不是再生
     if has_regen: return "range"
 
     return "unknown"
@@ -1129,10 +1122,11 @@ def python_accounting_audit(dimension_data, res_main):
 
 def python_process_audit(dimension_data):
     """
-    Python 流程引擎 (v3: 完整支援 Process_Rule)
-    1. 支援從 Excel 讀取 'Process_Rule' 欄位。
-    2. 解析關鍵字：'本體/軸頸' 決定軌道, '未再生/銲補/再生/研磨' 決定工序。
-    3. 優先權：Excel 規則 > 標題關鍵字。
+    Python 流程引擎 (v18: 絕對嚴格稽核版)
+    1. [移除通用軌道]: 取消標題不清時的自動繼承功能。若標題未註明「本體/軸頸」，視為無效軌道，不予計算。
+       - 優點: 避免將不明確的數據錯誤分配，強迫使用者在 Excel 補上規則，符合嚴格稽核精神。
+    2. [嚴格ID比對]: ID 必須完全一致 (僅容許大小寫差異 .upper())，不進行模糊比對。
+    3. [錯字擴充]: 保留「鉀」作為銲補關鍵字。
     """
     process_issues = []
     import re
@@ -1150,12 +1144,12 @@ def python_process_audit(dimension_data):
         df.columns = [c.strip() for c in df.columns]
         for _, row in df.iterrows():
             iname = str(row.get('Item_Name', '')).strip()
-            p_rule = str(row.get('Process_Rule', '')).strip() # 讀取 Process_Rule
+            p_rule = str(row.get('Process_Rule', '')).strip()
             if iname and p_rule and p_rule.lower() != 'nan':
                 rules_map[clean_text(iname)] = p_rule
     except: pass
 
-    # 定義工序與名稱
+    # 定義工序
     STAGE_MAP = {
         1: "未再生/粗車",
         2: "銲補/焊補",
@@ -1167,81 +1161,60 @@ def python_process_audit(dimension_data):
 
     if not dimension_data: return []
 
+    # --- 步驟 1: 蒐集數據 ---
     for item in dimension_data:
         p_num = item.get("page", "?")
         title = str(item.get("item_title", "")).strip()
         title_clean = clean_text(title)
         ds = str(item.get("ds", ""))
         
-        # --- A. 決定 Track 與 Stage ---
+        # A. 決定 Track 與 Stage
         track = "Unknown"
         stage = 0
         forced_rule = None
 
-        # A-1. 查表
         if rules_map:
-            # 模糊匹配邏輯 (同分決勝負)
             best_score = 0
-            best_len = 999
-            
-            # 嘗試直接匹配
-            match = rules_map.get(title_clean)
-            if match: forced_rule = match
-            
-            # 嘗試脫殼匹配
-            if not forced_rule:
-                t_no = re.sub(r"[\(（].*?[\)）]", "", title_clean)
-                match = rules_map.get(t_no)
-                if match: forced_rule = match
-
-            # 嘗試 Fuzzy 匹配
-            if not forced_rule:
-                for k, v in rules_map.items():
-                    sc = fuzz.partial_ratio(k, title_clean)
-                    ld = abs(len(k) - len(title_clean))
-                    if sc > 85:
-                        if sc > best_score:
-                            best_score = sc
-                            best_len = ld
-                            forced_rule = v
-                        elif sc == best_score and ld < best_len:
-                            best_len = ld
-                            forced_rule = v
-
-        # A-2. 解析強制規則
+            for k, v in rules_map.items():
+                sc = fuzz.partial_ratio(k, title_clean)
+                if sc > 85 and sc > best_score:
+                    best_score = sc
+                    forced_rule = v
+        
         if forced_rule:
             fr = forced_rule.upper()
-            if "豁免" in fr or "EXEMPT" in fr: continue # 🚀 豁免
-
-            # 解析軌道 (若寫了 "軸頸銲補"，這裡會抓到 "軸頸")
+            if "豁免" in fr or "EXEMPT" in fr: continue 
             if "本體" in fr: track = "本體"
             elif "軸頸" in fr: track = "軸頸"
-            
-            # 解析工序 (若寫了 "軸頸銲補"，這裡會抓到 "銲")
             if "未再生" in fr or "粗車" in fr: stage = 1
-            elif "銲" in fr or "焊" in fr: stage = 2
+            # 保留錯字擴充 "鉀"
+            elif "銲" in fr or "焊" in fr or "鉀" in fr: stage = 2
             elif "再生" in fr or "精車" in fr: stage = 3
             elif "研磨" in fr: stage = 4
 
-        # A-3. Fallback: 標題關鍵字自動判斷
+        if stage == 0:
+            if "研磨" in title: stage = 4
+            # 保留錯字擴充 "鉀"
+            elif any(k in title for k in ["銲補", "銲接", "焊", "鉀"]): stage = 2
+            elif "未再生" in title or "粗車" in title: stage = 1
+            elif "再生" in title or "精車" in title: stage = 3
+
         if track == "Unknown":
             if "本體" in title: track = "本體"
             elif any(k in title for k in ["軸頸", "內孔", "JOURNAL"]): track = "軸頸"
-        
-        if stage == 0:
-            if "研磨" in title: stage = 4
-            elif any(k in title for k in ["銲補", "銲接", "焊"]): stage = 2
-            elif "未再生" in title or "粗車" in title: stage = 1
-            elif "再生" in title or "精車" in title: stage = 3
+            # ⚡️ [已移除] 不再自動歸類為 General，若沒寫部位就是 Unknown -> 忽略
         
         if track == "Unknown" or stage == 0: continue 
 
-        # --- B. 數據解析 (維持不變) ---
+        # B. 數據解析
         segments = ds.split("|")
         for seg in segments:
             parts = seg.split(":")
             if len(parts) < 2: continue
-            rid = parts[0].strip()
+            
+            # 僅保留強制大寫 (解決 31x20 問題)
+            rid = parts[0].strip().upper()
+            
             val_str = parts[1].strip()
             nums = re.findall(r"\d+\.?\d*", val_str)
             if not nums: continue
@@ -1253,7 +1226,10 @@ def python_process_audit(dimension_data):
                 "val": val, "page": p_num, "title": title
             }
 
-    # 2. 執行核心邏輯檢查
+    # --- 步驟 2: (已移除自動合併) ---
+    # 嚴格模式下，不再進行 General 軌道的合併。數據必須明確歸屬。
+
+    # --- 步驟 3: 執行檢查 ---
     for (rid, track), stages_data in history.items():
         present_stages = sorted(stages_data.keys())
         if not present_stages: continue
