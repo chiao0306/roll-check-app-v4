@@ -737,9 +737,9 @@ def python_numerical_audit(dimension_data):
 
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官 (智慧匹配修復版)
-    1. 規則查找升級：若精準匹配失敗，自動嘗試「脫殼」(移除標題括號) 與「部分匹配」。
-    2. 規則字串清洗：保留防彈級的字元正規化 (全形轉半形)。
+    Python 會計官 (寬容度同步版)
+    1. 門檻調整：將模糊匹配門檻從 90 調降至 85 (與 Debug 卡片標準一致)，解決「輥」看成「報」的 OCR 誤差。
+    2. 智慧脫殼：保留去除括號 (2SET) 的邏輯，確保降門檻後的安全性。
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -791,30 +791,29 @@ def python_accounting_audit(dimension_data, res_main):
         page = item.get("page", "?")
         target_pc = safe_float(item.get("item_pc_target", 0)) 
         
-        # --- 🔍 查找 Excel 規則 (⚡️ 邏輯升級區) ---
+        # --- 🔍 查找 Excel 規則 (⚡️ 修正重點區) ---
         rule_set = rules_map.get(title_clean)
         
-        # 策略 A: 如果直接沒找到，嘗試「脫殼」：把括號 (2SET) 拿掉再找一次
+        # 策略 A: 智慧脫殼 - 移除標題末尾的 (2SET), (1PC)
         if not rule_set:
-            # 移除 (xxx) 或 （xxx） 的內容
             title_no_suffix = re.sub(r"[\(（].*?[\)）]", "", title_clean)
             rule_set = rules_map.get(title_no_suffix)
 
-        # 策略 B: 如果還是沒找到，改用 Partial Ratio (像 Debug 看板一樣寬容)
-        # 只要規則名稱完整出現在標題裡 (e.g. "車修" 在 "車修(2SET)" 裡面)，就算命中
+        # 策略 B: 模糊匹配 - 門檻調降至 85
         if not rule_set and rules_map:
             best_score = 0
             for k, v in rules_map.items():
-                # 改用 partial_ratio，並將門檻設為 90
+                # 使用 partial_ratio 容忍錯字 (如 輥 -> 報)
+                # ⚡️ 將門檻從 90 降為 85，與 Debug 卡片 (get_dynamic_rules) 保持一致
                 score = fuzz.partial_ratio(k, title_clean)
-                if score > 90 and score > best_score:
+                if score > 85 and score > best_score:
                     best_score = score
                     rule_set = v
         
         u_local = rule_set.get("u_local", "") if rule_set else ""
         u_fr = rule_set.get("u_fr", "") if rule_set else ""
 
-        # --- 以下邏輯保持不變 (字串清洗與計算) ---
+        # 字串正規化
         u_local_norm = u_local.upper().replace(" ", "").replace("　", "").replace("＝", "=").replace("：", "=").replace(":", "=")
         u_fr_norm = u_fr.upper().replace(" ", "").replace("　", "").replace("＝", "=").replace("：", "=").replace(":", "=")
 
