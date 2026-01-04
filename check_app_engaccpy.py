@@ -1056,7 +1056,7 @@ def python_accounting_audit(dimension_data, res_main):
                 continue 
             
             # --- 1. A 模式 ---
-            match_A = (fuzz.partial_ratio(s_clean, title_clean) > 90)
+            match_A = (fuzz.partial_ratio(s_clean, title_clean) > 85)
             
             # --- 2. B 模式 ---
             match_B = False
