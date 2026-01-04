@@ -1129,10 +1129,11 @@ def python_accounting_audit(dimension_data, res_main):
 
 def python_process_audit(dimension_data):
     """
-    Python 流程引擎 (v3: 完整支援 Process_Rule)
-    1. 支援從 Excel 讀取 'Process_Rule' 欄位。
-    2. 解析關鍵字：'本體/軸頸' 決定軌道, '未再生/銲補/再生/研磨' 決定工序。
-    3. 優先權：Excel 規則 > 標題關鍵字。
+    Python 流程引擎 (v14: 泛用軌道繼承版)
+    1. [解決斷鏈]: 當頁面標題未註明部位(本體/軸頸)但有明確工序(銲補)時，歸類為「通用軌道(General)」。
+    2. [自動合併]: 在執行檢查前，自動將「通用軌道」的數據，依據 ID 繼承給「本體」或「軸頸」。
+       (解決「W3 #1機ROLL銲補」因為沒寫本體，導致後續溯源報錯的問題)
+    3. 保留 Excel Process_Rule 與互斥鎖邏輯。
     """
     process_issues = []
     import re
@@ -1150,12 +1151,12 @@ def python_process_audit(dimension_data):
         df.columns = [c.strip() for c in df.columns]
         for _, row in df.iterrows():
             iname = str(row.get('Item_Name', '')).strip()
-            p_rule = str(row.get('Process_Rule', '')).strip() # 讀取 Process_Rule
+            p_rule = str(row.get('Process_Rule', '')).strip()
             if iname and p_rule and p_rule.lower() != 'nan':
                 rules_map[clean_text(iname)] = p_rule
     except: pass
 
-    # 定義工序與名稱
+    # 定義工序
     STAGE_MAP = {
         1: "未再生/粗車",
         2: "銲補/焊補",
@@ -1167,76 +1168,57 @@ def python_process_audit(dimension_data):
 
     if not dimension_data: return []
 
+    # --- 步驟 1: 蒐集數據 (建立軌道) ---
     for item in dimension_data:
         p_num = item.get("page", "?")
         title = str(item.get("item_title", "")).strip()
         title_clean = clean_text(title)
         ds = str(item.get("ds", ""))
         
-        # --- A. 決定 Track 與 Stage ---
+        # A. 決定 Track 與 Stage
         track = "Unknown"
         stage = 0
         forced_rule = None
 
-        # A-1. 查表
+        # A-1. 查表 (Excel Rule)
         if rules_map:
-            # 模糊匹配邏輯 (同分決勝負)
             best_score = 0
-            best_len = 999
-            
-            # 嘗試直接匹配
-            match = rules_map.get(title_clean)
-            if match: forced_rule = match
-            
-            # 嘗試脫殼匹配
-            if not forced_rule:
-                t_no = re.sub(r"[\(（].*?[\)）]", "", title_clean)
-                match = rules_map.get(t_no)
-                if match: forced_rule = match
-
-            # 嘗試 Fuzzy 匹配
-            if not forced_rule:
-                for k, v in rules_map.items():
-                    sc = fuzz.partial_ratio(k, title_clean)
-                    ld = abs(len(k) - len(title_clean))
-                    if sc > 85:
-                        if sc > best_score:
-                            best_score = sc
-                            best_len = ld
-                            forced_rule = v
-                        elif sc == best_score and ld < best_len:
-                            best_len = ld
-                            forced_rule = v
-
+            for k, v in rules_map.items():
+                sc = fuzz.partial_ratio(k, title_clean)
+                if sc > 85 and sc > best_score:
+                    best_score = sc
+                    forced_rule = v
+        
         # A-2. 解析強制規則
         if forced_rule:
             fr = forced_rule.upper()
-            if "豁免" in fr or "EXEMPT" in fr: continue # 🚀 豁免
+            if "豁免" in fr or "EXEMPT" in fr: continue 
 
-            # 解析軌道 (若寫了 "軸頸銲補"，這裡會抓到 "軸頸")
             if "本體" in fr: track = "本體"
             elif "軸頸" in fr: track = "軸頸"
             
-            # 解析工序 (若寫了 "軸頸銲補"，這裡會抓到 "銲")
             if "未再生" in fr or "粗車" in fr: stage = 1
             elif "銲" in fr or "焊" in fr: stage = 2
             elif "再生" in fr or "精車" in fr: stage = 3
             elif "研磨" in fr: stage = 4
 
-        # A-3. Fallback: 標題關鍵字自動判斷
-        if track == "Unknown":
-            if "本體" in title: track = "本體"
-            elif any(k in title for k in ["軸頸", "內孔", "JOURNAL"]): track = "軸頸"
-        
+        # A-3. 自動判斷 (Fallback)
         if stage == 0:
             if "研磨" in title: stage = 4
             elif any(k in title for k in ["銲補", "銲接", "焊"]): stage = 2
             elif "未再生" in title or "粗車" in title: stage = 1
             elif "再生" in title or "精車" in title: stage = 3
+
+        if track == "Unknown":
+            if "本體" in title: track = "本體"
+            elif any(k in title for k in ["軸頸", "內孔", "JOURNAL"]): track = "軸頸"
+            
+            # ⚡️ [v14 核心]：若有工序但沒軌道，歸類為 "General" (通用)
+            elif stage > 0: track = "General"
         
         if track == "Unknown" or stage == 0: continue 
 
-        # --- B. 數據解析 (維持不變) ---
+        # B. 數據解析與存檔
         segments = ds.split("|")
         for seg in segments:
             parts = seg.split(":")
@@ -1249,16 +1231,40 @@ def python_process_audit(dimension_data):
             
             key = (rid, track)
             if key not in history: history[key] = {}
+            # 若同一頁有重複 ID，保留最後一筆 (或可改為保留最大值)
             history[key][stage] = {
                 "val": val, "page": p_num, "title": title
             }
 
-    # 2. 執行核心邏輯檢查
+    # --- 步驟 2: ⚡️ 數據繼承 (General -> Specific) ---
+    # 找出所有在 "General" 軌道的資料，嘗試合併到 "本體" 或 "軸頸"
+    general_keys = [k for k in history.keys() if k[1] == "General"]
+    
+    for (rid, _), gen_stages in [(k, history[k]) for k in general_keys]:
+        # 嘗試合併到 本體
+        body_key = (rid, "本體")
+        if body_key in history:
+            for s, info in gen_stages.items():
+                if s not in history[body_key]: # 若本體缺這個工序，就補上去
+                    history[body_key][s] = info
+        
+        # 嘗試合併到 軸頸
+        journal_key = (rid, "軸頸")
+        if journal_key in history:
+            for s, info in gen_stages.items():
+                if s not in history[journal_key]:
+                    history[journal_key][s] = info
+
+    # --- 步驟 3: 執行核心邏輯檢查 ---
     for (rid, track), stages_data in history.items():
+        # General 軌道本身不檢查，只用來貢獻數據
+        if track == "General": continue
+
         present_stages = sorted(stages_data.keys())
         if not present_stages: continue
         max_stage = present_stages[-1]
         
+        # 3.1 溯源檢查
         missing_stages = []
         for req_s in range(1, max_stage):
             if req_s not in stages_data: missing_stages.append(STAGE_MAP[req_s])
@@ -1274,6 +1280,7 @@ def python_process_audit(dimension_data):
                 "source": "🐍 流程引擎"
             })
 
+        # 3.2 尺寸邏輯檢查
         size_rank = { 1: 10, 4: 20, 3: 30, 2: 40 }
         for i in range(len(present_stages)):
             for j in range(i + 1, len(present_stages)):
