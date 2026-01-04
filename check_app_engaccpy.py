@@ -1043,7 +1043,7 @@ def python_accounting_audit(dimension_data, res_main):
                 continue 
             
             # --- 模式匹配 ---
-            match_A = (fuzz.partial_ratio(s_clean, title_clean) > 85)
+            match_A = (fuzz.partial_ratio(s_clean, title_clean) > 90)
             
             match_B = False
             is_dis = "ROLL拆裝" in s_clean
