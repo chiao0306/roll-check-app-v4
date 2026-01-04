@@ -448,9 +448,11 @@ def python_engineering_audit(dimension_data):
 
 def assign_category_by_python(item_title):
     """
-    Python 分類官 (v4: 優先權邏輯修正版)
-    1. 修正「軸頸銲補」辨識問題：將「銲補(Min)」的檢查順序提前，優先於「軸頸(Max)」。
-    2. 優先順序：豁免 > 再生(Range) > 銲補(Min) > 軸頸(Max) > 本體(Un_regen)。
+    Python 分類官 (v5: 互斥鎖加強版)
+    1. 引入互斥邏輯：解決標題同時出現衝突關鍵字時的誤判。
+       - 規則：若標題含有「未再生/粗車」，則強制屏蔽「再生/精車」的判定。
+         (例如: "本體未再生 (後續再生)" -> 應判為 Un_regen，而非 Range)
+    2. 優先權：Excel強制規則 > 豁免 > 銲補 > 互斥判定 > 一般關鍵字。
     """
     import pandas as pd
     from thefuzz import fuzz
@@ -461,8 +463,9 @@ def assign_category_by_python(item_title):
         return str(text).replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
 
     title_clean = clean_text(item_title)
-    
-    # --- 1. 嘗試讀取 Excel 強制規則 ---
+    t = str(item_title).upper().replace(" ", "").replace("\n", "").replace('"', "")
+
+    # --- 1. 嘗試讀取 Excel 強制規則 (最高優先權) ---
     try:
         df = pd.read_excel("rules.xlsx")
         df.columns = [c.strip() for c in df.columns]
@@ -477,7 +480,6 @@ def assign_category_by_python(item_title):
             iname = str(row.get('Item_Name', '')).strip()
             iname_clean = clean_text(iname)
             
-            # 同分決勝負匹配
             score = fuzz.partial_ratio(iname_clean, title_clean)
             if score < 95: 
                  t_no = re.sub(r"[\(（].*?[\)）]", "", title_clean)
@@ -489,45 +491,37 @@ def assign_category_by_python(item_title):
                     best_score = score
                     forced_rule = rule_val
                 elif score == best_score:
-                    # 若分數相同，選規則字串較長的 (通常資訊較豐富)
                     if len(rule_val) > len(forced_rule if forced_rule else ""):
                         forced_rule = rule_val
 
-        # 解析強制規則 (🔥 修正順序：動詞 > 名詞)
         if forced_rule:
             fr = forced_rule.upper()
-            
-            # 1. 豁免 (最高)
             if "豁免" in fr or "EXEMPT" in fr: return "exempt"
-            
-            # 2. 區間 (Range) - 再生/精車
             if "再生" in fr or "精車" in fr or "RANGE" in fr: return "range"
-            
-            # 3. 下限 (Min) - 銲補 (🔥 放在軸頸之前！)
-            # 這樣 "軸頸銲補" 會先命中這裡，回傳 min_limit
-            if "銲" in fr or "焊" in fr or "MIN" in fr: return "min_limit"
-            
-            # 4. 上限 (Max) - 軸頸 (不含銲補的情況)
+            if "銲" in fr or "焊" in fr or "MIN" in fr: return "min_limit" # 銲補優先
             if "軸頸" in fr or "MAX" in fr: return "max_limit"
-            
-            # 5. 整數 (Un_regen) - 本體
             if "本體" in fr or "UN_REGEN" in fr: return "un_regen"
             
     except Exception: pass
 
-    # --- 2. 原有的關鍵字判斷邏輯 (Fallback) ---
-    t = str(item_title).upper().replace(" ", "").replace("\n", "").replace('"', "")
+    # --- 2. ⚡️ 互斥鎖邏輯 (Conflict Check) ---
+    # 先分析具備哪些屬性
+    has_weld = any(k in t for k in ["銲補", "銲接", "焊", "WELD"])
+    has_unregen = any(k in t for k in ["未再生", "UN_REGEN", "粗車"])
+    has_regen = any(k in t for k in ["再生", "研磨", "精加工", "車修", "KEYWAY", "GRIND", "MACHIN", "精車", "組裝", "拆裝", "裝配", "ASSY"])
     
-    # Priority 1: 銲補 (Min)
-    if any(k in t for k in ["銲補", "銲接", "焊", "WELD"]): return "min_limit"
-    
-    # Priority 2: 裝配/再生 (Range)
-    if any(k in t for k in ["再生", "研磨", "精加工", "車修", "KEYWAY", "GRIND", "MACHIN", "精車", "組裝", "拆裝", "裝配", "ASSY"]): return "range"
+    # 互斥規則 A: 銲補最大 (一旦有銲補，通常就是驗 Min Limit，不管有沒有寫未再生)
+    if has_weld: return "min_limit"
 
-    # Priority 3: 未再生 (Max/Un_regen)
-    if any(k in t for k in ["未再生", "UN_REGEN", "粗車"]):
+    # 互斥規則 B: 未再生 vs 再生
+    # 如果同時出現 (例如 "未再生車修")，我們希望它是 "Un_regen" (驗整數)，而不是 "Range"
+    if has_unregen:
         if any(k in t for k in ["軸頸", "內孔", "JOURNAL"]): return "max_limit"
-        else: return "un_regen"
+        return "un_regen"
+
+    # --- 3. 一般關鍵字判斷 (Fallback) ---
+    # 如果通過了上面的互斥鎖 (代表沒有銲補，也沒有未再生)，才看是不是再生
+    if has_regen: return "range"
 
     return "unknown"
 
