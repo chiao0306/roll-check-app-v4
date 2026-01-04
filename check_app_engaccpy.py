@@ -485,16 +485,18 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
     ⚠️ **注意範圍**：你只能從標記為 `=== [SUMMARY_TABLE (總表)] ===` 的區域提取數據。
     
     1. **統計表**：請鎖定 `實交數量` 欄位。抄錄每一行的「名稱」與「實交數量」到 `summary_rows`。
-    (無需額外提取運費或特殊指標，只要完整抄錄表格行項目即可)
+    2. **頁碼標註**：請務必在每個 `summary_rows` 物件中記錄該行所在的頁碼 (`page`)。
 
     ---
 
     ### 📝 輸出規範 (Output Format)
-    必須回傳單一 JSON。注意：AI 不需回傳流程異常，僅需回傳原始數據。
+    必須回傳單一 JSON。
 
     {{
       "job_no": "工令",
-      "summary_rows": [ {{ "title": "名", "target": 數字 }} ],
+      "summary_rows": [ 
+          {{ "page": 頁碼, "title": "名", "target": 數字 }} 
+      ],
       "freight_target": 0, 
       "issues": [], 
       "dimension_data": [
@@ -731,11 +733,12 @@ def python_numerical_audit(dimension_data):
             except: continue
                 
     return list(grouped_errors.values())
+    
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官 (關鍵字擴充：銲=焊)
-    1. 總表對帳邏輯：支援 "ROLL焊補" 對應到 "ROLL銲補" 籃子。
-    2. 保留所有之前的智慧修復 (智慧脫殼、防彈清洗、同分決勝負)。
+    Python 會計官 (頁碼顯示修復版)
+    1. 總表對帳：現在會顯示具體的總表頁碼 (如 P.2)，不再只顯示 "P.總表"。
+    2. 保留所有先前的智慧邏輯 (同分匹配、脫殼、焊/銲通用)。
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -770,12 +773,18 @@ def python_accounting_audit(dimension_data, res_main):
                 }
     except: pass 
 
-    # 1. 取得對帳基準
+    # 1. 取得對帳基準 (⚡️ 修改點：紀錄 page)
     summary_rows = res_main.get("summary_rows", [])
     global_sum_tracker = {
-        s['title']: {"target": safe_float(s['target']), "actual": 0, "details": []} 
+        s['title']: {
+            "target": safe_float(s['target']), 
+            "actual": 0, 
+            "details": [],
+            "page": s.get('page', "總表")  # 這裡抓取 Prompt 傳回來的頁碼，抓不到則預設 "總表"
+        } 
         for s in summary_rows if s.get('title')
     }
+    
     freight_target = safe_float(res_main.get("freight_target", 0))
     freight_actual_sum = 0
     freight_details = []
@@ -804,7 +813,6 @@ def python_accounting_audit(dimension_data, res_main):
                 score = fuzz.partial_ratio(k, title_clean)
                 current_len_diff = abs(len(k) - len(title_clean))
                 
-                # 維持 85 分門檻 (與 Debug 卡片一致)
                 if score > 85:
                     if score > best_score:
                         best_score = score
@@ -917,7 +925,6 @@ def python_accounting_audit(dimension_data, res_main):
             is_item_journal = any(k in title_clean for k in ["軸頸", "內孔", "JOURNAL"])
             is_item_unregen = "未再生" in title_clean or "粗車" in title_clean
             
-            # ⚡️ [修改點] 總表籃子名稱辨識 (銲=焊)
             is_main_disassembly = "ROLL拆裝" in s_title_clean 
             is_main_machining = "ROLL車修" in s_title_clean   
             is_main_welding = "ROLL銲補" in s_title_clean or "ROLL焊補" in s_title_clean 
@@ -930,7 +937,6 @@ def python_accounting_audit(dimension_data, res_main):
                 if has_part and has_action: match = True
             elif is_main_welding:
                 has_part = "軸頸" in title_clean or "本體" in title_clean
-                # ⚡️ [修改點] 項目名稱辨識 (銲=焊)
                 if has_part and ("銲補" in title_clean or "焊" in title_clean): match = True
             else:
                 if fuzz.partial_ratio(s_title_clean, title_clean) > 90:
@@ -948,7 +954,10 @@ def python_accounting_audit(dimension_data, res_main):
     for s_title, data in global_sum_tracker.items():
         if abs(data["actual"] - data["target"]) > 0.01 and data["target"] > 0:
             accounting_issues.append({
-                "page": "總表", "item": s_title, "issue_type": "統計不符(總帳)",
+                # ⚡️ 修改點：使用 data["page"] 取代原本寫死的 "總表"
+                "page": data["page"],  
+                "item": s_title, 
+                "issue_type": "統計不符(總帳)",
                 "common_reason": f"標註 {data['target']} != 實際 {data['actual']}",
                 "failures": [{"id": "🔍 基準", "val": data["target"]}] + data["details"] + [{"id": "🧮 實際", "val": data["actual"]}],
                 "source": "🐍 會計引擎"
@@ -1359,16 +1368,31 @@ if st.session_state.photo_gallery:
                 "總表狀態": "正常" if sum_rows_len > 0 else "空值"
             }])
             st.dataframe(summary_df, hide_index=True, use_container_width=True)
+            
             st.divider()
-
+ 
+            # B. 總表清單 (⚡️ 修改點：新增頁碼欄位)
             st.markdown("**2. 左上角統計表 (Summary Rows)**")
             sum_rows = cache.get("summary_rows", [])
+            
             if sum_rows:
                 df_sum = pd.DataFrame(sum_rows)
-                df_sum.rename(columns={"title": "項目名稱", "target": "實交數量"}, inplace=True)
-                st.dataframe(df_sum, hide_index=True, use_container_width=True)
+                # 確保 page 欄位存在 (如果舊的 Cache 沒有 page，補上 "?")
+                if "page" not in df_sum.columns:
+                    df_sum["page"] = "?"
+                
+                # 重新命名與排序：把頁碼放在第一欄
+                df_sum.rename(columns={"page": "頁碼", "title": "項目名稱", "target": "實交數量"}, inplace=True)
+                
+                # 調整顯示順序
+                cols = ["頁碼", "項目名稱", "實交數量"]
+                # 確保只顯示存在的欄位 (防呆)
+                cols = [c for c in cols if c in df_sum.columns]
+                
+                st.dataframe(df_sum[cols], hide_index=True, use_container_width=True)
             else:
                 st.caption("無數據 (變數 summary_rows 為空)")
+
             st.divider()
 
             st.markdown("**3. 全卷詳細抄錄數據 (JSON)**")
