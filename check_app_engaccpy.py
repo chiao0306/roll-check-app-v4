@@ -737,7 +737,9 @@ def python_numerical_audit(dimension_data):
 
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官 (新增關鍵字：粗車、精車)
+    Python 會計官 (防彈版)
+    1. 強力清洗規則字串：支援全形轉半形、去除所有空格，確保 Regex 100% 命中。
+    2. 浮點數容錯：使用 0.01 誤差範圍取代 != 絕對比對。
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -745,9 +747,11 @@ def python_accounting_audit(dimension_data, res_main):
     import re
     import pandas as pd 
 
+    # 🧽 基礎清洗工具
     def clean_text(text):
         return str(text).replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
 
+    # 安全轉型工具
     def safe_float(value):
         if value is None or str(value).upper() == 'NULL': return 0.0
         if "[!]" in str(value): return "BAD_DATA" 
@@ -799,15 +803,19 @@ def python_accounting_audit(dimension_data, res_main):
         u_local = rule_set.get("u_local", "") if rule_set else ""
         u_fr = rule_set.get("u_fr", "") if rule_set else ""
 
-        # 數據解壓縮
+        # ⚡️ [新增] 強力正規化規則字串 (轉大寫、去空、轉半形、統一等號)
+        # 這樣 1SET＝3PC (全形) 或 1SET:3PC 都會變成 1SET=3PC
+        u_local_norm = u_local.upper().replace(" ", "").replace("　", "").replace("＝", "=").replace("：", "=").replace(":", "=")
+        u_fr_norm = u_fr.upper().replace(" ", "").replace("　", "").replace("＝", "=").replace("：", "=").replace(":", "=")
+
         ds = str(item.get("ds", ""))
         data_list = [pair.split(":") for pair in ds.split("|") if ":" in pair]
         if not data_list: continue
         ids = [str(e[0]).strip() for e in data_list if len(e) > 0]
         id_counts = Counter(ids)
 
-        # 2.1 單項數量 (含豁免)
-        is_local_exempt = "豁免" in str(u_local)
+        # --- 2.1 單項數量計算 ---
+        is_local_exempt = "豁免" in u_local
         is_weight_mode = "KG" in title_clean.upper() or target_pc > 100
         
         if is_weight_mode:
@@ -825,19 +833,25 @@ def python_accounting_audit(dimension_data, res_main):
                     "failures": [{"id": "警告", "val": "[!]", "calc": "數據損毀"}]
                 })
         else:
-            conv_match = re.search(r"1\s*SET\s*=\s*(\d+)\s*(?:PCS|PC)?", u_local, re.IGNORECASE)
+            # 🔢 數量模式 (使用 norm 字串 + 簡化版 Regex)
+            # Regex 解釋：找 1SET=數字，允許小數點
+            conv_match = re.search(r"1SET=(\d+\.?\d*)", u_local_norm)
+            
             if conv_match:
                 divisor = float(conv_match.group(1))
+                # 防呆：除數不能為 0
+                if divisor == 0: divisor = 1 
                 actual_item_qty = len(data_list) / divisor
-            elif "PC=PC" in u_local or "本體" in title_clean:
+            elif "PC=PC" in u_local_norm or "本體" in title_clean:
                 actual_item_qty = len(set(ids))
             else:
                 actual_item_qty = len(data_list)
 
-        if not is_local_exempt and actual_item_qty != target_pc and target_pc > 0:
+        # ⚡️ [修改] 使用 abs > 0.01 避免浮點數誤差 (例如 2.0000001 != 2)
+        if not is_local_exempt and abs(actual_item_qty - target_pc) > 0.01 and target_pc > 0:
             accounting_issues.append({
                 "page": page, "item": raw_title, "issue_type": "統計不符(單項)",
-                "common_reason": f"標題 {target_pc}PC != 內文 {actual_item_qty}",
+                "common_reason": f"標題 {target_pc}PC != 內文 {actual_item_qty} (規則:{u_local if u_local else '無'})",
                 "failures": [{"id": "目標", "val": target_pc}, {"id": "實際", "val": actual_item_qty}],
                 "source": "🐍 會計引擎"
             })
@@ -852,10 +866,11 @@ def python_accounting_audit(dimension_data, res_main):
                 if count > 2:
                      accounting_issues.append({"page": page, "item": raw_title, "issue_type": "⚠️編號重複警示(軸頸)", "common_reason": f"軸頸 {rid} 重複 {count}次", "failures": []})
 
-        # 2.3 運費計算 (擴充關鍵字)
-        is_fr_exempt = "豁免" in str(u_fr)
-        fr_conv_match = re.search(r"(\d+)\s*(?:PC|SET|PCS)?\s*=\s*1", str(u_fr), re.IGNORECASE)
-        # ⚡️ [新增] 運費預設目標判定：本體 + (未再生 OR 粗車)
+        # 2.3 運費計算 (使用 norm 字串)
+        is_fr_exempt = "豁免" in u_fr
+        # Regex 解釋：找 數字PC=1 或 數字SET=1
+        fr_conv_match = re.search(r"(\d+)[:=]1", u_fr_norm)
+        
         is_default_target = "本體" in title_clean and ("未再生" in title_clean or "粗車" in title_clean)
 
         freight_val_for_item = 0.0
@@ -874,7 +889,7 @@ def python_accounting_audit(dimension_data, res_main):
             freight_actual_sum += freight_val_for_item
             freight_details.append({"id": f"{raw_title}", "val": freight_val_for_item, "calc": freight_note})
 
-        # 2.4 總表對帳 (全面擴充關鍵字)
+        # 2.4 總表對帳
         for s_title, data in global_sum_tracker.items():
             match = False
             s_title_clean = clean_text(s_title)
@@ -885,18 +900,13 @@ def python_accounting_audit(dimension_data, res_main):
                     data["details"].append({"id": f"{raw_title}", "val": freight_val_for_item, "calc": freight_note})
                 continue 
             
-            # 總表籃子的屬性
             req_body = "本體" in s_title_clean
             req_journal = any(k in s_title_clean for k in ["軸頸", "內孔", "JOURNAL"])
-            # ⚡️ [新增] 籃子如果有「粗車」或「未再生」都算 Level 1
             req_unregen = "未再生" in s_title_clean or "粗車" in s_title_clean
-            # ⚡️ [新增] 籃子如果有「精車」或「再生」都算 Level 3
             req_regen_only = ("再生" in s_title_clean or "精車" in s_title_clean) and not req_unregen
             
-            # 單項的屬性
             is_item_body = "本體" in title_clean
             is_item_journal = any(k in title_clean for k in ["軸頸", "內孔", "JOURNAL"])
-            # ⚡️ [新增] 單項屬性判定
             is_item_unregen = "未再生" in title_clean or "粗車" in title_clean
             
             is_main_disassembly = "ROLL拆裝" in s_title_clean 
@@ -907,7 +917,6 @@ def python_accounting_audit(dimension_data, res_main):
                 if "組裝" in title_clean or "拆裝" in title_clean: match = True
             elif is_main_machining:
                 has_part = "軸頸" in title_clean or "本體" in title_clean
-                # ⚡️ [新增] 車修的定義：包含 (再生/精車) 或 (未再生/粗車)
                 has_action = any(k in title_clean for k in ["再生", "精車", "未再生", "粗車"])
                 if has_part and has_action: match = True
             elif is_main_welding:
@@ -944,7 +953,7 @@ def python_accounting_audit(dimension_data, res_main):
         })
         
     return accounting_issues
-    
+
 def python_process_audit(dimension_data):
     """
     Python 流程引擎 (通用原因合併版)
