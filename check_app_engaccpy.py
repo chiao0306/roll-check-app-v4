@@ -448,9 +448,9 @@ def python_engineering_audit(dimension_data):
 
 def assign_category_by_python(item_title):
     """
-    Python 分類官 (雙層控制版：Excel 強制 > 關鍵字判斷)
-    1. 優先讀取 rules.xlsx 的 Category_Rule 欄位。
-    2. 支援強制分類：Range(再生), Un_regen(本體), Max(軸頸), Min(銲補), Exempt(豁免)。
+    Python 分類官 (v4: 優先權邏輯修正版)
+    1. 修正「軸頸銲補」辨識問題：將「銲補(Min)」的檢查順序提前，優先於「軸頸(Max)」。
+    2. 優先順序：豁免 > 再生(Range) > 銲補(Min) > 軸頸(Max) > 本體(Un_regen)。
     """
     import pandas as pd
     from thefuzz import fuzz
@@ -470,56 +470,64 @@ def assign_category_by_python(item_title):
         best_score = 0
         forced_rule = None
         
-        # 建立簡單的查找 Map
         for _, row in df.iterrows():
             rule_val = str(row.get('Category_Rule', '')).strip()
-            # 如果這一行沒填 Category_Rule，就跳過
             if not rule_val or rule_val.lower() == 'nan': continue
             
             iname = str(row.get('Item_Name', '')).strip()
             iname_clean = clean_text(iname)
             
-            # 匹配邏輯 (同分決勝負)
+            # 同分決勝負匹配
             score = fuzz.partial_ratio(iname_clean, title_clean)
-            
-            # 嘗試脫殼
             if score < 95: 
-                 title_no_suffix = re.sub(r"[\(（].*?[\)）]", "", title_clean)
-                 score_no_suffix = fuzz.partial_ratio(iname_clean, title_no_suffix)
-                 if score_no_suffix > score: score = score_no_suffix
+                 t_no = re.sub(r"[\(（].*?[\)）]", "", title_clean)
+                 sc_no = fuzz.partial_ratio(iname_clean, t_no)
+                 if sc_no > score: score = sc_no
             
-            # 門檻 85
             if score > 85: 
                 if score > best_score:
                     best_score = score
                     forced_rule = rule_val
-        
-        # 解析強制規則
+                elif score == best_score:
+                    # 若分數相同，選規則字串較長的 (通常資訊較豐富)
+                    if len(rule_val) > len(forced_rule if forced_rule else ""):
+                        forced_rule = rule_val
+
+        # 解析強制規則 (🔥 修正順序：動詞 > 名詞)
         if forced_rule:
             fr = forced_rule.upper()
+            
+            # 1. 豁免 (最高)
             if "豁免" in fr or "EXEMPT" in fr: return "exempt"
+            
+            # 2. 區間 (Range) - 再生/精車
             if "再生" in fr or "精車" in fr or "RANGE" in fr: return "range"
-            if "本體" in fr or "UN_REGEN" in fr: return "un_regen"
-            if "軸頸" in fr or "MAX" in fr: return "max_limit"
+            
+            # 3. 下限 (Min) - 銲補 (🔥 放在軸頸之前！)
+            # 這樣 "軸頸銲補" 會先命中這裡，回傳 min_limit
             if "銲" in fr or "焊" in fr or "MIN" in fr: return "min_limit"
             
-    except Exception:
-        pass # 讀取失敗或沒找到，就降級為關鍵字判斷
+            # 4. 上限 (Max) - 軸頸 (不含銲補的情況)
+            if "軸頸" in fr or "MAX" in fr: return "max_limit"
+            
+            # 5. 整數 (Un_regen) - 本體
+            if "本體" in fr or "UN_REGEN" in fr: return "un_regen"
+            
+    except Exception: pass
 
     # --- 2. 原有的關鍵字判斷邏輯 (Fallback) ---
     t = str(item_title).upper().replace(" ", "").replace("\n", "").replace('"', "")
     
-    # LEVEL 1
+    # Priority 1: 銲補 (Min)
     if any(k in t for k in ["銲補", "銲接", "焊", "WELD"]): return "min_limit"
-    if any(k in t for k in ["組裝", "拆裝", "裝配", "真圓度", "ASSY"]): return "range"
+    
+    # Priority 2: 裝配/再生 (Range)
+    if any(k in t for k in ["再生", "研磨", "精加工", "車修", "KEYWAY", "GRIND", "MACHIN", "精車", "組裝", "拆裝", "裝配", "ASSY"]): return "range"
 
-    # LEVEL 2
+    # Priority 3: 未再生 (Max/Un_regen)
     if any(k in t for k in ["未再生", "UN_REGEN", "粗車"]):
         if any(k in t for k in ["軸頸", "內孔", "JOURNAL"]): return "max_limit"
         else: return "un_regen"
-
-    # LEVEL 3
-    if any(k in t for k in ["再生", "研磨", "精加工", "車修", "KEYWAY", "GRIND", "MACHIN", "精車"]): return "range"
 
     return "unknown"
 
@@ -848,11 +856,9 @@ def python_numerical_audit(dimension_data):
     
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官 (總表核對規則升級版 v5)
-    1. Unit_Rule_Agg 支援雙參數語法： "模式, 換算" (例如: "A, 2=1" 或 "豁免")
-       - 模式: A(強制一般比對), B(強制籃子), 豁免(不計入)
-       - 換算: X=Y (X個實體 = Y個總表計數)
-    2. 保留所有先前的智慧修復 (智慧脫殼、防彈清洗、同分決勝、頁碼顯示)。
+    Python 會計官 (v7: 支援 AB 混合模式)
+    1. Agg 規則新增 "AB" 模式：同時啟用 一般名稱比對(A) 與 籃子比對(B)，任一命中即計入。
+    2. 支援換算 (如 "AB, 2=1") 與豁免。
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -860,11 +866,10 @@ def python_accounting_audit(dimension_data, res_main):
     import re
     import pandas as pd 
 
-    # 🧽 基礎清洗工具
+    # 0. 基礎工具
     def clean_text(text):
         return str(text).replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
 
-    # 安全轉型工具
     def safe_float(value):
         if value is None or str(value).upper() == 'NULL': return 0.0
         if "[!]" in str(value): return "BAD_DATA" 
@@ -872,7 +877,7 @@ def python_accounting_audit(dimension_data, res_main):
         try: return float(cleaned) if cleaned else 0.0
         except: return 0.0
 
-    # 0. 預載 Excel 規則
+    # 1. 載入規則
     rules_map = {}
     try:
         df = pd.read_excel("rules.xlsx")
@@ -883,19 +888,13 @@ def python_accounting_audit(dimension_data, res_main):
                 rules_map[clean_text(iname)] = {
                     "u_local": str(row.get('Unit_Rule_Local', '')).strip(),
                     "u_fr": str(row.get('Unit_Rule_Freight', '')).strip(),
-                    "u_agg": str(row.get('Unit_Rule_Agg', '')).strip() # 讀取新定義的 Agg 規則
+                    "u_agg": str(row.get('Unit_Rule_Agg', '')).strip()
                 }
     except: pass 
 
-    # 1. 取得對帳基準
     summary_rows = res_main.get("summary_rows", [])
     global_sum_tracker = {
-        s['title']: {
-            "target": safe_float(s['target']), 
-            "actual": 0, 
-            "details": [],
-            "page": s.get('page', "總表")
-        } 
+        s['title']: {"target": safe_float(s['target']), "actual": 0, "details": [], "page": s.get('page', "總表")} 
         for s in summary_rows if s.get('title')
     }
     
@@ -910,41 +909,25 @@ def python_accounting_audit(dimension_data, res_main):
         page = item.get("page", "?")
         target_pc = safe_float(item.get("item_pc_target", 0)) 
         
-        # --- 🔍 查找 Excel 規則 ---
+        # 查找規則
         rule_set = rules_map.get(title_clean)
-        
-        # 策略 A: 智慧脫殼
         if not rule_set:
-            title_no_suffix = re.sub(r"[\(（].*?[\)）]", "", title_clean)
-            rule_set = rules_map.get(title_no_suffix)
-
-        # 策略 B: 模糊匹配 (含長度權重)
+            t_no = re.sub(r"[\(（].*?[\)）]", "", title_clean)
+            rule_set = rules_map.get(t_no)
         if not rule_set and rules_map:
             best_score = 0
-            best_len_diff = 999
-            
             for k, v in rules_map.items():
-                score = fuzz.partial_ratio(k, title_clean)
-                current_len_diff = abs(len(k) - len(title_clean))
-                
-                if score > 85:
-                    if score > best_score:
-                        best_score = score
-                        best_len_diff = current_len_diff
-                        rule_set = v
-                    elif score == best_score:
-                        if current_len_diff < best_len_diff:
-                            best_len_diff = current_len_diff
-                            rule_set = v
+                sc = fuzz.partial_ratio(k, title_clean)
+                if sc > 85 and sc > best_score:
+                    best_score = sc
+                    rule_set = v
         
         u_local = rule_set.get("u_local", "") if rule_set else ""
         u_fr = rule_set.get("u_fr", "") if rule_set else ""
-        u_agg = rule_set.get("u_agg", "") if rule_set else "" # 取得總表規則
+        u_agg = rule_set.get("u_agg", "") if rule_set else ""
 
-        # 正規化
         u_local_norm = u_local.upper().replace(" ", "").replace("　", "").replace("＝", "=").replace("：", "=").replace(":", "=")
         u_fr_norm = u_fr.upper().replace(" ", "").replace("　", "").replace("＝", "=").replace("：", "=").replace(":", "=")
-        # u_agg 不需要像這樣去空格，因為我們要用逗號分割
 
         ds = str(item.get("ds", ""))
         data_list = [pair.split(":") for pair in ds.split("|") if ":" in pair]
@@ -952,208 +935,162 @@ def python_accounting_audit(dimension_data, res_main):
         ids = [str(e[0]).strip() for e in data_list if len(e) > 0]
         id_counts = Counter(ids)
 
-        # === 2.1 單項數量計算 (Local) ===
+        # 2.1 單項數量
         is_local_exempt = "豁免" in u_local
         is_weight_mode = "KG" in title_clean.upper() or target_pc > 100
         
         if is_weight_mode:
             current_sum = 0
-            has_bad_sector = False
+            has_bad = False
             for e in data_list:
-                temp_val = safe_float(e[1])
-                if temp_val == "BAD_DATA": has_bad_sector = True
-                else: current_sum += temp_val
+                tv = safe_float(e[1])
+                if tv == "BAD_DATA": has_bad = True
+                else: current_sum += tv
             actual_item_qty = current_sum
-            
-            if has_bad_sector and not is_local_exempt:
-                accounting_issues.append({
-                    "page": page, "item": raw_title, 
-                    "issue_type": "⚠️資料異常",
-                    "common_reason": "包含無法辨識的數值/亂碼",
-                    "failures": [{"id": "警告", "val": "[!]", "calc": "資料異常請檢查"}]
-                })
+            if has_bad and not is_local_exempt:
+                accounting_issues.append({"page": page, "item": raw_title, "issue_type": "⚠️資料異常", "common_reason": "含無法辨識數值", "failures": [{"id": "警告", "val": "[!]", "calc": "異常"}]})
         else:
             conv_match = re.search(r"1SET=(\d+\.?\d*)", u_local_norm)
             if conv_match:
-                divisor = float(conv_match.group(1))
-                if divisor == 0: divisor = 1 
-                actual_item_qty = len(data_list) / divisor
+                div = float(conv_match.group(1))
+                actual_item_qty = len(data_list) / (div if div != 0 else 1)
             elif "PC=PC" in u_local_norm or "本體" in title_clean:
                 actual_item_qty = len(set(ids))
             else:
                 actual_item_qty = len(data_list)
 
         if not is_local_exempt and abs(actual_item_qty - target_pc) > 0.01 and target_pc > 0:
-            accounting_issues.append({
-                "page": page, "item": raw_title, "issue_type": "統計不符(單項)",
-                "common_reason": f"標題 {target_pc}PC != 內文 {actual_item_qty} (規則:{u_local if u_local else '無'})",
-                "failures": [{"id": "目標", "val": target_pc}, {"id": "實際", "val": actual_item_qty}],
-                "source": "🐍 會計引擎"
-            })
+            accounting_issues.append({"page": page, "item": raw_title, "issue_type": "統計不符(單項)", "common_reason": f"標題 {target_pc}PC != 內文 {actual_item_qty}", "failures": [{"id": "目標", "val": target_pc}, {"id": "實際", "val": actual_item_qty}], "source": "🐍 會計引擎"})
 
-        # === 2.2 重複性示警 ===
+        # 2.2 重複警示
         if "本體" in title_clean:
              for rid, count in id_counts.items():
-                if count > 1:
-                     accounting_issues.append({"page": page, "item": raw_title, "issue_type": "⚠️編號重複警示(本體)", "common_reason": f"本體 {rid} 重複 {count}次", "failures": []})
+                if count > 1: accounting_issues.append({"page": page, "item": raw_title, "issue_type": "⚠️編號重複(本體)", "common_reason": f"{rid} 重複 {count}次", "failures": []})
         elif any(k in title_clean for k in ["軸頸", "內孔", "JOURNAL"]):
              for rid, count in id_counts.items():
-                if count > 2:
-                     accounting_issues.append({"page": page, "item": raw_title, "issue_type": "⚠️編號重複警示(軸頸)", "common_reason": f"軸頸 {rid} 重複 {count}次", "failures": []})
+                if count > 2: accounting_issues.append({"page": page, "item": raw_title, "issue_type": "⚠️編號重複(軸頸)", "common_reason": f"{rid} 重複 {count}次", "failures": []})
 
-        # === 2.3 運費計算 (Freight) ===
+        # 2.3 運費
         is_fr_exempt = "豁免" in u_fr
         fr_conv_match = re.search(r"(\d+)[:=]1", u_fr_norm)
         is_default_target = "本體" in title_clean and ("未再生" in title_clean or "粗車" in title_clean)
+        freight_val = 0.0
+        f_note = ""
 
-        freight_val_for_item = 0.0
-        freight_note = ""
-
-        if is_fr_exempt: freight_val_for_item = 0.0
+        if is_fr_exempt: freight_val = 0.0
         elif fr_conv_match:
-            divisor = float(fr_conv_match.group(1))
-            freight_val_for_item = actual_item_qty / divisor
-            freight_note = f"計入 (/{int(divisor)})"
+            div = float(fr_conv_match.group(1))
+            freight_val = actual_item_qty / div
+            f_note = f"計入 (/{int(div)})"
         elif is_default_target:
-            freight_val_for_item = actual_item_qty
-            freight_note = "計入運費"
+            freight_val = actual_item_qty
+            f_note = "計入"
             
-        if freight_val_for_item > 0:
-            freight_actual_sum += freight_val_for_item
-            freight_details.append({"id": f"{raw_title}", "val": freight_val_for_item, "calc": freight_note})
+        if freight_val > 0:
+            freight_actual_sum += freight_val
+            freight_details.append({"id": f"{raw_title}", "val": freight_val, "calc": f_note})
 
-        # === 2.4 總表對帳 (⚡️ 修改重點：解析 Agg 規則) ===
-        
-        # A. 解析 Unit_Rule_Agg (格式: "A, 2=1" 或 "B" 或 "豁免")
-        agg_mode = "DEFAULT" # 預設: 自動判斷
-        agg_divisor = 1.0    # 預設: 1=1 (不換算)
+        # === 2.4 總表對帳 (含 AB 模式) ===
+        agg_mode = "B" 
+        agg_divisor = 1.0 
         
         if u_agg:
-            # 清洗並分割
             parts = str(u_agg).upper().replace(" ", "").split(",")
             for p in parts:
-                if "豁免" in p or "EXEMPT" in p:
-                    agg_mode = "EXEMPT"
-                elif p == "A":
-                    agg_mode = "A" # 強制一般比對
-                elif p == "B":
-                    agg_mode = "B" # 強制籃子 (通常此為預設，但可明確指定)
+                if "豁免" in p or "EXEMPT" in p: agg_mode = "EXEMPT"
+                elif p == "AB": agg_mode = "AB" # ⚡️ 新增
+                elif p == "A": agg_mode = "A"
+                elif p == "B": agg_mode = "B"
                 elif "=" in p:
-                    # 解析 X=Y (例如 2=1)
                     match = re.search(r"(\d+)\=(\d+)", p)
                     if match:
-                        left = float(match.group(1))
-                        right = float(match.group(2))
-                        if left > 0:
-                            # 換算比例: 實際數量 / 左 * 右
-                            # 2=1 => 實際/2*1 => 0.5倍
-                            agg_divisor = left / right
+                        l, r = float(match.group(1)), float(match.group(2))
+                        if l > 0: agg_divisor = l / r
 
-        # B. 應用豁免
-        if agg_mode == "EXEMPT":
-            continue # 🚀 直接跳過此項目的總表對帳
-
-        # C. 計算計入總表的數量 (應用換算)
-        qty_for_agg = actual_item_qty / agg_divisor
+        if agg_mode == "EXEMPT": continue 
+        qty_agg = actual_item_qty / agg_divisor
         
-        # D. 開始對帳迴圈
         for s_title, data in global_sum_tracker.items():
             match = False
-            s_title_clean = clean_text(s_title)
+            s_clean = clean_text(s_title)
             
-            # (運費欄位獨立處理，不參與 A/B 模式)
-            if "運費" in s_title_clean:
-                if freight_val_for_item > 0:
-                    data["actual"] += freight_val_for_item
-                    data["details"].append({"id": f"{raw_title}", "val": freight_val_for_item, "calc": freight_note})
+            if "運費" in s_clean:
+                if freight_val > 0:
+                    data["actual"] += freight_val
+                    data["details"].append({"id": raw_title, "val": freight_val, "calc": f_note})
                 continue 
             
-            # --- 模式邏輯分流 ---
+            match_A = (fuzz.partial_ratio(s_clean, title_clean) > 90)
             
-            # 籃子條件定義 (供 B 模式與 Default 使用)
-            is_main_disassembly = "ROLL拆裝" in s_title_clean 
-            is_main_machining = "ROLL車修" in s_title_clean   
-            is_main_welding = "ROLL銲補" in s_title_clean or "ROLL焊補" in s_title_clean 
-
-            # 單項屬性定義
-            is_item_body = "本體" in title_clean
-            is_item_journal = any(k in title_clean for k in ["軸頸", "內孔", "JOURNAL"])
-            has_action_machining = any(k in title_clean for k in ["再生", "精車", "未再生", "粗車"])
-            has_action_welding = ("銲補" in title_clean or "焊" in title_clean)
-            is_item_assy = ("組裝" in title_clean or "拆裝" in title_clean)
-
-            # 🛑 模式 A: 強制一般比對 (跳過所有籃子邏輯)
-            if agg_mode == "A":
-                 # 只有名字很像才算
-                 if fuzz.partial_ratio(s_title_clean, title_clean) > 90:
-                    match = True
+            match_B = False
+            is_dis = "ROLL拆裝" in s_clean
+            is_mac = "ROLL車修" in s_clean
+            is_weld = "ROLL銲補" in s_clean or "ROLL焊補" in s_clean
             
-            # 🚀 模式 B 或 Default: 籃子優先 + 名稱比對
-            else:
-                # 1. 嘗試進籃子
-                if is_main_disassembly:
-                    if is_item_assy: match = True
-                elif is_main_machining:
-                    if (is_item_body or is_item_journal) and has_action_machining: match = True
-                elif is_main_welding:
-                    if (is_item_body or is_item_journal) and has_action_welding: match = True
-                
-                # 2. 若沒進籃子，嘗試名稱比對 (Fallback)
-                if not match:
-                    if fuzz.partial_ratio(s_title_clean, title_clean) > 90:
-                        # 這裡要做一些負向排除，避免把「未再生」誤配到「再生」籃子 (若籃子有區分的話)
-                        # 您的總表籃子目前看起來是大鍋炒，所以這裡簡單處理即可
-                        
-                        # 簡單的防呆：如果總表寫"未再生"，但我這是"再生"，就不能配
-                        req_unregen = "未再生" in s_title_clean or "粗車" in s_title_clean
-                        req_regen_only = ("再生" in s_title_clean or "精車" in s_title_clean) and not req_unregen
-                        is_item_unregen = "未再生" in title_clean or "粗車" in title_clean
-                        
-                        match = True
-                        if req_unregen and not is_item_unregen: match = False
-                        elif req_regen_only and is_item_unregen: match = False
+            has_part = "本體" in title_clean or any(k in title_clean for k in ["軸頸", "內孔", "JOURNAL"])
+            has_act_mac = any(k in title_clean for k in ["再生", "精車", "未再生", "粗車"])
+            has_act_weld = ("銲補" in title_clean or "焊" in title_clean)
+            is_assy = ("組裝" in title_clean or "拆裝" in title_clean)
+
+            if is_dis and is_assy: match_B = True
+            elif is_mac and has_part and has_act_mac: match_B = True
+            elif is_weld and has_part and has_act_weld: match_B = True
+            
+            if match_B:
+                req_unregen = "未再生" in s_clean or "粗車" in s_clean
+                req_regen_only = ("再生" in s_clean or "精車" in s_clean) and not req_unregen
+                is_unregen = "未再生" in title_clean or "粗車" in title_clean
+                if req_unregen and not is_unregen: match_B = False
+                elif req_regen_only and is_unregen: match_B = False
+
+            # 模式判定
+            if agg_mode == "A": match = match_A
+            elif agg_mode == "AB": match = match_A or match_B # ⚡️
+            else: match = match_B if match_B else match_A
 
             if match:
-                data["actual"] += qty_for_agg
-                # 備註顯示換算邏輯
-                calc_msg = "計入"
-                if agg_divisor != 1.0:
-                    calc_msg = f"計入 (/{agg_divisor:.1f})"
-                
-                data["details"].append({"id": f"{raw_title} (P.{page})", "val": qty_for_agg, "calc": calc_msg})
+                data["actual"] += qty_agg
+                c_msg = f"計入 (/{agg_divisor:.1f})" if agg_divisor != 1.0 else "計入"
+                data["details"].append({"id": f"{raw_title} (P.{page})", "val": qty_agg, "calc": c_msg})
 
-    # 3. 結算異常
+    # 3. 異常結算
     for s_title, data in global_sum_tracker.items():
         if abs(data["actual"] - data["target"]) > 0.01 and data["target"] > 0:
-            accounting_issues.append({
-                "page": data["page"],  
-                "item": s_title, 
-                "issue_type": "統計不符(總帳)",
-                "common_reason": f"標註 {data['target']} != 實際 {data['actual']}",
-                "failures": [{"id": "🔍 基準", "val": data["target"]}] + data["details"] + [{"id": "🧮 實際", "val": data["actual"]}],
-                "source": "🐍 會計引擎"
-            })
+            accounting_issues.append({"page": data["page"], "item": s_title, "issue_type": "統計不符(總帳)", "common_reason": f"標註 {data['target']} != 實際 {data['actual']}", "failures": [{"id": "基準", "val": data["target"]}, {"id": "實際", "val": data["actual"]}], "source": "🐍 會計引擎"})
 
     if abs(freight_actual_sum - freight_target) > 0.01 and freight_target > 0:
-        accounting_issues.append({
-            "page": "總表", "item": "運費核對", "issue_type": "統計不符(運費)",
-            "common_reason": f"基準 {freight_target} != 實際 {freight_actual_sum}",
-            "failures": [{"id": "🚚 基準", "val": freight_target}] + freight_details + [{"id": "🧮 實際", "val": freight_actual_sum}],
-            "source": "🐍 會計引擎"
-        })
+        accounting_issues.append({"page": "總表", "item": "運費核對", "issue_type": "統計不符(運費)", "common_reason": f"基準 {freight_target} != 實際 {freight_actual_sum}", "failures": [{"id": "基準", "val": freight_target}, {"id": "實際", "val": freight_actual_sum}], "source": "🐍 會計引擎"})
         
     return accounting_issues
 
 def python_process_audit(dimension_data):
     """
-    Python 流程引擎 (關鍵字擴充：銲=焊)
-    1. 粗車 = 未再生 (Stage 1)
-    2. 銲補/焊補 = (Stage 2)
-    3. 精車 = 再生 (Stage 3)
+    Python 流程引擎 (v3: 完整支援 Process_Rule)
+    1. 支援從 Excel 讀取 'Process_Rule' 欄位。
+    2. 解析關鍵字：'本體/軸頸' 決定軌道, '未再生/銲補/再生/研磨' 決定工序。
+    3. 優先權：Excel 規則 > 標題關鍵字。
     """
     process_issues = []
     import re
-    
+    import pandas as pd
+    from thefuzz import fuzz
+
+    # 0. 清洗工具
+    def clean_text(text):
+        return str(text).replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
+
+    # 1. 預載 Excel Process_Rule
+    rules_map = {}
+    try:
+        df = pd.read_excel("rules.xlsx")
+        df.columns = [c.strip() for c in df.columns]
+        for _, row in df.iterrows():
+            iname = str(row.get('Item_Name', '')).strip()
+            p_rule = str(row.get('Process_Rule', '')).strip() # 讀取 Process_Rule
+            if iname and p_rule and p_rule.lower() != 'nan':
+                rules_map[clean_text(iname)] = p_rule
+    except: pass
+
     # 定義工序與名稱
     STAGE_MAP = {
         1: "未再生/粗車",
@@ -1169,40 +1106,79 @@ def python_process_audit(dimension_data):
     for item in dimension_data:
         p_num = item.get("page", "?")
         title = str(item.get("item_title", "")).strip()
+        title_clean = clean_text(title)
         ds = str(item.get("ds", ""))
         
-        # --- A. 軌道判斷 ---
+        # --- A. 決定 Track 與 Stage ---
         track = "Unknown"
-        if "本體" in title:
-            track = "本體"
-        elif any(k in title for k in ["軸頸", "內孔", "JOURNAL"]):
-            track = "軸頸"
-        else:
-            continue 
-
-        # --- B. 工序判斷 (⚡️ 修改點) ---
         stage = 0
-        if "研磨" in title:
-            stage = 4
-        # ⚡️ [修改] 只要標題有 "銲" 或 "焊" 都算 Stage 2
-        elif any(k in title for k in ["銲補", "銲接", "焊"]):
-            stage = 2
-        elif "未再生" in title or "粗車" in title:
-            stage = 1
-        elif "再生" in title or "精車" in title: 
-            stage = 3
-        
-        if stage == 0: continue 
+        forced_rule = None
 
-        # --- C. 數據解析 (維持不變) ---
+        # A-1. 查表
+        if rules_map:
+            # 模糊匹配邏輯 (同分決勝負)
+            best_score = 0
+            best_len = 999
+            
+            # 嘗試直接匹配
+            match = rules_map.get(title_clean)
+            if match: forced_rule = match
+            
+            # 嘗試脫殼匹配
+            if not forced_rule:
+                t_no = re.sub(r"[\(（].*?[\)）]", "", title_clean)
+                match = rules_map.get(t_no)
+                if match: forced_rule = match
+
+            # 嘗試 Fuzzy 匹配
+            if not forced_rule:
+                for k, v in rules_map.items():
+                    sc = fuzz.partial_ratio(k, title_clean)
+                    ld = abs(len(k) - len(title_clean))
+                    if sc > 85:
+                        if sc > best_score:
+                            best_score = sc
+                            best_len = ld
+                            forced_rule = v
+                        elif sc == best_score and ld < best_len:
+                            best_len = ld
+                            forced_rule = v
+
+        # A-2. 解析強制規則
+        if forced_rule:
+            fr = forced_rule.upper()
+            if "豁免" in fr or "EXEMPT" in fr: continue # 🚀 豁免
+
+            # 解析軌道 (若寫了 "軸頸銲補"，這裡會抓到 "軸頸")
+            if "本體" in fr: track = "本體"
+            elif "軸頸" in fr: track = "軸頸"
+            
+            # 解析工序 (若寫了 "軸頸銲補"，這裡會抓到 "銲")
+            if "未再生" in fr or "粗車" in fr: stage = 1
+            elif "銲" in fr or "焊" in fr: stage = 2
+            elif "再生" in fr or "精車" in fr: stage = 3
+            elif "研磨" in fr: stage = 4
+
+        # A-3. Fallback: 標題關鍵字自動判斷
+        if track == "Unknown":
+            if "本體" in title: track = "本體"
+            elif any(k in title for k in ["軸頸", "內孔", "JOURNAL"]): track = "軸頸"
+        
+        if stage == 0:
+            if "研磨" in title: stage = 4
+            elif any(k in title for k in ["銲補", "銲接", "焊"]): stage = 2
+            elif "未再生" in title or "粗車" in title: stage = 1
+            elif "再生" in title or "精車" in title: stage = 3
+        
+        if track == "Unknown" or stage == 0: continue 
+
+        # --- B. 數據解析 (維持不變) ---
         segments = ds.split("|")
         for seg in segments:
             parts = seg.split(":")
             if len(parts) < 2: continue
-            
             rid = parts[0].strip()
             val_str = parts[1].strip()
-            
             nums = re.findall(r"\d+\.?\d*", val_str)
             if not nums: continue
             val = float(nums[0])
@@ -1210,22 +1186,18 @@ def python_process_audit(dimension_data):
             key = (rid, track)
             if key not in history: history[key] = {}
             history[key][stage] = {
-                "val": val,
-                "page": p_num,
-                "title": title
+                "val": val, "page": p_num, "title": title
             }
 
-    # 2. 執行核心邏輯檢查 (維持不變)
+    # 2. 執行核心邏輯檢查
     for (rid, track), stages_data in history.items():
         present_stages = sorted(stages_data.keys())
         if not present_stages: continue
         max_stage = present_stages[-1]
         
-        # 溯源檢查
         missing_stages = []
         for req_s in range(1, max_stage):
-            if req_s not in stages_data:
-                missing_stages.append(STAGE_MAP[req_s])
+            if req_s not in stages_data: missing_stages.append(STAGE_MAP[req_s])
         
         if missing_stages:
             last_info = stages_data[max_stage]
@@ -1238,9 +1210,7 @@ def python_process_audit(dimension_data):
                 "source": "🐍 流程引擎"
             })
 
-        # 尺寸檢查
         size_rank = { 1: 10, 4: 20, 3: 30, 2: 40 }
-        
         for i in range(len(present_stages)):
             for j in range(i + 1, len(present_stages)):
                 s_a = present_stages[i]
@@ -1259,13 +1229,10 @@ def python_process_audit(dimension_data):
                     sign = "<" if expect_a_smaller else ">"
                     process_issues.append({
                         "page": info_b['page'],
-                        "item": f"[{track}] 尺寸邏輯檢查",
+                        "item": f"[{track}] 尺寸邏輯",
                         "issue_type": "🛑流程異常(尺寸倒置)",
                         "common_reason": f"尺寸邏輯錯誤：{STAGE_MAP[s_a]} 應 {sign} {STAGE_MAP[s_b]}",
-                        "failures": [
-                            {"id": f"{rid} ({STAGE_MAP[s_a]})", "val": info_a['val'], "calc": "前工序"},
-                            {"id": f"{rid} ({STAGE_MAP[s_b]})", "val": info_b['val'], "calc": "後工序"}
-                        ],
+                        "failures": [{"id": STAGE_MAP[s_a], "val": info_a['val'], "calc": "前"}, {"id": STAGE_MAP[s_b], "val": info_b['val'], "calc": "後"}],
                         "source": "🐍 流程引擎"
                     })
 
