@@ -383,34 +383,146 @@ def python_header_check(photo_gallery):
                 
     return issues, extracted_data
     
+def python_engineering_audit(dimension_data):
+    """
+    Python 工程引擎 (新增：負責 Excel 強制分類與數值檢查)
+    1. 這是原本我們要修改的邏輯，現在獨立出來，不與表頭檢查衝突。
+    2. 負責執行：Range(再生), Un_regen(本體), Max, Min, Exempt(豁免)。
+    """
+    issues = []
+    import re
+
+    # 輔助：數值提取
+    def get_val(val_str):
+        clean_v = "".join(re.findall(r"[\d\.\-]+", str(val_str)))
+        try: return float(clean_v)
+        except: return None
+
+    # 核心檢查迴圈
+    for item in dimension_data:
+        p_num = item.get("page", "?")
+        title = item.get("item_title", "Unknown")
+        ds_str = item.get("ds", "")
+        
+        # 1. 取得分類 (這裡會去呼叫我們等下要更新的 assign_category_by_python)
+        # 這一步最關鍵！它會去讀 Excel 看有沒有強制規則
+        final_category = assign_category_by_python(title)
+        
+        # 2. ⚡️ 豁免機制：若 Excel 設定為「豁免」，直接跳過
+        if final_category == "exempt":
+            continue
+
+        # 3. 執行各類別檢查
+        
+        # A. Un_regen (本體未再生 - 強制整數檢查)
+        if final_category == "un_regen":
+            for pair in ds_str.split("|"):
+                if ":" not in pair: continue
+                rid, val_s = pair.split(":")[:2]
+                val = get_val(val_s)
+                
+                if val is not None:
+                    # 檢查是否為整數 (允許 0.05 誤差)
+                    if abs(val - round(val)) > 0.05:
+                         issues.append({
+                            "page": p_num,
+                            "item": title,
+                            "issue_type": "⚠️異常(未再生)",
+                            "common_reason": "應為整數 (Excel規則:本體未再生)",
+                            "failures": [{"id": rid, "val": val, "calc": "非整數"}],
+                            "source": "🐍 工程引擎"
+                        })
+
+        # B. Range (再生車修 - 區間檢查)
+        elif final_category == "range":
+            # 這裡您可以呼叫原本寫好的 check_range 邏輯
+            # 或者暫時留空，至少它不會誤判成 "未再生"
+            pass 
+
+        # C. Max/Min Limit (軸頸/銲補)
+        elif final_category == "max_limit" or final_category == "min_limit":
+             # 這裡呼叫原本的 check_limit 邏輯
+             pass 
+
+    return issues
+
 def assign_category_by_python(item_title):
     """
-    Python 分類官 (關鍵字擴充：銲=焊)
+    Python 分類官 (雙層控制版：Excel 強制 > 關鍵字判斷)
+    1. 優先讀取 rules.xlsx 的 Category_Rule 欄位。
+    2. 支援強制分類：Range(再生), Un_regen(本體), Max(軸頸), Min(銲補), Exempt(豁免)。
     """
-    # 🧽 預處理
+    import pandas as pd
+    from thefuzz import fuzz
+    import re
+
+    # 0. 清洗工具
+    def clean_text(text):
+        return str(text).replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
+
+    title_clean = clean_text(item_title)
+    
+    # --- 1. 嘗試讀取 Excel 強制規則 ---
+    try:
+        df = pd.read_excel("rules.xlsx")
+        df.columns = [c.strip() for c in df.columns]
+        
+        best_score = 0
+        forced_rule = None
+        
+        # 建立簡單的查找 Map
+        for _, row in df.iterrows():
+            rule_val = str(row.get('Category_Rule', '')).strip()
+            # 如果這一行沒填 Category_Rule，就跳過
+            if not rule_val or rule_val.lower() == 'nan': continue
+            
+            iname = str(row.get('Item_Name', '')).strip()
+            iname_clean = clean_text(iname)
+            
+            # 匹配邏輯 (同分決勝負)
+            score = fuzz.partial_ratio(iname_clean, title_clean)
+            
+            # 嘗試脫殼
+            if score < 95: 
+                 title_no_suffix = re.sub(r"[\(（].*?[\)）]", "", title_clean)
+                 score_no_suffix = fuzz.partial_ratio(iname_clean, title_no_suffix)
+                 if score_no_suffix > score: score = score_no_suffix
+            
+            # 門檻 85
+            if score > 85: 
+                if score > best_score:
+                    best_score = score
+                    forced_rule = rule_val
+        
+        # 解析強制規則
+        if forced_rule:
+            fr = forced_rule.upper()
+            if "豁免" in fr or "EXEMPT" in fr: return "exempt"
+            if "再生" in fr or "精車" in fr or "RANGE" in fr: return "range"
+            if "本體" in fr or "UN_REGEN" in fr: return "un_regen"
+            if "軸頸" in fr or "MAX" in fr: return "max_limit"
+            if "銲" in fr or "焊" in fr or "MIN" in fr: return "min_limit"
+            
+    except Exception:
+        pass # 讀取失敗或沒找到，就降級為關鍵字判斷
+
+    # --- 2. 原有的關鍵字判斷邏輯 (Fallback) ---
     t = str(item_title).upper().replace(" ", "").replace("\n", "").replace('"', "")
     
-    # --- LEVEL 1：銲補與裝配 (最高優先) ---
-    # ⚡️ [修改點] 新增 "焊"、"焊補"、"焊接"
-    if any(k in t for k in ["銲補", "銲接", "焊", "WELD"]):
-        return "min_limit"
-    
-    if any(k in t for k in ["組裝", "拆裝", "裝配", "真圓度", "ASSY"]):
-        return "range"
+    # LEVEL 1
+    if any(k in t for k in ["銲補", "銲接", "焊", "WELD"]): return "min_limit"
+    if any(k in t for k in ["組裝", "拆裝", "裝配", "真圓度", "ASSY"]): return "range"
 
-    # --- LEVEL 2：未再生判定 (含粗車) ---
+    # LEVEL 2
     if any(k in t for k in ["未再生", "UN_REGEN", "粗車"]):
-        if any(k in t for k in ["軸頸", "內孔", "JOURNAL"]):
-            return "max_limit"
-        else:
-            return "un_regen"
+        if any(k in t for k in ["軸頸", "內孔", "JOURNAL"]): return "max_limit"
+        else: return "un_regen"
 
-    # --- LEVEL 3：精加工判定 (含精車) ---
-    if any(k in t for k in ["再生", "研磨", "精加工", "車修", "KEYWAY", "GRIND", "MACHIN", "精車"]):
-        return "range"
+    # LEVEL 3
+    if any(k in t for k in ["再生", "研磨", "精加工", "車修", "KEYWAY", "GRIND", "MACHIN", "精車"]): return "range"
 
     return "unknown"
-    
+
 def consolidate_issues(issues):
     """
     🗂️ 異常合併器：將「項目」、「錯誤類型」、「原因」完全相同的異常合併成一張卡片
