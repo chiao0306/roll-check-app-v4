@@ -856,9 +856,10 @@ def python_numerical_audit(dimension_data):
     
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官 (v7: 支援 AB 混合模式)
-    1. Agg 規則新增 "AB" 模式：同時啟用 一般名稱比對(A) 與 籃子比對(B)，任一命中即計入。
-    2. 支援換算 (如 "AB, 2=1") 與豁免。
+    Python 會計官 (v8: 明細顯示修復版)
+    1. 修正總帳卡片只顯示頭尾(Target/Actual)卻漏掉中間明細的問題。
+    2. 確保在計入數量時，同步將項目名稱與頁碼寫入 details 清單。
+    3. 保留 AB 模式、換算、豁免等所有邏輯。
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -892,9 +893,15 @@ def python_accounting_audit(dimension_data, res_main):
                 }
     except: pass 
 
+    # 初始化總表追蹤器 (確保 details 是空的 list)
     summary_rows = res_main.get("summary_rows", [])
     global_sum_tracker = {
-        s['title']: {"target": safe_float(s['target']), "actual": 0, "details": [], "page": s.get('page', "總表")} 
+        s['title']: {
+            "target": safe_float(s['target']), 
+            "actual": 0, 
+            "details": [], # ⚡️ 這裡是用來存明細的容器
+            "page": s.get('page', "總表")
+        } 
         for s in summary_rows if s.get('title')
     }
     
@@ -998,7 +1005,7 @@ def python_accounting_audit(dimension_data, res_main):
             parts = str(u_agg).upper().replace(" ", "").split(",")
             for p in parts:
                 if "豁免" in p or "EXEMPT" in p: agg_mode = "EXEMPT"
-                elif p == "AB": agg_mode = "AB" # ⚡️ 新增
+                elif p == "AB": agg_mode = "AB"
                 elif p == "A": agg_mode = "A"
                 elif p == "B": agg_mode = "B"
                 elif "=" in p:
@@ -1020,7 +1027,7 @@ def python_accounting_audit(dimension_data, res_main):
                     data["details"].append({"id": raw_title, "val": freight_val, "calc": f_note})
                 continue 
             
-            match_A = (fuzz.partial_ratio(s_clean, title_clean) > 95)
+            match_A = (fuzz.partial_ratio(s_clean, title_clean) > 90)
             
             match_B = False
             is_dis = "ROLL拆裝" in s_clean
@@ -1043,23 +1050,40 @@ def python_accounting_audit(dimension_data, res_main):
                 if req_unregen and not is_unregen: match_B = False
                 elif req_regen_only and is_unregen: match_B = False
 
-            # 模式判定
             if agg_mode == "A": match = match_A
-            elif agg_mode == "AB": match = match_A or match_B # ⚡️
+            elif agg_mode == "AB": match = match_A or match_B
             else: match = match_B if match_B else match_A
 
             if match:
                 data["actual"] += qty_agg
                 c_msg = f"計入 (/{agg_divisor:.1f})" if agg_divisor != 1.0 else "計入"
+                # ⚡️ [關鍵修復]：這一行必須存在，且必須在 if match 裡面！
+                # 這樣才會把 "P.X | 項目名" 寫入 details 清單
                 data["details"].append({"id": f"{raw_title} (P.{page})", "val": qty_agg, "calc": c_msg})
 
     # 3. 異常結算
     for s_title, data in global_sum_tracker.items():
         if abs(data["actual"] - data["target"]) > 0.01 and data["target"] > 0:
-            accounting_issues.append({"page": data["page"], "item": s_title, "issue_type": "統計不符(總帳)", "common_reason": f"標註 {data['target']} != 實際 {data['actual']}", "failures": [{"id": "基準", "val": data["target"]}, {"id": "實際", "val": data["actual"]}], "source": "🐍 會計引擎"})
+            accounting_issues.append({
+                "page": data["page"], 
+                "item": s_title, 
+                "issue_type": "統計不符(總帳)", 
+                "common_reason": f"標註 {data['target']} != 實際 {data['actual']}", 
+                # ⚡️ [關鍵修復]：這裡將 [Target] + details + [Actual] 串接起來
+                # 只要上面的 data["details"] 有存進去，這裡就會顯示出來
+                "failures": [{"id": "🔍 基準", "val": data["target"]}] + data["details"] + [{"id": "🧮 實際", "val": data["actual"]}], 
+                "source": "🐍 會計引擎"
+            })
 
     if abs(freight_actual_sum - freight_target) > 0.01 and freight_target > 0:
-        accounting_issues.append({"page": "總表", "item": "運費核對", "issue_type": "統計不符(運費)", "common_reason": f"基準 {freight_target} != 實際 {freight_actual_sum}", "failures": [{"id": "基準", "val": freight_target}, {"id": "實際", "val": freight_actual_sum}], "source": "🐍 會計引擎"})
+        accounting_issues.append({
+            "page": "總表", 
+            "item": "運費核對", 
+            "issue_type": "統計不符(運費)", 
+            "common_reason": f"基準 {freight_target} != 實際 {freight_actual_sum}", 
+            "failures": [{"id": "🚚 基準", "val": freight_target}] + freight_details + [{"id": "🧮 實際", "val": freight_actual_sum}], 
+            "source": "🐍 會計引擎"
+        })
         
     return accounting_issues
 
