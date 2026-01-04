@@ -737,9 +737,9 @@ def python_numerical_audit(dimension_data):
 
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官 (防彈版)
-    1. 強力清洗規則字串：支援全形轉半形、去除所有空格，確保 Regex 100% 命中。
-    2. 浮點數容錯：使用 0.01 誤差範圍取代 != 絕對比對。
+    Python 會計官 (智慧匹配修復版)
+    1. 規則查找升級：若精準匹配失敗，自動嘗試「脫殼」(移除標題括號) 與「部分匹配」。
+    2. 規則字串清洗：保留防彈級的字元正規化 (全形轉半形)。
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -791,20 +791,30 @@ def python_accounting_audit(dimension_data, res_main):
         page = item.get("page", "?")
         target_pc = safe_float(item.get("item_pc_target", 0)) 
         
-        # 查找規則
+        # --- 🔍 查找 Excel 規則 (⚡️ 邏輯升級區) ---
         rule_set = rules_map.get(title_clean)
+        
+        # 策略 A: 如果直接沒找到，嘗試「脫殼」：把括號 (2SET) 拿掉再找一次
+        if not rule_set:
+            # 移除 (xxx) 或 （xxx） 的內容
+            title_no_suffix = re.sub(r"[\(（].*?[\)）]", "", title_clean)
+            rule_set = rules_map.get(title_no_suffix)
+
+        # 策略 B: 如果還是沒找到，改用 Partial Ratio (像 Debug 看板一樣寬容)
+        # 只要規則名稱完整出現在標題裡 (e.g. "車修" 在 "車修(2SET)" 裡面)，就算命中
         if not rule_set and rules_map:
             best_score = 0
             for k, v in rules_map.items():
-                score = fuzz.ratio(k, title_clean)
-                if score > 95 and score > best_score:
+                # 改用 partial_ratio，並將門檻設為 90
+                score = fuzz.partial_ratio(k, title_clean)
+                if score > 90 and score > best_score:
                     best_score = score
                     rule_set = v
+        
         u_local = rule_set.get("u_local", "") if rule_set else ""
         u_fr = rule_set.get("u_fr", "") if rule_set else ""
 
-        # ⚡️ [新增] 強力正規化規則字串 (轉大寫、去空、轉半形、統一等號)
-        # 這樣 1SET＝3PC (全形) 或 1SET:3PC 都會變成 1SET=3PC
+        # --- 以下邏輯保持不變 (字串清洗與計算) ---
         u_local_norm = u_local.upper().replace(" ", "").replace("　", "").replace("＝", "=").replace("：", "=").replace(":", "=")
         u_fr_norm = u_fr.upper().replace(" ", "").replace("　", "").replace("＝", "=").replace("：", "=").replace(":", "=")
 
@@ -814,7 +824,7 @@ def python_accounting_audit(dimension_data, res_main):
         ids = [str(e[0]).strip() for e in data_list if len(e) > 0]
         id_counts = Counter(ids)
 
-        # --- 2.1 單項數量計算 ---
+        # 2.1 單項數量計算
         is_local_exempt = "豁免" in u_local
         is_weight_mode = "KG" in title_clean.upper() or target_pc > 100
         
@@ -833,13 +843,11 @@ def python_accounting_audit(dimension_data, res_main):
                     "failures": [{"id": "警告", "val": "[!]", "calc": "數據損毀"}]
                 })
         else:
-            # 🔢 數量模式 (使用 norm 字串 + 簡化版 Regex)
-            # Regex 解釋：找 1SET=數字，允許小數點
+            # 🔢 數量模式
             conv_match = re.search(r"1SET=(\d+\.?\d*)", u_local_norm)
             
             if conv_match:
                 divisor = float(conv_match.group(1))
-                # 防呆：除數不能為 0
                 if divisor == 0: divisor = 1 
                 actual_item_qty = len(data_list) / divisor
             elif "PC=PC" in u_local_norm or "本體" in title_clean:
@@ -847,7 +855,6 @@ def python_accounting_audit(dimension_data, res_main):
             else:
                 actual_item_qty = len(data_list)
 
-        # ⚡️ [修改] 使用 abs > 0.01 避免浮點數誤差 (例如 2.0000001 != 2)
         if not is_local_exempt and abs(actual_item_qty - target_pc) > 0.01 and target_pc > 0:
             accounting_issues.append({
                 "page": page, "item": raw_title, "issue_type": "統計不符(單項)",
@@ -866,9 +873,8 @@ def python_accounting_audit(dimension_data, res_main):
                 if count > 2:
                      accounting_issues.append({"page": page, "item": raw_title, "issue_type": "⚠️編號重複警示(軸頸)", "common_reason": f"軸頸 {rid} 重複 {count}次", "failures": []})
 
-        # 2.3 運費計算 (使用 norm 字串)
+        # 2.3 運費計算
         is_fr_exempt = "豁免" in u_fr
-        # Regex 解釋：找 數字PC=1 或 數字SET=1
         fr_conv_match = re.search(r"(\d+)[:=]1", u_fr_norm)
         
         is_default_target = "本體" in title_clean and ("未再生" in title_clean or "粗車" in title_clean)
