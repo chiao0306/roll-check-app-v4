@@ -737,10 +737,9 @@ def python_numerical_audit(dimension_data):
 
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官 (最終完美版)
-    1. 智慧匹配：加入「同分決勝負」機制。若分數相同，選擇長度差異最小的規則。
-       (解決 partial_ratio 導致 "輥輪" 與 "輥輪組裝" 同分的問題)
-    2. 包含所有之前的修復：智慧脫殼、防彈清洗、85分門檻。
+    Python 會計官 (用語優化 + 完美匹配版)
+    1. 用語修正：將「壞軌/數據損毀」改為「資料異常請檢查」，更符合使用者直覺。
+    2. 核心邏輯：保留所有智慧匹配功能 (同分決勝負、智慧脫殼、防彈清洗)。
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -792,7 +791,7 @@ def python_accounting_audit(dimension_data, res_main):
         page = item.get("page", "?")
         target_pc = safe_float(item.get("item_pc_target", 0)) 
         
-        # --- 🔍 查找 Excel 規則 (⚡️ 同分決勝負升級版) ---
+        # --- 🔍 查找 Excel 規則 (保留完美邏輯) ---
         rule_set = rules_map.get(title_clean)
         
         # 策略 A: 智慧脫殼
@@ -803,18 +802,12 @@ def python_accounting_audit(dimension_data, res_main):
         # 策略 B: 模糊匹配 (含長度權重)
         if not rule_set and rules_map:
             best_score = 0
-            best_len_diff = 999  # 記錄最小的長度差
+            best_len_diff = 999
             
             for k, v in rules_map.items():
                 score = fuzz.partial_ratio(k, title_clean)
-                
-                # 計算長度差 (Target - Rule 的絕對值)
-                # 我們希望找到跟 target 長度最像的 rule
                 current_len_diff = abs(len(k) - len(title_clean))
                 
-                # 判斷邏輯：
-                # 1. 新分數更高 -> 直接換人
-                # 2. 分數一樣高 BUT 長度差更小 -> 換人 (這就是解決同分的關鍵)
                 if score > 85:
                     if score > best_score:
                         best_score = score
@@ -824,12 +817,10 @@ def python_accounting_audit(dimension_data, res_main):
                         if current_len_diff < best_len_diff:
                             best_len_diff = current_len_diff
                             rule_set = v
-                            # 這裡不需要更新 best_score，因為是一樣的
         
         u_local = rule_set.get("u_local", "") if rule_set else ""
         u_fr = rule_set.get("u_fr", "") if rule_set else ""
 
-        # --- 以下邏輯保持不變 ---
         u_local_norm = u_local.upper().replace(" ", "").replace("　", "").replace("＝", "=").replace("：", "=").replace(":", "=")
         u_fr_norm = u_fr.upper().replace(" ", "").replace("　", "").replace("＝", "=").replace("：", "=").replace(":", "=")
 
@@ -851,11 +842,14 @@ def python_accounting_audit(dimension_data, res_main):
                 if temp_val == "BAD_DATA": has_bad_sector = True
                 else: current_sum += temp_val
             actual_item_qty = current_sum
+            
+            # ⚡️ [修正] 顯示文字優化
             if has_bad_sector and not is_local_exempt:
                 accounting_issues.append({
-                    "page": page, "item": raw_title, "issue_type": "⚠️數據損毀",
-                    "common_reason": "含無法辨識重量",
-                    "failures": [{"id": "警告", "val": "[!]", "calc": "數據損毀"}]
+                    "page": page, "item": raw_title, 
+                    "issue_type": "⚠️資料異常",  # 原本是 "數據損毀"
+                    "common_reason": "包含無法辨識的數值/亂碼",
+                    "failures": [{"id": "警告", "val": "[!]", "calc": "資料異常請檢查"}] # 原本是 "數據損毀"
                 })
         else:
             conv_match = re.search(r"1SET=(\d+\.?\d*)", u_local_norm)
