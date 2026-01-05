@@ -856,9 +856,12 @@ def python_numerical_audit(dimension_data):
     
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官 (v17: 軸頭擴充版)
-    1. [關鍵字擴充]: 加入「軸頭」= 軸頸 (限次檢查 + 互斥鎖)。
-    2. 保留 KEYWAY 互斥、SKIP、Batch Total。
+    Python 會計官 (v18: 直觀計數 + 運費擴充版)
+    1. [計數邏輯修改]: 移除對「本體」的強制去重。現在預設「有幾行編號就算幾個 (Raw Count)」。
+       - 即使編號重複，數量也會照算 (例如 2 行一樣的 ID = 2 PC)。
+       - 但保留「重複異警」功能，若發現重複仍會報錯提醒。
+    2. [運費擴充]: 將「新品組裝」納入預設運費計算範圍。
+    3. 保留 KEYWAY 互斥、SKIP、Batch Total 等所有功能。
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -866,6 +869,7 @@ def python_accounting_audit(dimension_data, res_main):
     import re
     import pandas as pd 
 
+    # 0. 基礎工具
     def clean_text(text):
         return str(text).replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
 
@@ -876,6 +880,7 @@ def python_accounting_audit(dimension_data, res_main):
         try: return float(cleaned) if cleaned else 0.0
         except: return 0.0
 
+    # 1. 載入規則 & 總表基準
     rules_map = {}
     try:
         df = pd.read_excel("rules.xlsx")
@@ -905,6 +910,7 @@ def python_accounting_audit(dimension_data, res_main):
     freight_actual_sum = 0
     freight_details = []
 
+    # 2. 逐項過帳
     for item in dimension_data:
         raw_title = item.get("item_title", "")
         title_clean = clean_text(raw_title) 
@@ -913,6 +919,7 @@ def python_accounting_audit(dimension_data, res_main):
         
         batch_qty = safe_float(item.get("batch_total_qty", 0))
         
+        # 查找規則
         rule_set = rules_map.get(title_clean)
         if not rule_set:
             t_no = re.sub(r"[\(（].*?[\)）]", "", title_clean)
@@ -935,14 +942,22 @@ def python_accounting_audit(dimension_data, res_main):
         ds = str(item.get("ds", ""))
         data_list = [pair.split(":") for pair in ds.split("|") if ":" in pair]
         
-        if not data_list: raw_count = 0
+        # 💡 [v18 修改重點]: 計算原始數量 (Raw Count)
+        if not data_list: 
+            raw_count = 0
         else:
             ids = [str(e[0]).strip() for e in data_list if len(e) > 0]
-            if "PC=PC" in u_local_norm or "本體" in title_clean: raw_count = len(set(ids))
-            else: raw_count = len(data_list)
+            # 只有當 Excel 明確寫了 "PC=PC" 時才強制去重
+            # 否則預設採計「行數」(即使本體或軸頸有重複編號，數量照算，警示另計)
+            if "PC=PC" in u_local_norm: 
+                raw_count = len(set(ids))
+            else:
+                raw_count = len(data_list)
         
+        # 這是用來檢查重複的計數器 (獨立於數量計算)
         id_counts = Counter([str(e[0]).strip() for e in data_list if len(e)>0])
 
+        # === 2.1 單項數量核對 ===
         is_local_exempt = "豁免" in u_local or "SKIP" in u_local.upper() or "EXEMPT" in u_local.upper()
         
         actual_item_qty = 0
@@ -960,17 +975,22 @@ def python_accounting_audit(dimension_data, res_main):
             if not is_local_exempt and abs(actual_item_qty - target_pc) > 0.01 and target_pc > 0:
                  accounting_issues.append({"page": page, "item": raw_title, "issue_type": "統計不符(單項)", "common_reason": f"標題 {target_pc}PC != 內文 {actual_item_qty}", "failures": [{"id": "目標", "val": target_pc}, {"id": "實際", "val": actual_item_qty}], "source": "🐍 會計引擎"})
 
+        # === 2.2 重複警示 (保留) ===
+        # 雖然數量照算，但如果發現重複，還是要報警
         if "本體" in title_clean:
              for rid, count in id_counts.items():
                 if count > 1: accounting_issues.append({"page": page, "item": raw_title, "issue_type": "⚠️編號重複(本體)", "common_reason": f"{rid} 重複 {count}次", "failures": []})
-        # ⚡️ [擴充] 加入 "軸頭"
         elif any(k in title_clean for k in ["軸頸", "軸頭", "內孔", "JOURNAL"]):
              for rid, count in id_counts.items():
                 if count > 2: accounting_issues.append({"page": page, "item": raw_title, "issue_type": "⚠️編號重複(軸頸)", "common_reason": f"{rid} 重複 {count}次", "failures": []})
 
+        # === 2.3 運費計算 ===
         is_fr_exempt = "豁免" in u_fr or "SKIP" in u_fr.upper() or "EXEMPT" in u_fr.upper()
         fr_conv_match = re.search(r"(\d+\.?\d*)[^\d=]*=[^\d=]*1", u_fr_norm)
-        is_default_target = "本體" in title_clean and ("未再生" in title_clean or "粗車" in title_clean)
+        
+        # 💡 [v18 修改重點]: 加入 "新品組裝"
+        is_default_target = ("本體" in title_clean and "未再生" in title_clean) or ("新品組裝" in title_clean) or ("計入" in u_fr)
+        
         freight_val = 0.0
         f_note = ""
 
@@ -987,6 +1007,7 @@ def python_accounting_audit(dimension_data, res_main):
             freight_actual_sum += freight_val
             freight_details.append({"id": f"{raw_title}", "val": freight_val, "calc": f_note})
 
+        # === 2.4 總表對帳 ===
         agg_mode = "B" 
         agg_divisor = 1.0
         
@@ -1006,6 +1027,7 @@ def python_accounting_audit(dimension_data, res_main):
 
         if agg_mode == "EXEMPT": continue 
         
+        # 數量計算分流 (若有換算公式，回溯原始數量)
         if batch_qty > 0:
             qty_agg = batch_qty 
         elif agg_divisor != 1.0:
@@ -1023,6 +1045,7 @@ def python_accounting_audit(dimension_data, res_main):
                     data["details"].append({"id": raw_title, "val": freight_val, "calc": f_note})
                 continue 
             
+            # --- 模式匹配 ---
             match_A = (fuzz.partial_ratio(s_clean, title_clean) > 90)
             
             if batch_qty > 0 and match_A:
@@ -1033,7 +1056,6 @@ def python_accounting_audit(dimension_data, res_main):
                 is_mac = "ROLL車修" in s_clean
                 is_weld = "ROLL銲補" in s_clean or "ROLL焊補" in s_clean
                 
-                # ⚡️ [擴充] 加入 "軸頭"
                 has_part = "本體" in title_clean or any(k in title_clean for k in ["軸頸", "軸頭", "JOURNAL"])
                 has_act_mac = any(k in title_clean for k in ["再生", "精車", "未再生", "粗車"])
                 has_act_weld = ("銲補" in title_clean or "焊" in title_clean)
@@ -1047,6 +1069,7 @@ def python_accounting_audit(dimension_data, res_main):
                 elif agg_mode == "AB": match = match_A or match_B
                 else: match = match_B if match_B else match_A
 
+            # --- 互斥鎖 ---
             if match:
                 sum_unregen = "未再生" in s_clean or "粗車" in s_clean
                 sum_regen = ("再生" in s_clean or "精車" in s_clean) and not sum_unregen
@@ -1058,15 +1081,17 @@ def python_accounting_audit(dimension_data, res_main):
                 item_weld = "銲補" in title_clean or "焊" in title_clean
                 item_keyway = "KEYWAY" in title_clean
 
+                # 動作互斥
                 if sum_weld and (item_unregen or item_regen) and not item_weld: match = False
                 elif sum_unregen and (item_regen or item_weld): match = False
                 elif sum_regen and (item_unregen or item_weld): match = False
                 
+                # KEYWAY 互斥
                 if sum_keyway and (item_unregen or item_regen or item_weld) and not item_keyway: match = False
                 if item_keyway and (sum_unregen or sum_regen or sum_weld) and not sum_keyway: match = False
 
+                # 部位互斥 (加入軸頭)
                 sum_body = "本體" in s_clean
-                # ⚡️ [擴充] 加入 "軸頭"
                 sum_journal = any(k in s_clean for k in ["軸頸", "軸頭", "內孔", "JOURNAL"])
                 item_body = "本體" in title_clean
                 item_journal = any(k in title_clean for k in ["軸頸", "軸頭", "內孔", "JOURNAL"])
@@ -1079,6 +1104,7 @@ def python_accounting_audit(dimension_data, res_main):
                 c_msg = "計入總量" if batch_qty > 0 else (f"計入 (/{agg_divisor:.1f})" if agg_divisor != 1.0 else "計入")
                 data["details"].append({"id": f"{raw_title} (P.{page})", "val": qty_agg, "calc": c_msg})
 
+    # 3. 異常結算
     for s_title, data in global_sum_tracker.items():
         if abs(data["actual"] - data["target"]) > 0.01 and data["target"] > 0:
             accounting_issues.append({
