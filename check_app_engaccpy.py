@@ -448,22 +448,20 @@ def python_engineering_audit(dimension_data):
 
 def assign_category_by_python(item_title):
     """
-    Python 分類官 (v7: SKIP 擴充版)
-    1. 關鍵字擴充：加入「SKIP」= 豁免 (Exempt)。
-    2. 保留 Excel 規則、互斥鎖與其他分類邏輯。
+    Python 分類官 (v8: 軸頭擴充版)
+    1. [關鍵字擴充]: 加入「軸頭」= 軸頸 (Max Limit)。
+    2. 保留 SKIP、Exempt 與其他規則。
     """
     import pandas as pd
     from thefuzz import fuzz
     import re
 
-    # 0. 清洗工具
     def clean_text(text):
         return str(text).replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
 
     title_clean = clean_text(item_title)
     t = str(item_title).upper().replace(" ", "").replace("\n", "").replace('"', "")
 
-    # --- 1. 嘗試讀取 Excel 強制規則 ---
     try:
         df = pd.read_excel("rules.xlsx")
         df.columns = [c.strip() for c in df.columns]
@@ -494,24 +492,24 @@ def assign_category_by_python(item_title):
 
         if forced_rule:
             fr = forced_rule.upper()
-            # ⚡️ [擴充] 加入 "SKIP"
             if "豁免" in fr or "EXEMPT" in fr or "SKIP" in fr: return "exempt"
             
             if "再生" in fr or "精車" in fr or "RANGE" in fr: return "range"
             if "銲" in fr or "焊" in fr or "MIN" in fr: return "min_limit"
-            if "軸頸" in fr or "MAX" in fr: return "max_limit"
+            # ⚡️ [擴充] 加入 "軸頭"
+            if "軸頸" in fr or "軸頭" in fr or "MAX" in fr: return "max_limit"
             if "本體" in fr or "UN_REGEN" in fr: return "un_regen"
             
     except Exception: pass
 
-    # --- 2. 互斥鎖邏輯 ---
     has_weld = any(k in t for k in ["銲補", "銲接", "焊", "WELD", "鉀"])
     has_unregen = any(k in t for k in ["未再生", "UN_REGEN", "粗車"])
     has_regen = any(k in t for k in ["再生", "研磨", "精加工", "車修", "KEYWAY", "GRIND", "MACHIN", "精車", "組裝", "拆裝", "裝配", "ASSY"])
     
     if has_weld: return "min_limit"
     if has_unregen:
-        if any(k in t for k in ["軸頸", "內孔", "JOURNAL"]): return "max_limit"
+        # ⚡️ [擴充] 加入 "軸頭"
+        if any(k in t for k in ["軸頸", "軸頭", "內孔", "JOURNAL"]): return "max_limit"
         return "un_regen"
     if has_regen: return "range"
 
@@ -695,11 +693,9 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
 
 def python_numerical_audit(dimension_data):
     """
-    Python 工程引擎 (v23: 誤殺修復版)
-    1. [核心修復]: 修正 Logic B (波浪號) 的攔截邏輯。
-       - 舊版: 遇到 "130-0.085" 會誤判為區間，雖因防呆未加入，但仍執行 continue 導致 Logic C 被跳過。
-       - 新版: 只有在「成功解析出合理區間」時才攔截，否則放行給 Logic C 處理公差。
-    2. 保留 v22 的逗號保護、換行切割、finditer 全面搜索。
+    Python 工程引擎 (v24: 軸頭擴充 + 逗號修復版)
+    1. [關鍵字擴充]: 加入「軸頭」= 軸頸 (Max Limit, 排除 Un_regen)。
+    2. [逗號修復]: 延續 v22，移除 split 逗號，支援 "+0.3, +0.8"。
     """
     grouped_errors = {}
     import re
@@ -721,14 +717,12 @@ def python_numerical_audit(dimension_data):
         clean_std = [n for n in all_nums if (n in mm_nums) or (n not in noise and n > 5)]
 
         s_ranges = []
-        # v22: 移除逗號切割，保留雙公差完整性
         spec_parts = re.split(r"[\n\r]|[一二三四五六]|[（(]\d+[)）]|[;；]", raw_spec)
         
         for part in spec_parts:
             clean_part = part.replace(" ", "").replace("\n", "").replace("mm", "").replace("MM", "").strip()
             if not clean_part: continue
             
-            # --- 邏輯 A：± (全面搜索) ---
             pm_matches = list(re.finditer(r"(\d+\.?\d*)?±(\d+\.?\d*)", clean_part))
             if pm_matches:
                 for match in pm_matches:
@@ -738,26 +732,17 @@ def python_numerical_audit(dimension_data):
                     s_ranges.append([round(b - o, 4), round(b + o, 4)])
                 continue 
 
-            # --- 邏輯 B：波浪號區間 (v23 修復點) ---
-            # 這裡很容易把減號公差 (130-0.05) 誤判為區間，所以要加上放行機制
             tilde_matches = list(re.finditer(r"(\d+\.?\d*)[~～-](\d+\.?\d*)", clean_part))
-            has_valid_tilde = False # 🏳️ 標記：是否有任何一個匹配通過了防呆檢查
-            
+            has_valid_tilde = False
             if tilde_matches:
                 for match in tilde_matches:
                     n1, n2 = float(match.group(1)), float(match.group(2))
-                    # 防呆：如果是真區間，兩個數字通常很接近 (例如 130~135)
-                    # 如果差太大 (例如 130 和 0.085)，那就是公差，不是區間
                     if abs(n1 - n2) < n1 * 0.5:
                         s_ranges.append([round(min(n1, n2), 4), round(max(n1, n2), 4)])
                         has_valid_tilde = True
             
-            # ⚡️ 只有當「真的抓到了有效區間」時，才跳過後面的 Logic C
-            # 如果只是誤判了減號公差，就讓它繼續往下走，給 Logic C 處理
-            if has_valid_tilde:
-                continue
+            if has_valid_tilde: continue
 
-            # --- 邏輯 C：萬用偏移量解析 (處理 -0.085, -0.125) ---
             all_numbers = re.findall(r"[-+]?\d+\.?\d*", clean_part)
             if not all_numbers: continue
 
@@ -786,7 +771,8 @@ def python_numerical_audit(dimension_data):
         else:
             s_threshold = logic.get("t", 0)
             un_regen_target = None
-            if l_type in ["un_regen", "未再生"] or ("未再生" in (cat + title) and "軸頸" not in (cat + title)):
+            # ⚡️ [擴充] un_regen 條件：有未再生 且 無軸頸/軸頭
+            if l_type in ["un_regen", "未再生"] or ("未再生" in (cat + title) and not any(k in (cat + title) for k in ["軸頸", "軸頭"])):
                 cands = [n for n in clean_std if n >= 120.0]
                 if s_threshold and float(s_threshold) >= 120.0: cands.append(float(s_threshold))
                 if cands: un_regen_target = max(cands)
@@ -835,7 +821,8 @@ def python_numerical_audit(dimension_data):
                     elif not is_two_dec: 
                         is_passed, reason = False, "應填兩位小數"
 
-                elif l_type == "max_limit" or (("軸頸" in (cat + title)) and ("未再生" in (cat + title))):
+                # ⚡️ [擴充] 軸頸/軸頭上限檢查
+                elif l_type == "max_limit" or (any(k in (cat + title) for k in ["軸頸", "軸頭"]) and ("未再生" in (cat + title))):
                     engine_label = "軸頸(上限)"
                     candidates = clean_std
                     target = max(candidates) if candidates else 0
@@ -869,11 +856,9 @@ def python_numerical_audit(dimension_data):
     
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官 (v16: KEYWAY 互斥鎖版)
-    1. [新增互斥鎖]: 加入 "KEYWAY" 與 (未再生/再生/銲補) 的全面互斥。
-       - 總表是 KEYWAY -> 踢除 未再生/再生/銲補。
-       - 總表是 未再生/再生/銲補 -> 踢除 KEYWAY。
-    2. 保留批量總數(batch_total_qty)、SKIP 豁免、雙向換算等所有功能。
+    Python 會計官 (v17: 軸頭擴充版)
+    1. [關鍵字擴充]: 加入「軸頭」= 軸頸 (限次檢查 + 互斥鎖)。
+    2. 保留 KEYWAY 互斥、SKIP、Batch Total。
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -881,7 +866,6 @@ def python_accounting_audit(dimension_data, res_main):
     import re
     import pandas as pd 
 
-    # 0. 基礎工具
     def clean_text(text):
         return str(text).replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
 
@@ -892,7 +876,6 @@ def python_accounting_audit(dimension_data, res_main):
         try: return float(cleaned) if cleaned else 0.0
         except: return 0.0
 
-    # 1. 載入規則 & 總表基準
     rules_map = {}
     try:
         df = pd.read_excel("rules.xlsx")
@@ -922,7 +905,6 @@ def python_accounting_audit(dimension_data, res_main):
     freight_actual_sum = 0
     freight_details = []
 
-    # 2. 逐項過帳
     for item in dimension_data:
         raw_title = item.get("item_title", "")
         title_clean = clean_text(raw_title) 
@@ -931,7 +913,6 @@ def python_accounting_audit(dimension_data, res_main):
         
         batch_qty = safe_float(item.get("batch_total_qty", 0))
         
-        # 查找規則
         rule_set = rules_map.get(title_clean)
         if not rule_set:
             t_no = re.sub(r"[\(（].*?[\)）]", "", title_clean)
@@ -962,7 +943,6 @@ def python_accounting_audit(dimension_data, res_main):
         
         id_counts = Counter([str(e[0]).strip() for e in data_list if len(e)>0])
 
-        # === 2.1 單項數量核對 ===
         is_local_exempt = "豁免" in u_local or "SKIP" in u_local.upper() or "EXEMPT" in u_local.upper()
         
         actual_item_qty = 0
@@ -980,15 +960,14 @@ def python_accounting_audit(dimension_data, res_main):
             if not is_local_exempt and abs(actual_item_qty - target_pc) > 0.01 and target_pc > 0:
                  accounting_issues.append({"page": page, "item": raw_title, "issue_type": "統計不符(單項)", "common_reason": f"標題 {target_pc}PC != 內文 {actual_item_qty}", "failures": [{"id": "目標", "val": target_pc}, {"id": "實際", "val": actual_item_qty}], "source": "🐍 會計引擎"})
 
-        # 2.2 重複警示
         if "本體" in title_clean:
              for rid, count in id_counts.items():
                 if count > 1: accounting_issues.append({"page": page, "item": raw_title, "issue_type": "⚠️編號重複(本體)", "common_reason": f"{rid} 重複 {count}次", "failures": []})
-        elif any(k in title_clean for k in ["軸頸", "內孔", "JOURNAL"]):
+        # ⚡️ [擴充] 加入 "軸頭"
+        elif any(k in title_clean for k in ["軸頸", "軸頭", "內孔", "JOURNAL"]):
              for rid, count in id_counts.items():
                 if count > 2: accounting_issues.append({"page": page, "item": raw_title, "issue_type": "⚠️編號重複(軸頸)", "common_reason": f"{rid} 重複 {count}次", "failures": []})
 
-        # 2.3 運費計算
         is_fr_exempt = "豁免" in u_fr or "SKIP" in u_fr.upper() or "EXEMPT" in u_fr.upper()
         fr_conv_match = re.search(r"(\d+\.?\d*)[^\d=]*=[^\d=]*1", u_fr_norm)
         is_default_target = "本體" in title_clean and ("未再生" in title_clean or "粗車" in title_clean)
@@ -1008,7 +987,6 @@ def python_accounting_audit(dimension_data, res_main):
             freight_actual_sum += freight_val
             freight_details.append({"id": f"{raw_title}", "val": freight_val, "calc": f_note})
 
-        # === 2.4 總表對帳 ===
         agg_mode = "B" 
         agg_divisor = 1.0
         
@@ -1055,7 +1033,8 @@ def python_accounting_audit(dimension_data, res_main):
                 is_mac = "ROLL車修" in s_clean
                 is_weld = "ROLL銲補" in s_clean or "ROLL焊補" in s_clean
                 
-                has_part = "本體" in title_clean or any(k in title_clean for k in ["軸頸", "JOURNAL"])
+                # ⚡️ [擴充] 加入 "軸頭"
+                has_part = "本體" in title_clean or any(k in title_clean for k in ["軸頸", "軸頭", "JOURNAL"])
                 has_act_mac = any(k in title_clean for k in ["再生", "精車", "未再生", "粗車"])
                 has_act_weld = ("銲補" in title_clean or "焊" in title_clean)
                 is_assy = ("組裝" in title_clean or "拆裝" in title_clean)
@@ -1068,38 +1047,30 @@ def python_accounting_audit(dimension_data, res_main):
                 elif agg_mode == "AB": match = match_A or match_B
                 else: match = match_B if match_B else match_A
 
-            # ⚡️ 互斥鎖 (Conflict Check)
             if match:
-                # 1. 提取屬性
                 sum_unregen = "未再生" in s_clean or "粗車" in s_clean
                 sum_regen = ("再生" in s_clean or "精車" in s_clean) and not sum_unregen
                 sum_weld = "銲補" in s_clean or "焊" in s_clean
-                # ⚡️ [新增] KEYWAY 屬性
                 sum_keyway = "KEYWAY" in s_clean
                 
                 item_unregen = "未再生" in title_clean or "粗車" in title_clean
                 item_regen = ("再生" in title_clean or "精車" in title_clean) and not item_unregen
                 item_weld = "銲補" in title_clean or "焊" in title_clean
-                # ⚡️ [新增] KEYWAY 屬性
                 item_keyway = "KEYWAY" in title_clean
 
-                # 2. 動作互斥規則
-                # (A) 既有規則
                 if sum_weld and (item_unregen or item_regen) and not item_weld: match = False
                 elif sum_unregen and (item_regen or item_weld): match = False
                 elif sum_regen and (item_unregen or item_weld): match = False
                 
-                # (B) ⚡️ [新增] KEYWAY 互斥規則
-                # 如果總表是 KEYWAY，但項目是 未再生/再生/銲補 (且不是 KEYWAY) -> 踢除
                 if sum_keyway and (item_unregen or item_regen or item_weld) and not item_keyway: match = False
-                # 如果總表是 未再生/再生/銲補，但項目是 KEYWAY -> 踢除
                 if item_keyway and (sum_unregen or sum_regen or sum_weld) and not sum_keyway: match = False
 
-                # 3. 部位互斥規則
                 sum_body = "本體" in s_clean
-                sum_journal = any(k in s_clean for k in ["軸頸", "內孔", "JOURNAL"])
+                # ⚡️ [擴充] 加入 "軸頭"
+                sum_journal = any(k in s_clean for k in ["軸頸", "軸頭", "內孔", "JOURNAL"])
                 item_body = "本體" in title_clean
-                item_journal = any(k in title_clean for k in ["軸頸", "內孔", "JOURNAL"])
+                item_journal = any(k in title_clean for k in ["軸頸", "軸頭", "內孔", "JOURNAL"])
+                
                 if sum_body and not sum_journal and item_journal: match = False
                 if sum_journal and not sum_body and item_body: match = False
 
@@ -1108,7 +1079,6 @@ def python_accounting_audit(dimension_data, res_main):
                 c_msg = "計入總量" if batch_qty > 0 else (f"計入 (/{agg_divisor:.1f})" if agg_divisor != 1.0 else "計入")
                 data["details"].append({"id": f"{raw_title} (P.{page})", "val": qty_agg, "calc": c_msg})
 
-    # 3. 異常結算
     for s_title, data in global_sum_tracker.items():
         if abs(data["actual"] - data["target"]) > 0.01 and data["target"] > 0:
             accounting_issues.append({
@@ -1132,20 +1102,18 @@ def python_accounting_audit(dimension_data, res_main):
 
 def python_process_audit(dimension_data):
     """
-    Python 流程引擎 (v19: SKIP 擴充版)
-    1. [關鍵字擴充]: 若 Process_Rule 填寫 "SKIP"，視為豁免，不進行流程檢查。
-    2. 保留嚴格 ID 比對、強制大寫、錯字擴充(鉀)與互斥鎖。
+    Python 流程引擎 (v20: 軸頭擴充版)
+    1. [關鍵字擴充]: 加入「軸頭」= 軸頸軌道。
+    2. 保留 SKIP、嚴格 ID 比對、鉀字容錯。
     """
     process_issues = []
     import re
     import pandas as pd
     from thefuzz import fuzz
 
-    # 0. 清洗工具
     def clean_text(text):
         return str(text).replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
 
-    # 1. 預載 Excel Process_Rule
     rules_map = {}
     try:
         df = pd.read_excel("rules.xlsx")
@@ -1162,14 +1130,12 @@ def python_process_audit(dimension_data):
 
     if not dimension_data: return []
 
-    # --- 步驟 1: 蒐集數據 ---
     for item in dimension_data:
         p_num = item.get("page", "?")
         title = str(item.get("item_title", "")).strip()
         title_clean = clean_text(title)
         ds = str(item.get("ds", ""))
         
-        # A. 決定 Track 與 Stage
         track = "Unknown"
         stage = 0
         forced_rule = None
@@ -1184,11 +1150,12 @@ def python_process_audit(dimension_data):
         
         if forced_rule:
             fr = forced_rule.upper()
-            # ⚡️ [擴充] 加入 "SKIP"
             if "豁免" in fr or "EXEMPT" in fr or "SKIP" in fr: continue 
             
             if "本體" in fr: track = "本體"
-            elif "軸頸" in fr: track = "軸頸"
+            # ⚡️ [擴充] 加入 "軸頭"
+            elif "軸頸" in fr or "軸頭" in fr: track = "軸頸"
+            
             if "未再生" in fr or "粗車" in fr: stage = 1
             elif "銲" in fr or "焊" in fr or "鉀" in fr: stage = 2
             elif "再生" in fr or "精車" in fr: stage = 3
@@ -1202,11 +1169,11 @@ def python_process_audit(dimension_data):
 
         if track == "Unknown":
             if "本體" in title: track = "本體"
-            elif any(k in title for k in ["軸頸", "內孔", "JOURNAL"]): track = "軸頸"
+            # ⚡️ [擴充] 加入 "軸頭"
+            elif any(k in title for k in ["軸頸", "軸頭", "內孔", "JOURNAL"]): track = "軸頸"
         
         if track == "Unknown" or stage == 0: continue 
 
-        # B. 數據解析
         segments = ds.split("|")
         for seg in segments:
             parts = seg.split(":")
@@ -1223,7 +1190,6 @@ def python_process_audit(dimension_data):
                 "val": val, "page": p_num, "title": title
             }
 
-    # --- 步驟 2: 執行檢查 ---
     for (rid, track), stages_data in history.items():
         present_stages = sorted(stages_data.keys())
         if not present_stages: continue
