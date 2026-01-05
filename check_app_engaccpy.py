@@ -867,11 +867,12 @@ def python_numerical_audit(dimension_data):
     
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官 (v27: 運費長字串指紋版)
-    1. [運費識別特化]: 應您的要求，改用「輥輪拆裝.車修或銲補運費」整串字去比對。
-       - 優點: 即使 OCR 把 "運費" 讀成 "運貨"，因為前面的 "輥輪拆裝..." 都對，相似度依然很高，能準確抓到。
-    2. [機制]: 使用 fuzz.partial_ratio > 70 作為判定標準。
-    3. 保留連鎖計算、1/X 分數解析、互斥鎖等所有功能。
+    Python 會計官 (v28: Top/Bottom 互斥鎖版)
+    1. [互斥鎖升級]: 新增 "TOP" 與 "BOTTOM" 的絕對互斥。
+       - 如果總表是 TOP，會踢除 BOTTOM 的項目。
+       - 如果總表是 BOTTOM，會踢除 TOP 的項目。
+    2. [運費邏輯]: 維持 v27 的長字串指紋 + 模糊比對。
+    3. [其他]: 保留連鎖計算、1/X 分數解析。
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -1028,22 +1029,13 @@ def python_accounting_audit(dimension_data, res_main):
             match = False
             s_clean = clean_text(s_title)
             
-            # 💡 [v27 重點修改]：使用「輥輪拆裝.車修或銲補運費」長字串指紋
+            # --- 運費識別 (保留 v27 的長字串指紋) ---
             target_freight_str = "輥輪拆裝.車修或銲補運費"
-            
-            # 1. 核心判定：長字串模糊比對 (權重最高)
-            # 即使 s_clean 變成 "輥輪拆裝.車修或銲補運貨"，分數也會非常高 (>90)
             f_score = fuzz.partial_ratio(target_freight_str, s_clean)
-            
             is_freight = False
-            if f_score > 70:
-                is_freight = True
-            
-            # 2. 輔助判定：保留原本的 "運費" 關鍵字 (避免總表忽然只寫 "運費" 兩個字)
-            elif "運費" in s_clean:
-                is_freight = True
-            elif "FREIGHT" in s_clean:
-                is_freight = True
+            if f_score > 70: is_freight = True
+            elif "運費" in s_clean: is_freight = True
+            elif "FREIGHT" in s_clean: is_freight = True
 
             if is_freight:
                 if freight_val > 0:
@@ -1075,6 +1067,7 @@ def python_accounting_audit(dimension_data, res_main):
                 else: match = match_B if match_B else match_A
 
             if match:
+                # 1. 動作/KEYWAY 互斥 (既有)
                 sum_unregen = "未再生" in s_clean or "粗車" in s_clean
                 sum_regen = ("再生" in s_clean or "精車" in s_clean) and not sum_unregen
                 sum_weld = "銲補" in s_clean or "焊" in s_clean
@@ -1092,6 +1085,7 @@ def python_accounting_audit(dimension_data, res_main):
                 if sum_keyway and (item_unregen or item_regen or item_weld) and not item_keyway: match = False
                 if item_keyway and (sum_unregen or sum_regen or sum_weld) and not sum_keyway: match = False
 
+                # 2. 部位互斥 (既有)
                 sum_body = "本體" in s_clean
                 sum_journal = any(k in s_clean for k in ["軸頸", "軸頭", "內孔", "JOURNAL"])
                 item_body = "本體" in title_clean
@@ -1099,6 +1093,21 @@ def python_accounting_audit(dimension_data, res_main):
                 
                 if sum_body and not sum_journal and item_journal: match = False
                 if sum_journal and not sum_body and item_body: match = False
+
+                # 3. ⚡️ [新增] TOP / BOTTOM 互斥鎖
+                # 把標題轉大寫來比對
+                s_upper = s_clean.upper()
+                t_upper = title_clean.upper()
+                
+                sum_top = "TOP" in s_upper
+                sum_bottom = "BOTTOM" in s_upper
+                
+                item_top = "TOP" in t_upper
+                item_bottom = "BOTTOM" in t_upper
+                
+                # 規則：如果總表有寫 TOP/BOTTOM，就啟動嚴格檢查
+                if sum_top and item_bottom: match = False
+                if sum_bottom and item_top: match = False
 
             if match:
                 data["actual"] += qty_agg
