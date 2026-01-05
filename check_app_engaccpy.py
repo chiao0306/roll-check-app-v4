@@ -847,9 +847,11 @@ def python_numerical_audit(dimension_data):
     
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官 (v15: SKIP 擴充版)
-    1. [關鍵字擴充]: Local, Agg, Freight 規則中，若出現 "SKIP"，均視為豁免(Exempt)。
-    2. 保留批量總數(batch_total_qty)、雙向換算、互斥鎖等所有功能。
+    Python 會計官 (v16: KEYWAY 互斥鎖版)
+    1. [新增互斥鎖]: 加入 "KEYWAY" 與 (未再生/再生/銲補) 的全面互斥。
+       - 總表是 KEYWAY -> 踢除 未再生/再生/銲補。
+       - 總表是 未再生/再生/銲補 -> 踢除 KEYWAY。
+    2. 保留批量總數(batch_total_qty)、SKIP 豁免、雙向換算等所有功能。
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -939,7 +941,6 @@ def python_accounting_audit(dimension_data, res_main):
         id_counts = Counter([str(e[0]).strip() for e in data_list if len(e)>0])
 
         # === 2.1 單項數量核對 ===
-        # ⚡️ [擴充] 加入 "SKIP"
         is_local_exempt = "豁免" in u_local or "SKIP" in u_local.upper() or "EXEMPT" in u_local.upper()
         
         actual_item_qty = 0
@@ -966,7 +967,6 @@ def python_accounting_audit(dimension_data, res_main):
                 if count > 2: accounting_issues.append({"page": page, "item": raw_title, "issue_type": "⚠️編號重複(軸頸)", "common_reason": f"{rid} 重複 {count}次", "failures": []})
 
         # 2.3 運費計算
-        # ⚡️ [擴充] 加入 "SKIP"
         is_fr_exempt = "豁免" in u_fr or "SKIP" in u_fr.upper() or "EXEMPT" in u_fr.upper()
         fr_conv_match = re.search(r"(\d+\.?\d*)[^\d=]*=[^\d=]*1", u_fr_norm)
         is_default_target = "本體" in title_clean and ("未再生" in title_clean or "粗車" in title_clean)
@@ -994,7 +994,6 @@ def python_accounting_audit(dimension_data, res_main):
             parts = str(u_agg).upper().split(",")
             for p in parts:
                 p_clean = p.replace(" ", "")
-                # ⚡️ [擴充] 加入 "SKIP"
                 if "豁免" in p_clean or "EXEMPT" in p_clean or "SKIP" in p_clean: agg_mode = "EXEMPT"
                 elif p_clean == "AB": agg_mode = "AB"
                 elif p_clean == "A": agg_mode = "A"
@@ -1047,16 +1046,34 @@ def python_accounting_audit(dimension_data, res_main):
                 elif agg_mode == "AB": match = match_A or match_B
                 else: match = match_B if match_B else match_A
 
+            # ⚡️ 互斥鎖 (Conflict Check)
             if match:
+                # 1. 提取屬性
                 sum_unregen = "未再生" in s_clean or "粗車" in s_clean
                 sum_regen = ("再生" in s_clean or "精車" in s_clean) and not sum_unregen
                 sum_weld = "銲補" in s_clean or "焊" in s_clean
+                # ⚡️ [新增] KEYWAY 屬性
+                sum_keyway = "KEYWAY" in s_clean
+                
                 item_unregen = "未再生" in title_clean or "粗車" in title_clean
                 item_regen = ("再生" in title_clean or "精車" in title_clean) and not item_unregen
                 item_weld = "銲補" in title_clean or "焊" in title_clean
+                # ⚡️ [新增] KEYWAY 屬性
+                item_keyway = "KEYWAY" in title_clean
+
+                # 2. 動作互斥規則
+                # (A) 既有規則
                 if sum_weld and (item_unregen or item_regen) and not item_weld: match = False
                 elif sum_unregen and (item_regen or item_weld): match = False
                 elif sum_regen and (item_unregen or item_weld): match = False
+                
+                # (B) ⚡️ [新增] KEYWAY 互斥規則
+                # 如果總表是 KEYWAY，但項目是 未再生/再生/銲補 (且不是 KEYWAY) -> 踢除
+                if sum_keyway and (item_unregen or item_regen or item_weld) and not item_keyway: match = False
+                # 如果總表是 未再生/再生/銲補，但項目是 KEYWAY -> 踢除
+                if item_keyway and (sum_unregen or sum_regen or sum_weld) and not sum_keyway: match = False
+
+                # 3. 部位互斥規則
                 sum_body = "本體" in s_clean
                 sum_journal = any(k in s_clean for k in ["軸頸", "內孔", "JOURNAL"])
                 item_body = "本體" in title_clean
