@@ -448,8 +448,8 @@ def python_engineering_audit(dimension_data):
 
 def assign_category_by_python(item_title):
     """
-    Python 分類官 (v8: 軸頭擴充版)
-    1. [關鍵字擴充]: 加入「軸頭」= 軸頸 (Max Limit)。
+    Python 分類官 (v9: 軸位擴充版)
+    1. [關鍵字擴充]: 加入「軸位」= 軸頸 = 軸頭 (Max Limit)。
     2. 保留 SKIP、Exempt 與其他規則。
     """
     import pandas as pd
@@ -496,8 +496,8 @@ def assign_category_by_python(item_title):
             
             if "再生" in fr or "精車" in fr or "RANGE" in fr: return "range"
             if "銲" in fr or "焊" in fr or "MIN" in fr: return "min_limit"
-            # ⚡️ [擴充] 加入 "軸頭"
-            if "軸頸" in fr or "軸頭" in fr or "MAX" in fr: return "max_limit"
+            # ⚡️ [擴充] 加入 "軸位"
+            if "軸頸" in fr or "軸頭" in fr or "軸位" in fr or "MAX" in fr: return "max_limit"
             if "本體" in fr or "UN_REGEN" in fr: return "un_regen"
             
     except Exception: pass
@@ -508,8 +508,8 @@ def assign_category_by_python(item_title):
     
     if has_weld: return "min_limit"
     if has_unregen:
-        # ⚡️ [擴充] 加入 "軸頭"
-        if any(k in t for k in ["軸頸", "軸頭", "內孔", "JOURNAL"]): return "max_limit"
+        # ⚡️ [擴充] 加入 "軸位"
+        if any(k in t for k in ["軸頸", "軸頭", "軸位", "內孔", "JOURNAL"]): return "max_limit"
         return "un_regen"
     if has_regen: return "range"
 
@@ -692,12 +692,10 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
 
 def python_numerical_audit(dimension_data):
     """
-    Python 工程引擎 (v25: 權重修正版)
-    1. [權重修正]: 確立「Excel 強制規則 > 標題關鍵字」的原則。
-       - 舊版: 標題若含 "未再生"，會無視 category="range" 強制進入未再生檢查。
-       - 新版: 若 l_type 明確指定為 "range" / "max_limit" / "min_limit"，直接跳過未再生判定。
-    2. [邏輯解鎖]: Logic D (精加工) 加入 l_type == "range" 直通車，允許標題含 "未再生" 的項目進行區間檢查。
-    3. 保留 v24 的軸頭擴充、逗號修復、finditer 全面搜索。
+    Python 工程引擎 (v26: 軸位擴充版)
+    1. [關鍵字擴充]: 加入「軸位」= 軸頸 (Max Limit, 排除 Un_regen)。
+    2. [權重維持]: 保持 v25 的「Excel 強制規則優先」邏輯。
+    3. 保留 v24 的逗號修復、finditer 全面搜索。
     """
     grouped_errors = {}
     import re
@@ -769,20 +767,18 @@ def python_numerical_audit(dimension_data):
         logic = item.get("sl", {})
         l_type = logic.get("lt", "")
         
-        # 4. 預算基準 (v25 修正重點：優先權調整)
+        # 4. 預算基準
         if "SKIP" in l_type.upper() or "EXEMPT" in l_type.upper() or "豁免" in l_type:
             un_regen_target = None
             
-        # ⚡️ [修正] 若 Excel 強制指定了 range/max/min，絕對不准算 un_regen_target
-        # 這樣才能避免 "未再生" 的關鍵字霸權
         elif l_type in ["range", "max_limit", "min_limit"]:
             un_regen_target = None
             
         else:
             s_threshold = logic.get("t", 0)
             un_regen_target = None
-            # 只有當沒有強制規則時，才允許 "未再生" 關鍵字生效
-            if l_type in ["un_regen", "未再生"] or ("未再生" in (cat + title) and not any(k in (cat + title) for k in ["軸頸", "軸頭"])):
+            # ⚡️ [擴充] un_regen 條件：有未再生 且 無軸頸/軸頭/軸位
+            if l_type in ["un_regen", "未再生"] or ("未再生" in (cat + title) and not any(k in (cat + title) for k in ["軸頸", "軸頭", "軸位"])):
                 cands = [n for n in clean_std if n >= 120.0]
                 if s_threshold and float(s_threshold) >= 120.0: cands.append(float(s_threshold))
                 if cands: un_regen_target = max(cands)
@@ -831,7 +827,8 @@ def python_numerical_audit(dimension_data):
                     elif not is_two_dec: 
                         is_passed, reason = False, "應填兩位小數"
 
-                elif l_type == "max_limit" or (any(k in (cat + title) for k in ["軸頸", "軸頭"]) and ("未再生" in (cat + title))):
+                # ⚡️ [擴充] 軸頸/軸頭/軸位上限檢查
+                elif l_type == "max_limit" or (any(k in (cat + title) for k in ["軸頸", "軸頭", "軸位"]) and ("未再生" in (cat + title))):
                     engine_label = "軸頸(上限)"
                     candidates = clean_std
                     target = max(candidates) if candidates else 0
@@ -840,8 +837,6 @@ def python_numerical_audit(dimension_data):
                         if not is_pure_int: is_passed, reason = False, "應為純整數"
                         elif val > target: is_passed, reason = False, f"超過上限 {target}"
 
-                # ⚡️ [修正] Logic D：只要 l_type 是 "range"，就無條件進入區間檢查
-                # 這樣就算標題有 "未再生"，只要 Excel 規則說是 range，就能進來這裡驗區間
                 elif l_type == "range" or (any(x in (cat + title) for x in ["再生", "精加工", "研磨", "車修", "組裝", "拆裝", "真圓度"]) and "未再生" not in (cat + title)):
                     engine_label = "精加工"
                     if not is_two_dec:
@@ -867,12 +862,9 @@ def python_numerical_audit(dimension_data):
     
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官 (v28: Top/Bottom 互斥鎖版)
-    1. [互斥鎖升級]: 新增 "TOP" 與 "BOTTOM" 的絕對互斥。
-       - 如果總表是 TOP，會踢除 BOTTOM 的項目。
-       - 如果總表是 BOTTOM，會踢除 TOP 的項目。
-    2. [運費邏輯]: 維持 v27 的長字串指紋 + 模糊比對。
-    3. [其他]: 保留連鎖計算、1/X 分數解析。
+    Python 會計官 (v29: 軸位擴充版)
+    1. [關鍵字擴充]: 加入「軸位」= 軸頸 (限次檢查 + 互斥鎖)。
+    2. [保留核心]: Top/Bottom 互斥鎖、運費模糊比對、連鎖計算。
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -986,7 +978,8 @@ def python_accounting_audit(dimension_data, res_main):
         if "本體" in title_clean:
              for rid, count in id_counts.items():
                 if count > 1: accounting_issues.append({"page": page, "item": raw_title, "issue_type": "⚠️編號重複(本體)", "common_reason": f"{rid} 重複 {count}次", "failures": []})
-        elif any(k in title_clean for k in ["軸頸", "軸頭", "內孔", "JOURNAL"]):
+        # ⚡️ [擴充] 加入 "軸位"
+        elif any(k in title_clean for k in ["軸頸", "軸頭", "軸位", "內孔", "JOURNAL"]):
              for rid, count in id_counts.items():
                 if count > 2: accounting_issues.append({"page": page, "item": raw_title, "issue_type": "⚠️編號重複(軸頸)", "common_reason": f"{rid} 重複 {count}次", "failures": []})
 
@@ -1053,7 +1046,8 @@ def python_accounting_audit(dimension_data, res_main):
                 is_mac = "ROLL車修" in s_clean
                 is_weld = "ROLL銲補" in s_clean or "ROLL焊補" in s_clean
                 
-                has_part = "本體" in title_clean or any(k in title_clean for k in ["軸頸", "軸頭", "JOURNAL"])
+                # ⚡️ [擴充] 加入 "軸位"
+                has_part = "本體" in title_clean or any(k in title_clean for k in ["軸頸", "軸頭", "軸位", "JOURNAL"])
                 has_act_mac = any(k in title_clean for k in ["再生", "精車", "未再生", "粗車"])
                 has_act_weld = ("銲補" in title_clean or "焊" in title_clean)
                 is_assy = ("組裝" in title_clean or "拆裝" in title_clean)
@@ -1067,7 +1061,7 @@ def python_accounting_audit(dimension_data, res_main):
                 else: match = match_B if match_B else match_A
 
             if match:
-                # 1. 動作/KEYWAY 互斥 (既有)
+                # 1. 動作/KEYWAY 互斥
                 sum_unregen = "未再生" in s_clean or "粗車" in s_clean
                 sum_regen = ("再生" in s_clean or "精車" in s_clean) and not sum_unregen
                 sum_weld = "銲補" in s_clean or "焊" in s_clean
@@ -1085,27 +1079,23 @@ def python_accounting_audit(dimension_data, res_main):
                 if sum_keyway and (item_unregen or item_regen or item_weld) and not item_keyway: match = False
                 if item_keyway and (sum_unregen or sum_regen or sum_weld) and not sum_keyway: match = False
 
-                # 2. 部位互斥 (既有)
+                # 2. 部位互斥
                 sum_body = "本體" in s_clean
-                sum_journal = any(k in s_clean for k in ["軸頸", "軸頭", "內孔", "JOURNAL"])
+                # ⚡️ [擴充] 加入 "軸位"
+                sum_journal = any(k in s_clean for k in ["軸頸", "軸頭", "軸位", "內孔", "JOURNAL"])
                 item_body = "本體" in title_clean
-                item_journal = any(k in title_clean for k in ["軸頸", "軸頭", "內孔", "JOURNAL"])
+                item_journal = any(k in title_clean for k in ["軸頸", "軸頭", "軸位", "內孔", "JOURNAL"])
                 
                 if sum_body and not sum_journal and item_journal: match = False
                 if sum_journal and not sum_body and item_body: match = False
 
-                # 3. ⚡️ [新增] TOP / BOTTOM 互斥鎖
-                # 把標題轉大寫來比對
+                # 3. TOP / BOTTOM 互斥鎖
                 s_upper = s_clean.upper()
                 t_upper = title_clean.upper()
-                
                 sum_top = "TOP" in s_upper
                 sum_bottom = "BOTTOM" in s_upper
-                
                 item_top = "TOP" in t_upper
                 item_bottom = "BOTTOM" in t_upper
-                
-                # 規則：如果總表有寫 TOP/BOTTOM，就啟動嚴格檢查
                 if sum_top and item_bottom: match = False
                 if sum_bottom and item_top: match = False
 
@@ -1129,8 +1119,8 @@ def python_accounting_audit(dimension_data, res_main):
 
 def python_process_audit(dimension_data):
     """
-    Python 流程引擎 (v20: 軸頭擴充版)
-    1. [關鍵字擴充]: 加入「軸頭」= 軸頸軌道。
+    Python 流程引擎 (v21: 軸位擴充版)
+    1. [關鍵字擴充]: 加入「軸位」= 軸頸軌道。
     2. 保留 SKIP、嚴格 ID 比對、鉀字容錯。
     """
     process_issues = []
@@ -1180,8 +1170,8 @@ def python_process_audit(dimension_data):
             if "豁免" in fr or "EXEMPT" in fr or "SKIP" in fr: continue 
             
             if "本體" in fr: track = "本體"
-            # ⚡️ [擴充] 加入 "軸頭"
-            elif "軸頸" in fr or "軸頭" in fr: track = "軸頸"
+            # ⚡️ [擴充] 加入 "軸位"
+            elif "軸頸" in fr or "軸頭" in fr or "軸位" in fr: track = "軸頸"
             
             if "未再生" in fr or "粗車" in fr: stage = 1
             elif "銲" in fr or "焊" in fr or "鉀" in fr: stage = 2
@@ -1196,8 +1186,8 @@ def python_process_audit(dimension_data):
 
         if track == "Unknown":
             if "本體" in title: track = "本體"
-            # ⚡️ [擴充] 加入 "軸頭"
-            elif any(k in title for k in ["軸頸", "軸頭", "內孔", "JOURNAL"]): track = "軸頸"
+            # ⚡️ [擴充] 加入 "軸位"
+            elif any(k in title for k in ["軸頸", "軸頭", "軸位", "內孔", "JOURNAL"]): track = "軸頸"
         
         if track == "Unknown" or stage == 0: continue 
 
