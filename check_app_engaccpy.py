@@ -692,9 +692,12 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
 
 def python_numerical_audit(dimension_data):
     """
-    Python 工程引擎 (v24: 軸頭擴充 + 逗號修復版)
-    1. [關鍵字擴充]: 加入「軸頭」= 軸頸 (Max Limit, 排除 Un_regen)。
-    2. [逗號修復]: 延續 v22，移除 split 逗號，支援 "+0.3, +0.8"。
+    Python 工程引擎 (v25: 權重修正版)
+    1. [權重修正]: 確立「Excel 強制規則 > 標題關鍵字」的原則。
+       - 舊版: 標題若含 "未再生"，會無視 category="range" 強制進入未再生檢查。
+       - 新版: 若 l_type 明確指定為 "range" / "max_limit" / "min_limit"，直接跳過未再生判定。
+    2. [邏輯解鎖]: Logic D (精加工) 加入 l_type == "range" 直通車，允許標題含 "未再生" 的項目進行區間檢查。
+    3. 保留 v24 的軸頭擴充、逗號修復、finditer 全面搜索。
     """
     grouped_errors = {}
     import re
@@ -765,12 +768,20 @@ def python_numerical_audit(dimension_data):
                     
         logic = item.get("sl", {})
         l_type = logic.get("lt", "")
+        
+        # 4. 預算基準 (v25 修正重點：優先權調整)
         if "SKIP" in l_type.upper() or "EXEMPT" in l_type.upper() or "豁免" in l_type:
             un_regen_target = None
+            
+        # ⚡️ [修正] 若 Excel 強制指定了 range/max/min，絕對不准算 un_regen_target
+        # 這樣才能避免 "未再生" 的關鍵字霸權
+        elif l_type in ["range", "max_limit", "min_limit"]:
+            un_regen_target = None
+            
         else:
             s_threshold = logic.get("t", 0)
             un_regen_target = None
-            # ⚡️ [擴充] un_regen 條件：有未再生 且 無軸頸/軸頭
+            # 只有當沒有強制規則時，才允許 "未再生" 關鍵字生效
             if l_type in ["un_regen", "未再生"] or ("未再生" in (cat + title) and not any(k in (cat + title) for k in ["軸頸", "軸頭"])):
                 cands = [n for n in clean_std if n >= 120.0]
                 if s_threshold and float(s_threshold) >= 120.0: cands.append(float(s_threshold))
@@ -820,7 +831,6 @@ def python_numerical_audit(dimension_data):
                     elif not is_two_dec: 
                         is_passed, reason = False, "應填兩位小數"
 
-                # ⚡️ [擴充] 軸頸/軸頭上限檢查
                 elif l_type == "max_limit" or (any(k in (cat + title) for k in ["軸頸", "軸頭"]) and ("未再生" in (cat + title))):
                     engine_label = "軸頸(上限)"
                     candidates = clean_std
@@ -830,7 +840,9 @@ def python_numerical_audit(dimension_data):
                         if not is_pure_int: is_passed, reason = False, "應為純整數"
                         elif val > target: is_passed, reason = False, f"超過上限 {target}"
 
-                elif any(x in (cat + title) for x in ["再生", "精加工", "研磨", "車修", "組裝", "拆裝", "真圓度"]) and "未再生" not in (cat + title):
+                # ⚡️ [修正] Logic D：只要 l_type 是 "range"，就無條件進入區間檢查
+                # 這樣就算標題有 "未再生"，只要 Excel 規則說是 range，就能進來這裡驗區間
+                elif l_type == "range" or (any(x in (cat + title) for x in ["再生", "精加工", "研磨", "車修", "組裝", "拆裝", "真圓度"]) and "未再生" not in (cat + title)):
                     engine_label = "精加工"
                     if not is_two_dec:
                         is_passed, reason = False, "應填兩位小數"
