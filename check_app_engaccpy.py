@@ -605,8 +605,7 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
       "job_no": "工令",
       "summary_rows": [ 
           {{ "page": 頁碼, "title": "名", "target": 數字 }} 
-      ],
-      "freight_target": 0, 
+      ], 
       "issues": [], 
       "dimension_data": [
          {{
@@ -856,13 +855,12 @@ def python_numerical_audit(dimension_data):
     
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官 (v20: 連鎖反應回歸版)
-    1. [邏輯回歸]: 恢復「連鎖計算 (Cascading)」邏輯。
-       - 核心: 下游 (總表/運費) 的計算基準是「上游 (單項) 的結算結果」。
-       - 公式: 結算值 = 單項實際數量 (actual_item_qty) * (分子 / 分母)。
-       - 優點: 當單項定義為 "Set" (1/4) 時，總表與運費會自動跟隨變為 Set 單位，無需重複設定。
-    2. [分數解析]: 保留 1/X 解析功能。
-    3. [其他功能]: 保留 Batch Total、SKIP、重複異警。
+    Python 會計官 (v21: 運費回歸總表版)
+    1. [移除獨立運費檢查]: 刪除了 freight_target 的獨立核對邏輯。
+       - 現在運費完全視為「總表項目」之一。
+       - 只要總表有寫「運費」，程式就會自動把算出來的運費填進去並進行核對。
+    2. [保留連鎖]: 維持 v20 的連鎖計算 (運費 = 單項實際數量 * 倍率)。
+    3. [保留功能]: 1/X 分數解析、Batch Total、SKIP。
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -881,7 +879,7 @@ def python_accounting_audit(dimension_data, res_main):
         try: return float(cleaned) if cleaned else 0.0
         except: return 0.0
 
-    # 分數解析器 (解析 "1/4", "1/1", "2/1")
+    # 分數解析器
     def parse_ratio(rule_str):
         if not rule_str: return 1.0
         match = re.search(r"(\d+)\s*/\s*(\d+)", str(rule_str))
@@ -917,9 +915,8 @@ def python_accounting_audit(dimension_data, res_main):
         for s in summary_rows if s.get('title')
     }
     
-    freight_target = safe_float(res_main.get("freight_target", 0))
-    freight_actual_sum = 0
-    freight_details = []
+    # ⚡️ [已刪除] 這裡不再讀取 freight_target，因為已經沒用了
+    # freight_target = safe_float(res_main.get("freight_target", 0)) 
 
     # 2. 逐項過帳
     for item in dimension_data:
@@ -954,20 +951,15 @@ def python_accounting_audit(dimension_data, res_main):
         ds = str(item.get("ds", ""))
         data_list = [pair.split(":") for pair in ds.split("|") if ":" in pair]
         
-        # 原始行數計算
-        if not data_list: 
-            raw_count = 0
-        else:
-            raw_count = len(data_list)
+        if not data_list: raw_count = 0
+        else: raw_count = len(data_list)
         
         id_counts = Counter([str(e[0]).strip() for e in data_list if len(e)>0])
 
         # === 2.1 單項數量核對 (Local) ===
-        # [起點]: 原始行數 * 規則
         is_local_exempt = "豁免" in u_local or "SKIP" in u_local_norm or "EXEMPT" in u_local_norm
         
         actual_item_qty = 0
-        
         if batch_qty > 0:
             actual_item_qty = raw_count 
         else:
@@ -991,8 +983,7 @@ def python_accounting_audit(dimension_data, res_main):
                 if count > 2: accounting_issues.append({"page": page, "item": raw_title, "issue_type": "⚠️編號重複(軸頸)", "common_reason": f"{rid} 重複 {count}次", "failures": []})
 
         # === 2.3 運費計算 (Freight) ===
-        # 💡 [v20 回歸]: 基準改為 actual_item_qty (連鎖)
-        is_fr_exempt = "豁免" in u_fr or "SKIP" in u_fr_norm or "EXEMPT" in u_fr_norm
+        is_fr_exempt = "豁免" in u_fr or "SKIP" in u_fr_norm or "EXEMPT" in u_fr.upper()
         is_default_target = ("本體" in title_clean and "未再生" in title_clean) or ("新品組裝" in title_clean) or ("計入" in u_fr)
         
         freight_val = 0.0
@@ -1002,21 +993,15 @@ def python_accounting_audit(dimension_data, res_main):
             freight_val = 0.0
         elif is_default_target or parse_ratio(u_fr) != 1.0: 
             fr_multiplier = parse_ratio(u_fr)
-            
-            # 這裡用 actual_item_qty 當基底
             freight_val = actual_item_qty * fr_multiplier
             
-            if fr_multiplier != 1.0:
-                f_note = f"計入 (x{fr_multiplier})"
-            else:
-                f_note = "計入"
+            if fr_multiplier != 1.0: f_note = f"計入 (x{fr_multiplier})"
+            else: f_note = "計入"
             
-        if freight_val > 0:
-            freight_actual_sum += freight_val
-            freight_details.append({"id": f"{raw_title}", "val": freight_val, "calc": f_note})
+        # 注意：雖然這裡算出了 freight_val，但我們不再自己累加 freight_actual_sum 了
+        # 我們只負責把它「推」進下面的總表對帳迴圈裡
 
         # === 2.4 總表對帳 (Agg) ===
-        # 💡 [v20 回歸]: 基準改為 actual_item_qty (連鎖)
         agg_mode = "B" 
         if u_agg:
             parts = str(u_agg).upper().split(",")
@@ -1034,13 +1019,13 @@ def python_accounting_audit(dimension_data, res_main):
         if batch_qty > 0:
             qty_agg = batch_qty 
         else:
-            # 這裡用 actual_item_qty 當基底
             qty_agg = actual_item_qty * agg_multiplier
 
         for s_title, data in global_sum_tracker.items():
             match = False
             s_clean = clean_text(s_title)
             
+            # 💡 [關鍵邏輯]：如果總表這行是「運費」，就把剛剛算的 freight_val 塞進去
             if "運費" in s_clean:
                 if freight_val > 0:
                     data["actual"] += freight_val
@@ -1101,7 +1086,7 @@ def python_accounting_audit(dimension_data, res_main):
                 c_msg = "計入總量" if batch_qty > 0 else (f"計入 (x{agg_multiplier})" if agg_multiplier != 1.0 else "計入")
                 data["details"].append({"id": f"{raw_title} (P.{page})", "val": qty_agg, "calc": c_msg})
 
-    # 3. 異常結算
+    # 3. 異常結算 (只剩下這個通用迴圈，運費會在這裡被檢查)
     for s_title, data in global_sum_tracker.items():
         if abs(data["actual"] - data["target"]) > 0.01 and data["target"] > 0:
             accounting_issues.append({
@@ -1112,15 +1097,8 @@ def python_accounting_audit(dimension_data, res_main):
                 "source": "🐍 會計引擎"
             })
 
-    if abs(freight_actual_sum - freight_target) > 0.01 and freight_target > 0:
-        accounting_issues.append({
-            "page": "總表", "item": "運費核對", 
-            "issue_type": "統計不符(運費)", 
-            "common_reason": f"基準 {freight_target} != 實際 {freight_actual_sum}", 
-            "failures": [{"id": "🚚 基準", "val": freight_target}] + freight_details + [{"id": "🧮 實際", "val": freight_actual_sum}], 
-            "source": "🐍 會計引擎"
-        })
-        
+    # ⚡️ [已刪除] 這裡原本的運費獨立檢查塊已經移除了
+    
     return accounting_issues
 
 def python_process_audit(dimension_data):
