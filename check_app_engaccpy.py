@@ -695,10 +695,10 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
 
 def python_numerical_audit(dimension_data):
     """
-    Python 工程引擎 (v20: 多重區間增強版)
-    1. [切割升級]: 增加對換行符號 (\n) 的支援，確保多行規格能被正確切分。
+    Python 工程引擎 (v21: 多重區間增強版)
+    1. [切割升級]: 增加對換行符號 (\\n) 的支援，確保多行規格能被正確切分。
     2. [全面搜索]: 將 ± 和 ~ 的搜尋邏輯從 search (只找第一個) 改為 finditer (找出全部)。
-       解決「920±0.1」與「520±0.1」並存時，後者被忽略的問題。
+    3. [去噪升級]: 預先移除 "mm" 干擾。
     """
     grouped_errors = {}
     import re
@@ -722,18 +722,18 @@ def python_numerical_audit(dimension_data):
         # 免死金牌：緊貼 mm 的數字不准過濾
         clean_std = [n for n in all_nums if (n in mm_nums) or (n not in noise and n > 5)]
 
-        # 3. 💡 多重區間自動預算 (v20 升級版)
+        # 3. 💡 多重區間自動預算 (v21 升級版)
         s_ranges = []
-        # ⚡️ [升級1] 切割符號加入 \n (換行) 與 \r
+        # ⚡️ [升級1] 切割符號加入 \\n (換行) 與 \\r
         spec_parts = re.split(r"[\n\r]|[一二三四五六]|[（(]\d+[)）]|[;；,，]", raw_spec)
         
         for part in spec_parts:
-            # 暴力去空格
-            clean_part = part.replace(" ", "").strip()
+            # ⚡️ [升級2] 移除 "mm" 與 "MM"
+            clean_part = part.replace(" ", "").replace("\n", "").replace("mm", "").replace("MM", "").strip()
             if not clean_part: continue
             
             # --- 邏輯 A：優先處理 ± (使用 finditer 找全部) ---
-            # ⚡️ [升級2] 使用 finditer 迴圈，確保單行內多個 ± 都能被抓到
+            # ⚡️ [升級3] 使用 finditer 迴圈，確保單行內多個 ± 都能被抓到
             pm_matches = list(re.finditer(r"(\d+\.?\d*)?±(\d+\.?\d*)", clean_part))
             if pm_matches:
                 for match in pm_matches:
@@ -748,35 +748,41 @@ def python_numerical_audit(dimension_data):
             if tilde_matches:
                 for match in tilde_matches:
                     n1, n2 = float(match.group(1)), float(match.group(2))
-                    s_ranges.append([round(min(n1, n2), 4), round(max(n1, n2), 4)])
+                    # 防呆：避免把 160-0.01 (公差) 誤判為 160~0.01 (區間)
+                    if abs(n1 - n2) < n1 * 0.5:
+                        s_ranges.append([round(min(n1, n2), 4), round(max(n1, n2), 4)])
                 continue
 
             # --- 邏輯 C：萬用偏移量解析 ---
-            # (邏輯 C 比較複雜，通常用於單一基準值，維持原樣，靠上面的 split 切開來處理多行)
             all_numbers = re.findall(r"[-+]?\d+\.?\d*", clean_part)
             if not all_numbers: continue
 
             try:
-                base_val = float(all_numbers[0])
-                offsets = re.findall(r"([+-]\d+\.?\d*)", clean_part)
+                # 這裡維持 logic C 的智慧配對 (大數為基準，小數為偏移)
+                bases = []
+                offsets = []
+                for token in all_numbers:
+                    val = float(token)
+                    if val > 10.0: bases.append(val)
+                    elif abs(val) < 10.0: offsets.append(val)
                 
-                if offsets:
-                    endpoints = [round(base_val + float(o), 4) for o in offsets]
-                    if len(endpoints) == 1: endpoints.append(base_val)
-                    s_ranges.append([min(endpoints), max(endpoints)])
-                else:
-                    if base_val > 10: 
-                        s_ranges.append([base_val, base_val])
+                if bases:
+                    for b in bases:
+                        if offsets:
+                            endpoints = [round(b + o, 4) for o in offsets]
+                            if len(endpoints) == 1: endpoints.append(b)
+                            s_ranges.append([min(endpoints), max(endpoints)])
+                        else:
+                            s_ranges.append([b, b])
             except: continue
                     
-        # 4. 預算基準 (SKIP 邏輯已在 agent 端過濾，這裡做最後防線)
+        # 4. 預算基準
         logic = item.get("sl", {})
         l_type = logic.get("lt", "")
-        # ⚡️ 如果是 SKIP，直接設為 Exempt 模式，不清算
+        # SKIP 邏輯
         if "SKIP" in l_type.upper() or "EXEMPT" in l_type.upper() or "豁免" in l_type:
             un_regen_target = None
         else:
-            # 原本的未再生邏輯
             s_threshold = logic.get("t", 0)
             un_regen_target = None
             if l_type in ["un_regen", "未再生"] or ("未再生" in (cat + title) and "軸頸" not in (cat + title)):
@@ -798,7 +804,7 @@ def python_numerical_audit(dimension_data):
                 # 壞軌偵測
                 if "[!]" in val_raw:
                     is_passed = False
-                    reason = "🛑數據損壞(壞軌)：圖片該處辨識不良(汙點/遮擋/黏連)"
+                    reason = "🛑數據損壞(壞軌)"
                     val_str = "[!]"
                     val = -999.0 
                 else:
@@ -815,7 +821,7 @@ def python_numerical_audit(dimension_data):
                 # --- 判定邏輯分流 ---
                 # 0. SKIP 模式
                 if "SKIP" in l_type.upper() or "EXEMPT" in l_type.upper():
-                    continue # 直接跳過不驗
+                    continue
 
                 # A. 銲補
                 elif "min_limit" in l_type or "銲補" in (cat + title):
@@ -837,7 +843,7 @@ def python_numerical_audit(dimension_data):
                 # C. 軸頸上限
                 elif l_type == "max_limit" or (("軸頸" in (cat + title)) and ("未再生" in (cat + title))):
                     engine_label = "軸頸(上限)"
-                    candidates = [float(n) for n in (clean_std + [float(s_threshold) if s_threshold else 0])]
+                    candidates = clean_std
                     target = max(candidates) if candidates else 0
                     t_used = target
                     if target > 0:
@@ -851,7 +857,7 @@ def python_numerical_audit(dimension_data):
                         is_passed, reason = False, "應填兩位小數"
                     elif s_ranges:
                         t_used = str(s_ranges)
-                        # 💡 關鍵修正：只要符合 s_ranges 裡的「任何一個」區間，就算合格
+                        # 💡 核心：只要符合任何一個解析出的區間就算合格
                         if not any(r[0] <= val <= r[1] for r in s_ranges): 
                             is_passed, reason = False, "不在區間內"
 
@@ -861,11 +867,11 @@ def python_numerical_audit(dimension_data):
                         grouped_errors[key] = {
                             "page": page_num, "item": title, 
                             "issue_type": f"異常({engine_label})", 
-                            "common_reason": reason, "failures": []
+                            "common_reason": reason, "failures": [],
+                            "source": "🐍 工程引擎"
                         }
                     grouped_errors[key]["failures"].append({"id": rid, "val": val_str, "target": f"基準:{t_used}"})
-            except: 
-                continue
+            except: continue
                 
     return list(grouped_errors.values())
     
