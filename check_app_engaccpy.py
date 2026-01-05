@@ -1347,7 +1347,7 @@ with st.container(border=True):
     # --- 情況 C: 上傳 Excel (新增的放在這) ---
     elif data_source == "📊 上傳 Excel 檔":
         st.info("💡 上傳 Excel 檔後，系統會將表格內容轉換為文字供 AI 稽核。")
-        uploaded_xlsx = st.file_uploader("上傳 Excel 檔", type=['xlsx', 'xls'], key="xlsx_uploader")
+        uploaded_xlsx = st.file_uploader("上傳 Excel 檔", type=['xlsx', 'xls', 'xlsm'], key="xlsx_uploader")
         
         if uploaded_xlsx:
             try:
