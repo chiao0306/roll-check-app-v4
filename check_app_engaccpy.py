@@ -1344,22 +1344,31 @@ with st.container(border=True):
             except Exception as e:
                 st.error(f"JSON 檔案格式錯誤: {e}")
 
-    # --- 情況 C: 上傳 Excel (新增的放在這) ---
+        # --- 情況 C: 上傳 Excel (新增的放在這) ---
     elif data_source == "📊 上傳 Excel 檔":
         st.info("💡 上傳 Excel 檔後，系統會將表格內容轉換為文字供 AI 稽核。")
+        # 這裡記得維持我們上次改的 xlsm 支援
         uploaded_xlsx = st.file_uploader("上傳 Excel 檔", type=['xlsx', 'xls', 'xlsm'], key="xlsx_uploader")
         
         if uploaded_xlsx:
             try:
                 current_file_name = uploaded_xlsx.name
                 if st.session_state.get('last_loaded_xlsx_name') != current_file_name:
-                    df_dict = pd.read_excel(uploaded_xlsx, sheet_name=None)
+                    # 1. 讀取 Excel (header=None 保持不變)
+                    df_dict = pd.read_excel(uploaded_xlsx, sheet_name=None, header=None)
+                    
                     st.session_state.photo_gallery = []
                     st.session_state.source_mode = 'excel'
                     st.session_state.last_loaded_xlsx_name = current_file_name
                     
                     for sheet_name, df in df_dict.items():
                         df = df.fillna("")
+                        
+                        # 🔥🔥🔥 [新增這段：暴力壓平換行符號] 🔥🔥🔥
+                        # 這行指令會把所有格子裡的 "\n" (換行) 替換成 " " (空格)
+                        # 這樣 "W3...\n本體..." 就會變成 "W3... 本體..." (同一行)
+                        df = df.astype(str).replace(r'\n', ' ', regex=True).replace(r'\r', ' ', regex=True)
+                        
                         md_table = df.to_markdown(index=False)
                         st.session_state.photo_gallery.append({
                             'file': None,
