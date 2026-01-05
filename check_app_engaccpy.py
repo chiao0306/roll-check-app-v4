@@ -1040,7 +1040,7 @@ def python_accounting_audit(dimension_data, res_main):
                     data["details"].append({"id": raw_title, "val": freight_val, "calc": f_note})
                 continue 
             
-            match_A = (fuzz.partial_ratio(s_clean, title_clean) > 90)
+            match_A = (fuzz.partial_ratio(s_clean, title_clean) > 85)
             
             if batch_qty > 0 and match_A:
                 match = True
