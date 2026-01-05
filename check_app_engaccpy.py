@@ -448,9 +448,9 @@ def python_engineering_audit(dimension_data):
 
 def assign_category_by_python(item_title):
     """
-    Python 分類官 (v9: 軸位擴充版)
-    1. [關鍵字擴充]: 加入「軸位」= 軸頸 = 軸頭 (Max Limit)。
-    2. 保留 SKIP、Exempt 與其他規則。
+    Python 分類官 (v11: 熱處理/動平衡豁免版)
+    1. [豁免]: 動平衡、熱處理 -> 直接 Exempt (不驗尺寸)。
+    2. [既有功能]: 軸位/軸頸 Max Limit、SKIP 判斷等。
     """
     import pandas as pd
     from thefuzz import fuzz
@@ -461,6 +461,10 @@ def assign_category_by_python(item_title):
 
     title_clean = clean_text(item_title)
     t = str(item_title).upper().replace(" ", "").replace("\n", "").replace('"', "")
+
+    # ⚡️ [新增] 動平衡、熱處理直接豁免 (不驗尺寸，但會計照常)
+    if any(k in t for k in ["動平衡", "BALANCING", "熱處理", "HEAT", "TREATING"]):
+        return "exempt"
 
     try:
         df = pd.read_excel("rules.xlsx")
@@ -496,7 +500,6 @@ def assign_category_by_python(item_title):
             
             if "再生" in fr or "精車" in fr or "RANGE" in fr: return "range"
             if "銲" in fr or "焊" in fr or "MIN" in fr: return "min_limit"
-            # ⚡️ [擴充] 加入 "軸位"
             if "軸頸" in fr or "軸頭" in fr or "軸位" in fr or "MAX" in fr: return "max_limit"
             if "本體" in fr or "UN_REGEN" in fr: return "un_regen"
             
@@ -508,7 +511,6 @@ def assign_category_by_python(item_title):
     
     if has_weld: return "min_limit"
     if has_unregen:
-        # ⚡️ [擴充] 加入 "軸位"
         if any(k in t for k in ["軸頸", "軸頭", "軸位", "內孔", "JOURNAL"]): return "max_limit"
         return "un_regen"
     if has_regen: return "range"
@@ -692,10 +694,9 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
 
 def python_numerical_audit(dimension_data):
     """
-    Python 工程引擎 (v26: 軸位擴充版)
-    1. [關鍵字擴充]: 加入「軸位」= 軸頸 (Max Limit, 排除 Un_regen)。
-    2. [權重維持]: 保持 v25 的「Excel 強制規則優先」邏輯。
-    3. 保留 v24 的逗號修復、finditer 全面搜索。
+    Python 工程引擎 (v28: 熱處理/動平衡豁免版)
+    1. [豁免]: 動平衡、熱處理 -> 直接跳過。
+    2. [權重]: 保持 v25/v26 邏輯 (Excel 規則 > 關鍵字)。
     """
     grouped_errors = {}
     import re
@@ -710,6 +711,11 @@ def python_numerical_audit(dimension_data):
         cat = str(item.get("category", "")).strip()
         page_num = item.get("page", "?")
         raw_spec = str(item.get("std_spec", "")).replace('"', "")
+        
+        # ⚡️ [新增] 動平衡、熱處理直接跳過
+        t_upper = title.upper()
+        if any(k in t_upper for k in ["動平衡", "BALANCING", "熱處理", "HEAT"]):
+            continue
         
         mm_nums = [float(n) for n in re.findall(r"(\d+\.?\d*)\s*mm", raw_spec)]
         all_nums = [float(n) for n in re.findall(r"(\d+\.?\d*)", raw_spec)]
@@ -777,7 +783,6 @@ def python_numerical_audit(dimension_data):
         else:
             s_threshold = logic.get("t", 0)
             un_regen_target = None
-            # ⚡️ [擴充] un_regen 條件：有未再生 且 無軸頸/軸頭/軸位
             if l_type in ["un_regen", "未再生"] or ("未再生" in (cat + title) and not any(k in (cat + title) for k in ["軸頸", "軸頭", "軸位"])):
                 cands = [n for n in clean_std if n >= 120.0]
                 if s_threshold and float(s_threshold) >= 120.0: cands.append(float(s_threshold))
@@ -827,7 +832,6 @@ def python_numerical_audit(dimension_data):
                     elif not is_two_dec: 
                         is_passed, reason = False, "應填兩位小數"
 
-                # ⚡️ [擴充] 軸頸/軸頭/軸位上限檢查
                 elif l_type == "max_limit" or (any(k in (cat + title) for k in ["軸頸", "軸頭", "軸位"]) and ("未再生" in (cat + title))):
                     engine_label = "軸頸(上限)"
                     candidates = clean_std
@@ -1119,9 +1123,9 @@ def python_accounting_audit(dimension_data, res_main):
 
 def python_process_audit(dimension_data):
     """
-    Python 流程引擎 (v21: 軸位擴充版)
-    1. [關鍵字擴充]: 加入「軸位」= 軸頸軌道。
-    2. 保留 SKIP、嚴格 ID 比對、鉀字容錯。
+    Python 流程引擎 (v23: 熱處理/動平衡排除版)
+    1. [排除]: 動平衡、熱處理 -> 不參與工序溯源與尺寸比較。
+    2. [既有功能]: 軸位/軸頸軌道、Stage 1~4 檢查。
     """
     process_issues = []
     import re
@@ -1153,6 +1157,11 @@ def python_process_audit(dimension_data):
         title_clean = clean_text(title)
         ds = str(item.get("ds", ""))
         
+        # ⚡️ [新增] 動平衡、熱處理直接跳過流程檢查
+        t_upper = title_clean.upper()
+        if any(k in t_upper for k in ["動平衡", "BALANCING", "熱處理", "HEAT"]):
+            continue
+
         track = "Unknown"
         stage = 0
         forced_rule = None
@@ -1170,7 +1179,6 @@ def python_process_audit(dimension_data):
             if "豁免" in fr or "EXEMPT" in fr or "SKIP" in fr: continue 
             
             if "本體" in fr: track = "本體"
-            # ⚡️ [擴充] 加入 "軸位"
             elif "軸頸" in fr or "軸頭" in fr or "軸位" in fr: track = "軸頸"
             
             if "未再生" in fr or "粗車" in fr: stage = 1
@@ -1186,7 +1194,6 @@ def python_process_audit(dimension_data):
 
         if track == "Unknown":
             if "本體" in title: track = "本體"
-            # ⚡️ [擴充] 加入 "軸位"
             elif any(k in title for k in ["軸頸", "軸頭", "軸位", "內孔", "JOURNAL"]): track = "軸頸"
         
         if track == "Unknown" or stage == 0: continue 
