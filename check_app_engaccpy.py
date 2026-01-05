@@ -867,12 +867,11 @@ def python_numerical_audit(dimension_data):
     
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官 (v21: 運費回歸總表版)
-    1. [移除獨立運費檢查]: 刪除了 freight_target 的獨立核對邏輯。
-       - 現在運費完全視為「總表項目」之一。
-       - 只要總表有寫「運費」，程式就會自動把算出來的運費填進去並進行核對。
-    2. [保留連鎖]: 維持 v20 的連鎖計算 (運費 = 單項實際數量 * 倍率)。
-    3. [保留功能]: 1/X 分數解析、Batch Total、SKIP。
+    Python 會計官 (v27: 運費長字串指紋版)
+    1. [運費識別特化]: 應您的要求，改用「輥輪拆裝.車修或銲補運費」整串字去比對。
+       - 優點: 即使 OCR 把 "運費" 讀成 "運貨"，因為前面的 "輥輪拆裝..." 都對，相似度依然很高，能準確抓到。
+    2. [機制]: 使用 fuzz.partial_ratio > 70 作為判定標準。
+    3. 保留連鎖計算、1/X 分數解析、互斥鎖等所有功能。
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -891,7 +890,6 @@ def python_accounting_audit(dimension_data, res_main):
         try: return float(cleaned) if cleaned else 0.0
         except: return 0.0
 
-    # 分數解析器
     def parse_ratio(rule_str):
         if not rule_str: return 1.0
         match = re.search(r"(\d+)\s*/\s*(\d+)", str(rule_str))
@@ -927,9 +925,6 @@ def python_accounting_audit(dimension_data, res_main):
         for s in summary_rows if s.get('title')
     }
     
-    # ⚡️ [已刪除] 這裡不再讀取 freight_target，因為已經沒用了
-    # freight_target = safe_float(res_main.get("freight_target", 0)) 
-
     # 2. 逐項過帳
     for item in dimension_data:
         raw_title = item.get("item_title", "")
@@ -1009,9 +1004,6 @@ def python_accounting_audit(dimension_data, res_main):
             
             if fr_multiplier != 1.0: f_note = f"計入 (x{fr_multiplier})"
             else: f_note = "計入"
-            
-        # 注意：雖然這裡算出了 freight_val，但我們不再自己累加 freight_actual_sum 了
-        # 我們只負責把它「推」進下面的總表對帳迴圈裡
 
         # === 2.4 總表對帳 (Agg) ===
         agg_mode = "B" 
@@ -1027,7 +1019,6 @@ def python_accounting_audit(dimension_data, res_main):
         if agg_mode == "EXEMPT": continue 
         
         agg_multiplier = parse_ratio(u_agg)
-        
         if batch_qty > 0:
             qty_agg = batch_qty 
         else:
@@ -1037,8 +1028,24 @@ def python_accounting_audit(dimension_data, res_main):
             match = False
             s_clean = clean_text(s_title)
             
-            # 💡 [關鍵邏輯]：如果總表這行是「運費」，就把剛剛算的 freight_val 塞進去
-            if "運費" in s_clean:
+            # 💡 [v27 重點修改]：使用「輥輪拆裝.車修或銲補運費」長字串指紋
+            target_freight_str = "輥輪拆裝.車修或銲補運費"
+            
+            # 1. 核心判定：長字串模糊比對 (權重最高)
+            # 即使 s_clean 變成 "輥輪拆裝.車修或銲補運貨"，分數也會非常高 (>90)
+            f_score = fuzz.partial_ratio(target_freight_str, s_clean)
+            
+            is_freight = False
+            if f_score > 70:
+                is_freight = True
+            
+            # 2. 輔助判定：保留原本的 "運費" 關鍵字 (避免總表忽然只寫 "運費" 兩個字)
+            elif "運費" in s_clean:
+                is_freight = True
+            elif "FREIGHT" in s_clean:
+                is_freight = True
+
+            if is_freight:
                 if freight_val > 0:
                     data["actual"] += freight_val
                     data["details"].append({"id": raw_title, "val": freight_val, "calc": f_note})
@@ -1098,7 +1105,7 @@ def python_accounting_audit(dimension_data, res_main):
                 c_msg = "計入總量" if batch_qty > 0 else (f"計入 (x{agg_multiplier})" if agg_multiplier != 1.0 else "計入")
                 data["details"].append({"id": f"{raw_title} (P.{page})", "val": qty_agg, "calc": c_msg})
 
-    # 3. 異常結算 (只剩下這個通用迴圈，運費會在這裡被檢查)
+    # 3. 異常結算
     for s_title, data in global_sum_tracker.items():
         if abs(data["actual"] - data["target"]) > 0.01 and data["target"] > 0:
             accounting_issues.append({
@@ -1108,9 +1115,7 @@ def python_accounting_audit(dimension_data, res_main):
                 "failures": [{"id": "🔍 基準", "val": data["target"]}] + data["details"] + [{"id": "🧮 實際", "val": data["actual"]}], 
                 "source": "🐍 會計引擎"
             })
-
-    # ⚡️ [已刪除] 這裡原本的運費獨立檢查塊已經移除了
-    
+            
     return accounting_issues
 
 def python_process_audit(dimension_data):
