@@ -695,17 +695,17 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
 
 def python_numerical_audit(dimension_data):
     """
-    Python 工程引擎 (v21: 多重區間增強版)
-    1. [切割升級]: 增加對換行符號 (\\n) 的支援，確保多行規格能被正確切分。
-    2. [全面搜索]: 將 ± 和 ~ 的搜尋邏輯從 search (只找第一個) 改為 finditer (找出全部)。
-    3. [去噪升級]: 預先移除 "mm" 干擾。
+    Python 工程引擎 (v22: 逗號切割修復版)
+    1. [核心修復]: 移除 split 中的「逗號 (,)」，避免將「+0.3, +0.8」這種雙公差寫法切斷。
+       - 舊版: "920+0.3, +0.8" -> 切成 "920+0.3" (判 920~920.3) 和 "+0.8" (無效)。
+       - 新版: "920+0.3, +0.8" -> 完整保留，Logic C 讀取兩個偏移量 -> 判 920.3~920.8。
+    2. 保留 v21 的換行切割、finditer 全面搜索、mm 去噪功能。
     """
     grouped_errors = {}
     import re
     if not dimension_data: return []
 
     for item in dimension_data:
-        # 1. 取得數據 (DS 格式)
         ds = str(item.get("ds", ""))
         if not ds: continue
         raw_entries = [p.split(":") for p in ds.split("|") if ":" in p]
@@ -715,25 +715,22 @@ def python_numerical_audit(dimension_data):
         page_num = item.get("page", "?")
         raw_spec = str(item.get("std_spec", "")).replace('"', "")
         
-        # 2. 🛡️ 數據清洗與 mm 定位
         mm_nums = [float(n) for n in re.findall(r"(\d+\.?\d*)\s*mm", raw_spec)]
         all_nums = [float(n) for n in re.findall(r"(\d+\.?\d*)", raw_spec)]
         noise = [350.0, 300.0, 200.0, 145.0, 130.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
-        # 免死金牌：緊貼 mm 的數字不准過濾
         clean_std = [n for n in all_nums if (n in mm_nums) or (n not in noise and n > 5)]
 
-        # 3. 💡 多重區間自動預算 (v21 升級版)
         s_ranges = []
-        # ⚡️ [升級1] 切割符號加入 \\n (換行) 與 \\r
-        spec_parts = re.split(r"[\n\r]|[一二三四五六]|[（(]\d+[)）]|[;；,，]", raw_spec)
+        
+        # ⚡️ [v22 修復點]：移除了正則表達式最後面的 " ,， " (逗號)
+        # 這樣 "920+0.3, +0.8" 就不會被切斷，會整串進入 Logic C 進行處理
+        spec_parts = re.split(r"[\n\r]|[一二三四五六]|[（(]\d+[)）]|[;；]", raw_spec)
         
         for part in spec_parts:
-            # ⚡️ [升級2] 移除 "mm" 與 "MM"
             clean_part = part.replace(" ", "").replace("\n", "").replace("mm", "").replace("MM", "").strip()
             if not clean_part: continue
             
-            # --- 邏輯 A：優先處理 ± (使用 finditer 找全部) ---
-            # ⚡️ [升級3] 使用 finditer 迴圈，確保單行內多個 ± 都能被抓到
+            # --- 邏輯 A：± (全面搜索) ---
             pm_matches = list(re.finditer(r"(\d+\.?\d*)?±(\d+\.?\d*)", clean_part))
             if pm_matches:
                 for match in pm_matches:
@@ -741,24 +738,22 @@ def python_numerical_audit(dimension_data):
                     b = float(base_str) if base_str else 0.0
                     o = float(offset_str)
                     s_ranges.append([round(b - o, 4), round(b + o, 4)])
-                continue # 此 part 已處理，跳過後續邏輯
+                continue 
 
-            # --- 邏輯 B：處理波浪號區間 (使用 finditer 找全部) ---
+            # --- 邏輯 B：波浪號區間 ---
             tilde_matches = list(re.finditer(r"(\d+\.?\d*)[~～-](\d+\.?\d*)", clean_part))
             if tilde_matches:
                 for match in tilde_matches:
                     n1, n2 = float(match.group(1)), float(match.group(2))
-                    # 防呆：避免把 160-0.01 (公差) 誤判為 160~0.01 (區間)
                     if abs(n1 - n2) < n1 * 0.5:
                         s_ranges.append([round(min(n1, n2), 4), round(max(n1, n2), 4)])
                 continue
 
-            # --- 邏輯 C：萬用偏移量解析 ---
+            # --- 邏輯 C：萬用偏移量解析 (這裡會正確處理 +0.3, +0.8) ---
             all_numbers = re.findall(r"[-+]?\d+\.?\d*", clean_part)
             if not all_numbers: continue
 
             try:
-                # 這裡維持 logic C 的智慧配對 (大數為基準，小數為偏移)
                 bases = []
                 offsets = []
                 for token in all_numbers:
@@ -770,16 +765,16 @@ def python_numerical_audit(dimension_data):
                     for b in bases:
                         if offsets:
                             endpoints = [round(b + o, 4) for o in offsets]
+                            # 如果只有一個偏移量 (如 +0.5)，則基準值自己也是邊界
+                            # 如果有兩個偏移量 (如 +0.3, +0.8)，則不需要基準值
                             if len(endpoints) == 1: endpoints.append(b)
                             s_ranges.append([min(endpoints), max(endpoints)])
                         else:
                             s_ranges.append([b, b])
             except: continue
                     
-        # 4. 預算基準
         logic = item.get("sl", {})
         l_type = logic.get("lt", "")
-        # SKIP 邏輯
         if "SKIP" in l_type.upper() or "EXEMPT" in l_type.upper() or "豁免" in l_type:
             un_regen_target = None
         else:
@@ -790,7 +785,6 @@ def python_numerical_audit(dimension_data):
                 if s_threshold and float(s_threshold) >= 120.0: cands.append(float(s_threshold))
                 if cands: un_regen_target = max(cands)
 
-        # --- 5. 開始逐一判定 ---
         for entry in raw_entries:
             if len(entry) < 2: continue
             rid = str(entry[0]).strip().replace(" ", "")
@@ -801,7 +795,6 @@ def python_numerical_audit(dimension_data):
             try:
                 is_passed, reason, t_used, engine_label = True, "", "N/A", "未知"
 
-                # 壞軌偵測
                 if "[!]" in val_raw:
                     is_passed = False
                     reason = "🛑數據損壞(壞軌)"
@@ -818,12 +811,9 @@ def python_numerical_audit(dimension_data):
                 else:
                     is_two_dec, is_pure_int = True, True 
 
-                # --- 判定邏輯分流 ---
-                # 0. SKIP 模式
                 if "SKIP" in l_type.upper() or "EXEMPT" in l_type.upper():
                     continue
 
-                # A. 銲補
                 elif "min_limit" in l_type or "銲補" in (cat + title):
                     engine_label = "銲補"
                     if not is_pure_int: is_passed, reason = False, "應為純整數"
@@ -831,7 +821,6 @@ def python_numerical_audit(dimension_data):
                         t_used = min(clean_std, key=lambda x: abs(x - val))
                         if val < t_used: is_passed, reason = False, "數值不足"
                 
-                # B. 未再生
                 elif un_regen_target is not None:
                     engine_label = "未再生"
                     t_used = un_regen_target
@@ -840,7 +829,6 @@ def python_numerical_audit(dimension_data):
                     elif not is_two_dec: 
                         is_passed, reason = False, "應填兩位小數"
 
-                # C. 軸頸上限
                 elif l_type == "max_limit" or (("軸頸" in (cat + title)) and ("未再生" in (cat + title))):
                     engine_label = "軸頸(上限)"
                     candidates = clean_std
@@ -850,14 +838,12 @@ def python_numerical_audit(dimension_data):
                         if not is_pure_int: is_passed, reason = False, "應為純整數"
                         elif val > target: is_passed, reason = False, f"超過上限 {target}"
 
-                # D. 精加工/區間
                 elif any(x in (cat + title) for x in ["再生", "精加工", "研磨", "車修", "組裝", "拆裝", "真圓度"]) and "未再生" not in (cat + title):
                     engine_label = "精加工"
                     if not is_two_dec:
                         is_passed, reason = False, "應填兩位小數"
                     elif s_ranges:
                         t_used = str(s_ranges)
-                        # 💡 核心：只要符合任何一個解析出的區間就算合格
                         if not any(r[0] <= val <= r[1] for r in s_ranges): 
                             is_passed, reason = False, "不在區間內"
 
