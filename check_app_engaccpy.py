@@ -577,10 +577,15 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
     3. **目標數量提取 (item_pc_target)**：
        - 請從標題中提取括號內的數量要求（例如標題含 `(4SET)` 則提取 `4`，`(10PC)` 則提取 `10`）。
        - 若無括號標註數量，請填 `0`。
+    
+    4. **特殊批量總數提取 (batch_total_qty)：
+       - 若標題包含「熱處理」、「研磨」、「動平衡」且內文第一欄為合併儲存格顯示總量 (如 2425KG, 8293.80 IN2)：
+       - 請將該數值提取至 JSON 的 "batch_total_qty" 欄位 (純數字)。
+         (注意：研磨與動平衡若後續還有個別 ID 與尺寸，請照常抄錄到 "ds"。)
 
-    4. **分類 (category)**：**請直接回傳 `null`**。由後端程式判定。
+    5. **分類 (category)**：**請直接回傳 `null`**。由後端程式判定。
 
-    5. **數據抄錄 (ds) 與 字串保護規範**：
+    6. **數據抄錄 (ds) 與 字串保護規範**：
        - **格式**：輸出為 `"ID:值|ID:值"` 的字串格式。
        - **禁止簡化**：實測值若顯示 `349.90`，必須輸出 `"349.90"`，保留尾數 0。
        - **🚫 遇到干擾不鑽牛角尖**：若儲存格內的數值因手寫塗改、圓圈遮擋、污點、字跡黏連或光線反光，導致你無法「100% 確定」原始打印數字時，**嚴禁腦補或猜測**。
@@ -608,7 +613,7 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
       "issues": [], 
       "dimension_data": [
          {{
-           "page": 數字, "item_title": "標題", "category": null, 
+           "page": 數字, "item_title": "標題", "batch_total_qty": 0, "category": null, 
            "item_pc_target": 0,
            "accounting_rules": {{ "local": "", "agg": "", "freight": "" }},
            "sl": {{ "lt": "null", "t": 0 }},
@@ -618,7 +623,7 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
       ]
     }}
     """
-
+    
     # 2. 判斷要使用哪一顆引擎
     raw_content = ""
     
