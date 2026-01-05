@@ -848,12 +848,10 @@ def python_numerical_audit(dimension_data):
     
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官 (v13: 全方位互斥鎖版)
-    1. [動作互斥升級]: 建立「未再生 vs 再生 vs 銲補」三方互斥機制。
-       - 只要總表籃子屬性明確，就會強制踢除另外兩種屬性的項目 (例如: 總表未再生 -> 擋住 銲補 & 再生)。
-    2. [部位互斥新增]: 建立「本體 vs 軸頸」互斥機制。
-       - 若總表指定本體，擋住軸頸項目；若總表指定軸頸，擋住本體項目。
-    3. 保留 v12 的原始數量計算 (Raw Count) 與雙向換算邏輯。
+    Python 會計官 (v14: 支援熱處理/研磨/動平衡 總量核對)
+    1. 新增 batch_total_qty 邏輯：
+       若 AI 有提取到「批量總數」(如熱處理KG、研磨IN2)，優先使用該數值與總表核對。
+    2. 保留原有的 PC 數核對與雙向換算邏輯。
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -872,7 +870,7 @@ def python_accounting_audit(dimension_data, res_main):
         try: return float(cleaned) if cleaned else 0.0
         except: return 0.0
 
-    # 1. 載入規則
+    # 1. 載入規則 & 總表基準
     rules_map = {}
     try:
         df = pd.read_excel("rules.xlsx")
@@ -909,6 +907,9 @@ def python_accounting_audit(dimension_data, res_main):
         page = item.get("page", "?")
         target_pc = safe_float(item.get("item_pc_target", 0)) 
         
+        # 💡 [v14 新增] 提取批量總數 (熱處理KG/研磨IN2)
+        batch_qty = safe_float(item.get("batch_total_qty", 0))
+        
         # 查找規則
         rule_set = rules_map.get(title_clean)
         if not rule_set:
@@ -925,42 +926,36 @@ def python_accounting_audit(dimension_data, res_main):
         u_local = rule_set.get("u_local", "") if rule_set else ""
         u_fr = rule_set.get("u_fr", "") if rule_set else ""
         u_agg = rule_set.get("u_agg", "") if rule_set else ""
-
+        
         u_local_norm = u_local.upper().replace(" ", "").replace("　", "").replace("＝", "=").replace("：", "=").replace(":", "=")
         u_fr_norm = u_fr.upper().replace(" ", "").replace("　", "").replace("＝", "=").replace("：", "=").replace(":", "=")
 
+        # 解析 ds
         ds = str(item.get("ds", ""))
         data_list = [pair.split(":") for pair in ds.split("|") if ":" in pair]
         
-        # 定義原始數量 (Raw Count)
-        if not data_list: 
-            raw_count = 0
+        # 計算原始行數 (Raw Count)
+        if not data_list: raw_count = 0
         else:
             ids = [str(e[0]).strip() for e in data_list if len(e) > 0]
-            if "PC=PC" in u_local_norm or "本體" in title_clean:
-                raw_count = len(set(ids))
-            else:
-                raw_count = len(data_list)
+            if "PC=PC" in u_local_norm or "本體" in title_clean: raw_count = len(set(ids))
+            else: raw_count = len(data_list)
         
         id_counts = Counter([str(e[0]).strip() for e in data_list if len(e)>0])
 
-        # === 2.1 單項數量 (Local) ===
-        is_local_exempt = "豁免" in u_local
-        is_weight_mode = "KG" in title_clean.upper() or target_pc > 100
+        # === 2.1 單項數量核對 ===
+        # 💡 [v14 修改]：如果是特殊批量項目 (batch_qty > 0)，通常不進行 PC 數核對，除非規則特別指定
+        # 熱處理/研磨 通常沒有 target_pc (或者 target_pc 是總量)
         
         actual_item_qty = 0
+        is_local_exempt = "豁免" in u_local
         
-        if is_weight_mode:
-            current_sum = 0
-            has_bad = False
-            for e in data_list:
-                tv = safe_float(e[1])
-                if tv == "BAD_DATA": has_bad = True
-                else: current_sum += tv
-            actual_item_qty = current_sum
-            if has_bad and not is_local_exempt:
-                accounting_issues.append({"page": page, "item": raw_title, "issue_type": "⚠️資料異常", "common_reason": "含無法辨識數值", "failures": [{"id": "警告", "val": "[!]", "calc": "異常"}]})
+        if batch_qty > 0:
+            # 有批量總數時，單項核對通常僅供參考，或視為豁免
+            # 但若您希望檢查 (例如 4PC)，可以照舊算 raw_count
+            actual_item_qty = raw_count 
         else:
+            # 標準邏輯
             conv_match = re.search(r"(\d+\.?\d*)[^\d=]*=[^\d=]*(\d+\.?\d*)", u_local_norm)
             if conv_match:
                 l, r = float(conv_match.group(1)), float(conv_match.group(2))
@@ -969,10 +964,11 @@ def python_accounting_audit(dimension_data, res_main):
             else:
                 actual_item_qty = raw_count
 
-        if not is_local_exempt and abs(actual_item_qty - target_pc) > 0.01 and target_pc > 0:
-            accounting_issues.append({"page": page, "item": raw_title, "issue_type": "統計不符(單項)", "common_reason": f"標題 {target_pc}PC != 內文 {actual_item_qty}", "failures": [{"id": "目標", "val": target_pc}, {"id": "實際", "val": actual_item_qty}], "source": "🐍 會計引擎"})
+            # 只有在非批量模式下，且目標大於0才報錯
+            if not is_local_exempt and abs(actual_item_qty - target_pc) > 0.01 and target_pc > 0:
+                 accounting_issues.append({"page": page, "item": raw_title, "issue_type": "統計不符(單項)", "common_reason": f"標題 {target_pc}PC != 內文 {actual_item_qty}", "failures": [{"id": "目標", "val": target_pc}, {"id": "實際", "val": actual_item_qty}], "source": "🐍 會計引擎"})
 
-        # 2.2 重複警示
+        # 2.2 重複警示 (維持不變)
         if "本體" in title_clean:
              for rid, count in id_counts.items():
                 if count > 1: accounting_issues.append({"page": page, "item": raw_title, "issue_type": "⚠️編號重複(本體)", "common_reason": f"{rid} 重複 {count}次", "failures": []})
@@ -980,7 +976,7 @@ def python_accounting_audit(dimension_data, res_main):
              for rid, count in id_counts.items():
                 if count > 2: accounting_issues.append({"page": page, "item": raw_title, "issue_type": "⚠️編號重複(軸頸)", "common_reason": f"{rid} 重複 {count}次", "failures": []})
 
-        # 2.3 運費計算
+        # 2.3 運費計算 (維持不變，或可加入對 batch_qty 的支援)
         is_fr_exempt = "豁免" in u_fr
         fr_conv_match = re.search(r"(\d+\.?\d*)[^\d=]*=[^\d=]*1", u_fr_norm)
         is_default_target = "本體" in title_clean and ("未再生" in title_clean or "粗車" in title_clean)
@@ -1000,10 +996,9 @@ def python_accounting_audit(dimension_data, res_main):
             freight_actual_sum += freight_val
             freight_details.append({"id": f"{raw_title}", "val": freight_val, "calc": f_note})
 
-        # === 2.4 總表對帳 (Agg) - v13 全方位互斥鎖 ===
+        # === 2.4 總表對帳 (Agg) - 💡 v14 核心 ===
         agg_mode = "B" 
         agg_divisor = 1.0
-        has_agg_math = False
         
         if u_agg:
             parts = str(u_agg).upper().split(",")
@@ -1017,18 +1012,19 @@ def python_accounting_audit(dimension_data, res_main):
                     match = re.search(r"(\d+\.?\d*)[^\d=]*=[^\d=]*(\d+\.?\d*)", p_clean)
                     if match:
                         l, r = float(match.group(1)), float(match.group(2))
-                        if l > 0: 
-                            agg_divisor = l / r
-                            has_agg_math = True
+                        if l > 0: agg_divisor = l / r
 
         if agg_mode == "EXEMPT": continue 
         
-        # 數量計算分流
-        if has_agg_math:
+        # 💡 [v14 邏輯分流]
+        # 優先權 1: 如果有批量總數 (batch_qty)，直接用它！
+        # 優先權 2: 否則照舊 (看有無 Agg 規則 或 繼承單項)
+        if batch_qty > 0:
+            qty_agg = batch_qty # 熱處理/研磨 直接用抓到的數字
+        elif agg_divisor != 1.0:
             qty_agg = raw_count / agg_divisor
         else:
             qty_agg = actual_item_qty
-            if agg_divisor == 1.0: agg_divisor = 1.0
 
         for s_title, data in global_sum_tracker.items():
             match = False
@@ -1040,67 +1036,53 @@ def python_accounting_audit(dimension_data, res_main):
                     data["details"].append({"id": raw_title, "val": freight_val, "calc": f_note})
                 continue 
             
-            # --- 模式匹配 ---
-            match_A = (fuzz.partial_ratio(s_clean, title_clean) > 95)
+            # A 模式
+            match_A = (fuzz.partial_ratio(s_clean, title_clean) > 90)
             
-            match_B = False
-            is_dis = "ROLL拆裝" in s_clean
-            is_mac = "ROLL車修" in s_clean
-            is_weld = "ROLL銲補" in s_clean or "ROLL焊補" in s_clean
-            
-            has_part = "本體" in title_clean or any(k in title_clean for k in ["軸頸", "JOURNAL"])
-            has_act_mac = any(k in title_clean for k in ["再生", "精車", "未再生", "粗車"])
-            has_act_weld = ("銲補" in title_clean or "焊" in title_clean)
-            is_assy = ("組裝" in title_clean or "拆裝" in title_clean)
+            # 💡 [v14 特殊]：針對熱處理、研磨、動平衡，只要名稱像就計入 (類似 A 模式)
+            if batch_qty > 0 and match_A:
+                match = True
+            else:
+                # B 模式 (維持不變)
+                match_B = False
+                is_dis = "ROLL拆裝" in s_clean
+                is_mac = "ROLL車修" in s_clean
+                is_weld = "ROLL銲補" in s_clean or "ROLL焊補" in s_clean
+                
+                has_part = "本體" in title_clean or any(k in title_clean for k in ["軸頸", "JOURNAL"])
+                has_act_mac = any(k in title_clean for k in ["再生", "精車", "未再生", "粗車"])
+                has_act_weld = ("銲補" in title_clean or "焊" in title_clean)
+                is_assy = ("組裝" in title_clean or "拆裝" in title_clean)
 
-            if is_dis and is_assy: match_B = True
-            elif is_mac and has_part and has_act_mac: match_B = True
-            elif is_weld and has_part and has_act_weld: match_B = True
-            
-            if agg_mode == "A": initial_match = match_A
-            elif agg_mode == "AB": initial_match = match_A or match_B
-            else: initial_match = match_B if match_B else match_A
+                if is_dis and is_assy: match_B = True
+                elif is_mac and has_part and has_act_mac: match_B = True
+                elif is_weld and has_part and has_act_weld: match_B = True
+                
+                if agg_mode == "A": match = match_A
+                elif agg_mode == "AB": match = match_A or match_B
+                else: match = match_B if match_B else match_A
 
-            # --- ⚡️ 全方位互斥鎖 (Conflict Check) ---
-            final_match = initial_match
-            if final_match:
-                # 1. 提取動作屬性
+            # 互斥鎖 (維持不變)
+            if match:
                 sum_unregen = "未再生" in s_clean or "粗車" in s_clean
                 sum_regen = ("再生" in s_clean or "精車" in s_clean) and not sum_unregen
                 sum_weld = "銲補" in s_clean or "焊" in s_clean
-                
                 item_unregen = "未再生" in title_clean or "粗車" in title_clean
                 item_regen = ("再生" in title_clean or "精車" in title_clean) and not item_unregen
                 item_weld = "銲補" in title_clean or "焊" in title_clean
-
-                # 2. 提取部位屬性
+                if sum_weld and (item_unregen or item_regen) and not item_weld: match = False
+                elif sum_unregen and (item_regen or item_weld): match = False
+                elif sum_regen and (item_unregen or item_weld): match = False
                 sum_body = "本體" in s_clean
                 sum_journal = any(k in s_clean for k in ["軸頸", "內孔", "JOURNAL"])
-                
                 item_body = "本體" in title_clean
                 item_journal = any(k in title_clean for k in ["軸頸", "內孔", "JOURNAL"])
+                if sum_body and not sum_journal and item_journal: match = False
+                if sum_journal and not sum_body and item_body: match = False
 
-                # --- 動作互斥規則 (Action Conflict) ---
-                # A. 總表是銲補 -> 踢除 (未再生 OR 再生) ※除非項目本身也是銲補
-                if sum_weld and (item_unregen or item_regen) and not item_weld: final_match = False
-                
-                # B. 總表是未再生 -> 踢除 (再生 OR 銲補)
-                elif sum_unregen and (item_regen or item_weld): final_match = False
-                
-                # C. 總表是再生 -> 踢除 (未再生 OR 銲補)
-                elif sum_regen and (item_unregen or item_weld): final_match = False
-
-                # --- 部位互斥規則 (Part Conflict) ---
-                # D. 總表指定本體 (且沒寫軸頸) -> 踢除 軸頸項目
-                if sum_body and not sum_journal and item_journal: final_match = False
-
-                # E. 總表指定軸頸 (且沒寫本體) -> 踢除 本體項目
-                if sum_journal and not sum_body and item_body: final_match = False
-
-            # --- 最終確認 ---
-            if final_match:
+            if match:
                 data["actual"] += qty_agg
-                c_msg = f"計入 (/{agg_divisor:.1f})" if agg_divisor != 1.0 else "計入"
+                c_msg = "計入總量" if batch_qty > 0 else (f"計入 (/{agg_divisor:.1f})" if agg_divisor != 1.0 else "計入")
                 data["details"].append({"id": f"{raw_title} (P.{page})", "val": qty_agg, "calc": c_msg})
 
     # 3. 異常結算
