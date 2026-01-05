@@ -1503,18 +1503,20 @@ if st.session_state.photo_gallery:
             rules_text = get_dynamic_rules(cache.get('full_text_for_search',''), debug_mode=True)
             st.markdown(rules_text)
                 
-        # 3. 原始數據檢視
+                # 3. 原始數據檢視
         with st.expander("📊 檢視 AI 抄錄原始數據", expanded=False):
             st.markdown("**1. 核心指標摘要**")
-            f_target = cache.get('freight_target', 0)
+            
+            # f_target = cache.get('freight_target', 0)  <-- 這行可以刪掉或是留著不理它
             sum_rows_len = len(cache.get("summary_rows", []))
+            
+            # 👇 修改這裡：只保留工令與總表資訊
             summary_df = pd.DataFrame([{
                 "工令單號": cache.get("job_no", "N/A"),
-                "運費 Target (PC)": f_target,
-                "運費偵測狀態": "有抓到" if f_target > 0 else "未偵測",
                 "總表行數": sum_rows_len,
                 "總表狀態": "正常" if sum_rows_len > 0 else "空值"
             }])
+            
             st.dataframe(summary_df, hide_index=True, use_container_width=True)
             
             st.divider()
