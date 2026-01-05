@@ -6,3 +6,4 @@ pandas
 openpyxl
 thefuzz
 openai
+tabulate
