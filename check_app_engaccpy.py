@@ -695,11 +695,11 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
 
 def python_numerical_audit(dimension_data):
     """
-    Python 工程引擎 (v22: 逗號切割修復版)
-    1. [核心修復]: 移除 split 中的「逗號 (,)」，避免將「+0.3, +0.8」這種雙公差寫法切斷。
-       - 舊版: "920+0.3, +0.8" -> 切成 "920+0.3" (判 920~920.3) 和 "+0.8" (無效)。
-       - 新版: "920+0.3, +0.8" -> 完整保留，Logic C 讀取兩個偏移量 -> 判 920.3~920.8。
-    2. 保留 v21 的換行切割、finditer 全面搜索、mm 去噪功能。
+    Python 工程引擎 (v23: 誤殺修復版)
+    1. [核心修復]: 修正 Logic B (波浪號) 的攔截邏輯。
+       - 舊版: 遇到 "130-0.085" 會誤判為區間，雖因防呆未加入，但仍執行 continue 導致 Logic C 被跳過。
+       - 新版: 只有在「成功解析出合理區間」時才攔截，否則放行給 Logic C 處理公差。
+    2. 保留 v22 的逗號保護、換行切割、finditer 全面搜索。
     """
     grouped_errors = {}
     import re
@@ -721,9 +721,7 @@ def python_numerical_audit(dimension_data):
         clean_std = [n for n in all_nums if (n in mm_nums) or (n not in noise and n > 5)]
 
         s_ranges = []
-        
-        # ⚡️ [v22 修復點]：移除了正則表達式最後面的 " ,， " (逗號)
-        # 這樣 "920+0.3, +0.8" 就不會被切斷，會整串進入 Logic C 進行處理
+        # v22: 移除逗號切割，保留雙公差完整性
         spec_parts = re.split(r"[\n\r]|[一二三四五六]|[（(]\d+[)）]|[;；]", raw_spec)
         
         for part in spec_parts:
@@ -740,16 +738,26 @@ def python_numerical_audit(dimension_data):
                     s_ranges.append([round(b - o, 4), round(b + o, 4)])
                 continue 
 
-            # --- 邏輯 B：波浪號區間 ---
+            # --- 邏輯 B：波浪號區間 (v23 修復點) ---
+            # 這裡很容易把減號公差 (130-0.05) 誤判為區間，所以要加上放行機制
             tilde_matches = list(re.finditer(r"(\d+\.?\d*)[~～-](\d+\.?\d*)", clean_part))
+            has_valid_tilde = False # 🏳️ 標記：是否有任何一個匹配通過了防呆檢查
+            
             if tilde_matches:
                 for match in tilde_matches:
                     n1, n2 = float(match.group(1)), float(match.group(2))
+                    # 防呆：如果是真區間，兩個數字通常很接近 (例如 130~135)
+                    # 如果差太大 (例如 130 和 0.085)，那就是公差，不是區間
                     if abs(n1 - n2) < n1 * 0.5:
                         s_ranges.append([round(min(n1, n2), 4), round(max(n1, n2), 4)])
+                        has_valid_tilde = True
+            
+            # ⚡️ 只有當「真的抓到了有效區間」時，才跳過後面的 Logic C
+            # 如果只是誤判了減號公差，就讓它繼續往下走，給 Logic C 處理
+            if has_valid_tilde:
                 continue
 
-            # --- 邏輯 C：萬用偏移量解析 (這裡會正確處理 +0.3, +0.8) ---
+            # --- 邏輯 C：萬用偏移量解析 (處理 -0.085, -0.125) ---
             all_numbers = re.findall(r"[-+]?\d+\.?\d*", clean_part)
             if not all_numbers: continue
 
@@ -765,8 +773,6 @@ def python_numerical_audit(dimension_data):
                     for b in bases:
                         if offsets:
                             endpoints = [round(b + o, 4) for o in offsets]
-                            # 如果只有一個偏移量 (如 +0.5)，則基準值自己也是邊界
-                            # 如果有兩個偏移量 (如 +0.3, +0.8)，則不需要基準值
                             if len(endpoints) == 1: endpoints.append(b)
                             s_ranges.append([min(endpoints), max(endpoints)])
                         else:
