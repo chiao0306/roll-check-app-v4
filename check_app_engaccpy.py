@@ -1409,15 +1409,23 @@ if st.session_state.photo_gallery:
             for i, p in enumerate(st.session_state.photo_gallery):
                 combined_input += f"\n=== Page {i+1} ===\n{p.get('full_text','')}\n"
 
-            # 3. AI 分析
+                        # ... (上面是 2. 組合文字 combined_input，不用動) ...
+
+            # 3. AI 分析 (加入計時)
             status_box.write("🤖 AI 正在全卷分析...")
+            
+            ai_start_time = time.time()  # ⏱️ [計時開始] AI
             res_main = agent_unified_check(combined_input, combined_input, GEMINI_KEY, main_model_name)
+            ai_duration = time.time() - ai_start_time # ⏱️ [計時結束] AI
+            
             progress_bar.progress(0.8)
             
-            # 4. Python 邏輯檢查
+            # 4. Python 邏輯檢查 (加入計時)
             status_box.write("🐍 Python 正在進行邏輯比對...")
-            dim_data = res_main.get("dimension_data", [])
             
+            py_start_time = time.time() # ⏱️ [計時開始] Python
+            
+            dim_data = res_main.get("dimension_data", [])
             for item in dim_data:
                 new_cat = assign_category_by_python(item.get("item_title", ""))
                 item["category"] = new_cat
@@ -1427,8 +1435,6 @@ if st.session_state.photo_gallery:
             python_numeric_issues = python_numerical_audit(dim_data)
             python_accounting_issues = python_accounting_audit(dim_data, res_main)
             python_process_issues = python_process_audit(dim_data)
-            
-            # ✅ 改用新的 Batch 版表頭稽核
             python_header_issues = python_header_audit_batch(st.session_state.photo_gallery, res_main)
 
             ai_filtered_issues = []
@@ -1442,23 +1448,30 @@ if st.session_state.photo_gallery:
 
             all_issues = ai_filtered_issues + python_numeric_issues + python_accounting_issues + python_process_issues + python_header_issues
             
+            py_duration = time.time() - py_start_time # ⏱️ [計時結束] Python
+
             # 5. 存檔 (Cache)
             usage = res_main.get("_token_usage", {"input": 0, "output": 0})
             
+            # 修正工令讀取邏輯
+            final_job_no = res_main.get("header_info", {}).get("job_no")
+            if not final_job_no or final_job_no == "Unknown":
+                 final_job_no = res_main.get("job_no", "Unknown")
+            
             st.session_state.analysis_result_cache = {
-                "job_no": res_main.get("job_no", "Unknown"),
-                "header_info": res_main.get("header_info", {}), # ✅ 記得存這個，UI 才能顯示！
+                "job_no": final_job_no,
+                "header_info": res_main.get("header_info", {}),
                 "all_issues": all_issues,
                 "total_duration": time.time() - total_start,
+                "ocr_duration": ocr_duration,
+                "ai_duration": ai_duration,     # AI 耗時
+                "py_duration": py_duration,     # Python 耗時
+                
                 "cost_twd": (usage.get("input", 0)*0.3 + usage.get("output", 0)*2.5) / 1000000 * 32.5,
                 "total_in": usage.get("input", 0),
                 "total_out": usage.get("output", 0),
-                "ocr_duration": ocr_duration,
-                "time_eng": time.time() - total_start - ocr_duration,
                 
                 "ai_extracted_data": dim_data,
-                # "python_debug_data": python_debug_data,  <-- ❌ 刪除這行
-                
                 "freight_target": res_main.get("freight_target", 0),
                 "summary_rows": res_main.get("summary_rows", []),
                 "full_text_for_search": combined_input,
@@ -1511,8 +1524,18 @@ if st.session_state.photo_gallery:
         
         st.divider()
 
-        # 3. 頂部狀態條
-        st.success(f"工令: {cache['job_no']} | ⏱️ {cache['total_duration']:.1f}s")
+        # 3. 頂部狀態條 (修改版：詳細時間拆解)
+        # 格式：總耗時 (OCR | AI | Python)
+        total_t = cache.get('total_duration', 0)
+        ocr_t = cache.get('ocr_duration', 0)
+        ai_t = cache.get('ai_duration', 0)
+        py_t = cache.get('py_duration', 0)
+        
+        st.success(
+            f"⏱️ 總耗時: {total_t:.1f}s  "
+            f"( OCR: {ocr_t:.1f}s | AI: {ai_t:.1f}s | Py: {py_t:.2f}s )"
+        )
+        
         st.info(f"💰 本次成本: NT$ {cache['cost_twd']:.2f} (In: {cache['total_in']:,} / Out: {cache['total_out']:,})")
         
         # 4. 規則檢視
