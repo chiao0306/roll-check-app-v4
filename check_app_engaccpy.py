@@ -1625,13 +1625,14 @@ if st.session_state.photo_gallery:
         else:
             st.error(f"發現 {len(real_errors_consolidated)} 類異常")
 
-        # 4. 卡片循環顯示
+        # 4. 卡片循環顯示 (v38: 欄位中文化 + 樣式置中優化)
         for item in consolidated_list:
             with st.container(border=True):
                 c1, c2 = st.columns([3, 1])
                 source_label = item.get('source', '')
                 issue_type = item.get('issue_type', '異常')
                 
+                # 頁碼處理
                 page_str = item.get('page', '?')
                 if "," in str(page_str):
                     page_display = f"Pages: {page_str}"
@@ -1640,8 +1641,7 @@ if st.session_state.photo_gallery:
 
                 c1.markdown(f"**{page_display} | {item.get('item')}** `{source_label}`")
                 
-                # 🛑 針對紅色警示顯示 Error (紅框)
-                # 只要 issue_type 裡有這些關鍵字，或者有 🚨🛑 符號
+                # 燈號邏輯
                 if any(kw in issue_type for kw in ["統計", "數量", "流程", "溯源", "總表", "匯總", "🚨", "🛑"]):
                     c2.error(f"{issue_type}")
                 else:
@@ -1651,11 +1651,42 @@ if st.session_state.photo_gallery:
                 
                 failures = item.get('failures', [])
                 if failures:
-                    # ✅ [修改] 直接顯示我們在 Python 引擎裡整理好的表格
-                    # 因為我們已經把 Key 設為中文 ("頁碼", "項目名稱"... )
-                    # 所以直接丟給 st.dataframe 即可，不用再轉換了！
-                    st.dataframe(failures, use_container_width=True, hide_index=True)
-        
+                    # 1. 轉成 DataFrame
+                    df = pd.DataFrame(failures)
+                    
+                    # 2. 欄位中文化 (Mapping)
+                    # 針對工程引擎產生的 id/val/target 進行改名
+                    # 針對會計引擎已經是中文的，則保持原樣
+                    rename_map = {
+                        "id": "編號",
+                        "val": "實測",
+                        "target": "目標",
+                        "calc": "狀態",
+                        "note": "備註"
+                    }
+                    df.rename(columns=rename_map, inplace=True)
+                    
+                    # 3. 樣式調整 (置中與靠左)
+                    # 先把所有欄位預設為「置中」
+                    styler = df.style.set_properties(**{
+                        'text-align': 'center', 
+                        'white-space': 'nowrap' # 避免內容太多自動換行變很醜
+                    })
+                    
+                    # 標題列也要置中
+                    styler.set_table_styles([
+                        dict(selector='th', props=[('text-align', 'center')])
+                    ])
+
+                    # 4. 特殊欄位強制「靠左」
+                    # 如果表格裡有 "項目名稱" (會計表) 或 "編號" (工程表)，通常靠左比較好看
+                    left_align_cols = [c for c in ["項目名稱", "編號", "Item"] if c in df.columns]
+                    if left_align_cols:
+                        styler.set_properties(subset=left_align_cols, **{'text-align': 'left'})
+
+                    # 5. 顯示表格 (use_container_width=True 會自動撐開寬度)
+                    st.dataframe(styler, use_container_width=True, hide_index=True)
+
         st.divider()
         
         # 下載按鈕邏輯
