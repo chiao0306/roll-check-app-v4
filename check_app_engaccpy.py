@@ -1727,7 +1727,6 @@ if st.session_state.photo_gallery:
                             st.dataframe(hit_df[final_cols].style.format({"分數": "{:.0f}"}), use_container_width=True, hide_index=True)
                         else:
                             st.dataframe(hit_df, use_container_width=True, hide_index=True)
-                        st.divider()
                 else:
                     if target_list:
                         # 有跑分析，但沒抓到 (這才合理)
