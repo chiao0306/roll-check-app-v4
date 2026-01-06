@@ -1670,95 +1670,85 @@ if st.session_state.photo_gallery:
         
         st.info(f"💰 本次成本: NT$ {cache['cost_twd']:.2f} (In: {cache['total_in']:,} / Out: {cache['total_out']:,})")
         
-         # 4. 規則展示 (v56: 強力顯影最終版)
-    with st.expander("🏗️ 檢視 Excel 邏輯與規則參數", expanded=False):
-        
-        # 1. 直接從 session_state 暴力撈取資料
-        # 不管它藏在哪，只要是 accounting_results 我們就拿來檢查
-        target_list = st.session_state.get('accounting_results', [])
-        
-        # 2. 找出隱藏包裹 (HIDDEN_DATA)
-        hidden_payload = {}
-        for item in target_list:
-            if item.get('issue_type') == 'HIDDEN_DATA':
-                hidden_payload = item
-                break
-        
-        # 3. 解析資料
-        rule_hits = hidden_payload.get('rule_hits', {})
-        # 讀取全域變數，若無則讀取封包內的設定
-        current_fuzz = globals().get('GLOBAL_FUZZ_THRESHOLD', hidden_payload.get('fuzz_threshold', 90))
-
-        st.caption(f"ℹ️ 全域統一特規門檻: **{current_fuzz} 分**")
-        
-        try:
-            # 嘗試讀取 Excel 檔案
-            df_rules = pd.read_excel("rules.xlsx")
-            df_rules.columns = [c.strip() for c in df_rules.columns]
+        # 4. 規則展示 (v56: 強力顯影最終版 + X光機修復)
+        with st.expander("🏗️ 檢視 Excel 邏輯與規則參數", expanded=False):
             
-            # 建立快速查詢表 (Rule Name -> Row Data)
-            rule_info_map = {}
-            for _, row in df_rules.iterrows():
-                r_name = str(row.get('Item_Name', '')).strip()
-                # 這裡的 clean key 必須跟引擎端的 clean_text 邏輯完全一致
-                clean_k = r_name.replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
-                rule_info_map[clean_k] = row
+            # 1. 直接從 session_state 暴力撈取資料
+            target_list = st.session_state.get('accounting_results', [])
+            
+            # 2. 找出隱藏包裹 (HIDDEN_DATA)
+            hidden_payload = {}
+            for item in target_list:
+                if item.get('issue_type') == 'HIDDEN_DATA':
+                    hidden_payload = item
+                    break
+            
+            # 3. 解析資料
+            rule_hits = hidden_payload.get('rule_hits', {})
+            current_fuzz = globals().get('GLOBAL_FUZZ_THRESHOLD', hidden_payload.get('fuzz_threshold', 90))
 
-            # 4. 顯示結果 (如果有命中)
-            if rule_hits:
-                st.success(f"🎯 系統偵測到 {len(rule_hits)} 種特規項目！(滑鼠懸停可看明細)")
+            st.caption(f"ℹ️ 全域統一特規門檻: **{current_fuzz} 分**")
+            
+            try:
+                # 嘗試讀取 Excel 檔案
+                df_rules = pd.read_excel("rules.xlsx")
+                df_rules.columns = [c.strip() for c in df_rules.columns]
                 
-                for rule_key, hits in rule_hits.items():
-                    # 找回原始規則資訊
-                    info = rule_info_map.get(rule_key, {})
+                # 建立快速查詢表
+                rule_info_map = {}
+                rules_map_for_xray = {} # 給 X光機用的原始表
+                
+                for _, row in df_rules.iterrows():
+                    r_name = str(row.get('Item_Name', '')).strip()
+                    clean_k = r_name.replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
+                    rule_info_map[clean_k] = row
+                    rules_map_for_xray[clean_k] = row # 這裡同時存一份給 X光機用
+
+                # 4. 顯示結果 (如果有命中)
+                if rule_hits:
+                    st.success(f"🎯 系統偵測到 {len(rule_hits)} 種特規項目！")
                     
-                    st.markdown(f"#### ✅ {rule_key}")
-                    
-                    # 顯示規則參數
-                    c1, c2, c3 = st.columns(3)
-                    c1.text(f"Local: {info.get('Unit_Rule_Local', 'N/A')}")
-                    c2.text(f"Freight: {info.get('Unit_Rule_Freight', 'N/A')}")
-                    c3.text(f"Agg: {info.get('Unit_Rule_Agg', 'N/A')}")
-                    
-                    # 顯示明細表格
-                    hit_df = pd.DataFrame(hits)
-                    
-                    # 只顯示重要欄位
-                    cols_to_show = ["明細名稱", "分數", "匹配類型", "頁碼"]
-                    final_cols = [c for c in cols_to_show if c in hit_df.columns]
-                    
-                    if "分數" in final_cols:
-                        st.dataframe(hit_df[final_cols].style.format({"分數": "{:.0f}"}), use_container_width=True, hide_index=True)
-                    else:
-                        st.dataframe(hit_df, use_container_width=True, hide_index=True)
+                    for rule_key, hits in rule_hits.items():
+                        info = rule_info_map.get(rule_key, {})
                         
-                    st.divider()
-            else:
-                # 如果 target_list 有東西，但 rule_hits 是空的，代表真的沒配對到
-                if target_list:
-                    st.info(f"本次工令未觸發任何特規項目 (門檻: {current_fuzz})。")
+                        st.markdown(f"#### ✅ {rule_key}")
+                        
+                        # 顯示規則參數
+                        c1, c2, c3 = st.columns(3)
+                        c1.text(f"Local: {info.get('Unit_Rule_Local', 'N/A')}")
+                        c2.text(f"Freight: {info.get('Unit_Rule_Freight', 'N/A')}")
+                        c3.text(f"Agg: {info.get('Unit_Rule_Agg', 'N/A')}")
+                        
+                        # 顯示明細表格
+                        hit_df = pd.DataFrame(hits)
+                        cols_to_show = ["明細名稱", "分數", "匹配類型", "頁碼"]
+                        final_cols = [c for c in cols_to_show if c in hit_df.columns]
+                        
+                        if "分數" in final_cols:
+                            st.dataframe(hit_df[final_cols].style.format({"分數": "{:.0f}"}), use_container_width=True, hide_index=True)
+                        else:
+                            st.dataframe(hit_df, use_container_width=True, hide_index=True)
+                        
+                        st.divider()
                 else:
-                    st.warning("⚠️ 尚未執行分析或無分析結果。")
+                    if target_list:
+                        st.info(f"本次工令未觸發任何特規項目 (門檻: {current_fuzz})。")
+                    else:
+                        st.warning("⚠️ 尚未執行分析或無分析結果。")
 
-            # 底部：完整的規則總表
-            st.markdown("---")
-            with st.expander("📋 查看完整規則總表 (All Rules)", expanded=False):
-                st.dataframe(df_rules, use_container_width=True, hide_index=True)
+                # 底部：完整的規則總表
+                st.markdown("---")
+                with st.expander("📋 查看完整規則總表 (All Rules)", expanded=False):
+                    st.dataframe(df_rules, use_container_width=True, hide_index=True)
 
-        except Exception as e:
-            st.error(f"UI 顯示錯誤 (請確認 rules.xlsx 存在): {e}")
-
-                st.divider()
-                
-                # 🔥🔥🔥 [新增] X光分數檢測器 (貼在規則展示卡片的最下方) 🔥🔥🔥
+                # 🔥🔥🔥 [修正] X光分數檢測器 (現在放在 try 裡面，位置正確了) 🔥🔥🔥
                 st.markdown("---")
                 st.subheader("🕵️‍♂️ X光檢測：為什麼沒抓到？")
                 st.caption(f"這裡列出前 10 筆項目的最高分規則，幫您決定 GLOBAL_FUZZ_THRESHOLD 該設多少 (目前: {current_fuzz})")
                 
                 # 取得一些實際項目來測試
                 sample_items = []
-                # 嘗試從會計輸入抓資料
-                acc_input = st.session_state.get('accounting_input_data', [])
+                acc_input = st.session_state.get('analysis_result_cache', {}).get('ai_extracted_data', [])
                 if acc_input:
                     sample_items = [item.get('item_title', '') for item in acc_input[:10]]
                 
@@ -1769,9 +1759,8 @@ if st.session_state.photo_gallery:
                         best_score = 0
                         best_rule = "無"
                         
-                        # 跑一次模擬比對
-                        for k, v in rules_map.items():
-                            # 注意：這裡要跟引擎用一樣的 ratio
+                        # 跑一次模擬比對 (使用 fuzz.ratio)
+                        for k in rules_map_for_xray.keys():
                             sc = fuzz.ratio(k, clean_title)
                             if sc > best_score:
                                 best_score = sc
@@ -1788,10 +1777,10 @@ if st.session_state.photo_gallery:
                         })
                     
                     st.dataframe(pd.DataFrame(debug_data))
-                # 🔥🔥🔥 [結束] 🔥🔥🔥
+                # 🔥🔥🔥 [X光機結束] 🔥🔥🔥
 
             except Exception as e:
-                st.error(f"讀取 rules.xlsx 失敗: {e}")
+                st.error(f"UI 顯示錯誤 (請確認 rules.xlsx 存在): {e}")
                 
         # 5. 原始數據檢視
         with st.expander("📊 檢視 AI 抄錄原始數據", expanded=False):
