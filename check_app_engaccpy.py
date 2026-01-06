@@ -762,13 +762,12 @@ def python_numerical_audit(dimension_data):
     
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官 (v44: Debug 專用版)
-    變更重點：
-    1. [還原核心]: 移除 "車修" 關鍵字白名單。
-       - has_act_mac 回復為僅包含 ["再生", "精車", "未再生", "粗車"]。
-       - 這是為了驗證 "軸頸再生車修" 是否能依正規途徑進入籃子。
-    2. [Debug標記]: 若總表觸發 B 模式籃子，標題顯示 (Mode B)。
-    3. [保留優化]: 全域大小寫無視、模糊籃子識別 (>80分)、鉀字識別。
+    Python 會計官 (v45: 遺珠偵測版)
+    功能升級：
+    1. [遺珠偵測]: 若總表觸發 Mode B (車修/銲補/拆裝)，但明細被拒絕，
+       程式會記錄原因 (缺部位? 缺動作?) 並顯示於 "遺珠之憾" 卡片。
+    2. [強力清洗]: clean_text 改用 regex \s+ 清除所有隱形空白。
+    3. [車修回歸]: 為了避免 OCR 誤判 "再生" 導致漏抓，暫時加回 "車修" 關鍵字作為安全網。
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -778,7 +777,9 @@ def python_accounting_audit(dimension_data, res_main):
 
     # --- 0. 基礎工具 ---
     def clean_text(text):
-        return str(text).replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
+        # 強力清洗：移除所有 whitespace (含 \n, \r, \t, \u3000 等)
+        text = str(text).replace('"', '').replace("'", "")
+        return re.sub(r"\s+", "", text).strip()
 
     def safe_float(value):
         if value is None or str(value).upper() == 'NULL': return 0.0
@@ -812,6 +813,9 @@ def python_accounting_audit(dimension_data, res_main):
 
     summary_rows = res_main.get("summary_rows", [])
     
+    # 準備 Debug 收集器
+    debug_missed_items = [] 
+
     # =================================================
     # 🕵️‍♂️ 第一關：總表內戰 (申請 vs 實交)
     # =================================================
@@ -937,16 +941,16 @@ def python_accounting_audit(dimension_data, res_main):
                     continue
 
                 # =========================================================
-                # 🧺 步驟 1: 籃子撈人 (v44: 還原核心 + 模糊籃子)
+                # 🧺 步驟 1: 籃子撈人
                 # =========================================================
                 match_A = (fuzz.partial_ratio(s_clean, title_clean) > 90)
                 match_B = False
 
                 if batch_qty > 0 and match_A: match_B = True
                 else:
-                    s_upper_check = s_clean.upper() # 強制轉大寫
+                    s_upper_check = s_clean.upper()
                     
-                    # 模糊籃子識別 (>80分)
+                    # 模糊籃子 (>80分)
                     is_dis = fuzz.partial_ratio("ROLL拆裝", s_upper_check) > 80
                     is_mac = fuzz.partial_ratio("ROLL車修", s_upper_check) > 80
                     is_weld = (fuzz.partial_ratio("ROLL銲補", s_upper_check) > 80) or \
@@ -956,9 +960,8 @@ def python_accounting_audit(dimension_data, res_main):
                     has_part_body = "本體" in title_clean
                     has_part_journal = any(k in title_clean for k in journal_family)
                     
-                    # 🔥 [還原] 移除 "車修", "加工", "研磨"。回到最嚴格的動作定義。
-                    # 只看: 再生, 精車, 未再生, 粗車
-                    has_act_mac = any(k in title_clean for k in ["再生", "精車", "未再生", "粗車"])
+                    # 🔥 [安全網]: 加回 "車修" 關鍵字，防止 "再生" 亂碼
+                    has_act_mac = any(k in title_clean for k in ["再生", "精車", "未再生", "粗車", "車修", "加工", "研磨"])
                     
                     has_act_weld = ("銲補" in title_clean or "焊" in title_clean or "鉀" in title_clean)
                     is_assy = ("組裝" in title_clean or "拆裝" in title_clean)
@@ -966,7 +969,22 @@ def python_accounting_audit(dimension_data, res_main):
                     if is_dis and is_assy: match_B = True
                     elif is_mac and (has_part_body or has_part_journal) and has_act_mac: match_B = True
                     elif is_weld and (has_part_body or has_part_journal) and has_act_weld: match_B = True
-                
+                    
+                    # 🔥 [Debug] 遺珠偵測
+                    if is_mac and not match_B:
+                        reason = []
+                        if not (has_part_body or has_part_journal): reason.append("缺部位")
+                        if not has_act_mac: reason.append("缺動作")
+                        if is_dis and is_assy: reason.append("被拆裝籃搶走") # 理論上不會發生
+                        
+                        if reason:
+                            debug_missed_items.append({
+                                "summary": s_title,
+                                "item": raw_title,
+                                "reason": "+".join(reason),
+                                "page": page
+                            })
+
                 if agg_mode == "A": match = match_A
                 elif agg_mode == "AB": match = match_A or match_B
                 else: match = match_B if match_B else match_A
@@ -978,7 +996,6 @@ def python_accounting_audit(dimension_data, res_main):
                     s_upper = s_clean.upper()
                     t_upper = title_clean.upper()
 
-                    # 1. 屬性標記
                     s_is_unregen = "未再生" in s_clean or "粗車" in s_clean
                     t_is_unregen = "未再生" in title_clean or "粗車" in title_clean
                     
@@ -990,7 +1007,6 @@ def python_accounting_audit(dimension_data, res_main):
                     s_is_journal = any(k in s_clean for k in journal_family)
                     t_is_journal = any(k in title_clean for k in journal_family)
 
-                    # 2. 執行攔截
                     if s_is_regen and t_is_unregen: match = False
                     if s_is_unregen and t_is_regen: match = False
                     
@@ -1011,7 +1027,6 @@ def python_accounting_audit(dimension_data, res_main):
     for s_title, data in global_sum_tracker.items():
         if abs(data["actual"] - data["target"]) > 0.01: 
             
-            # 🔥 [Debug] 判斷是否觸發 B 模式籃子
             s_upper = clean_text(s_title).upper()
             is_mode_b = False
             if (fuzz.partial_ratio("ROLL拆裝", s_upper) > 80) or \
@@ -1020,10 +1035,8 @@ def python_accounting_audit(dimension_data, res_main):
                ("焊" in s_upper) or ("鉀" in s_upper):
                 is_mode_b = True
             
-            # 顯示標題 (若觸發 B 模式則加註記)
             display_title = s_title
-            if is_mode_b:
-                display_title += " (Mode B)"
+            if is_mode_b: display_title += " (Mode B)"
 
             fail_table = []
             fail_table.append({"頁碼": "總表", "項目名稱": f"🎯 目標 (實交)", "數量": data["target"], "備註": "基準"})
@@ -1032,13 +1045,27 @@ def python_accounting_audit(dimension_data, res_main):
             fail_table.append({"頁碼": "∑", "項目名稱": "加總結果", "數量": data["actual"], "備註": "總計"})
 
             accounting_issues.append({
-                "page": data["page"], "item": display_title, # 使用標記後的標題
+                "page": data["page"], "item": display_title,
                 "issue_type": "🛑 明細匯總不符", 
                 "common_reason": f"實交({data['target']}) != 明細加總({data['actual']})", 
                 "failures": fail_table, 
                 "source": "🐍 會計引擎"
             })
-            
+    
+    # 🔥 [Debug] 顯示遺珠
+    if debug_missed_items:
+        fail_table = []
+        for miss in debug_missed_items[:20]: # 只顯示前20個避免洗版
+            fail_table.append({"總表": miss['summary'], "被拒明細": miss['item'], "原因": miss['reason'], "頁碼": miss['page']})
+        
+        accounting_issues.append({
+            "page": "DEBUG", "item": "🕵️‍♂️ 遺珠之憾",
+            "issue_type": "⚠️ 潛在漏抓",
+            "common_reason": "符合籃子但被過濾",
+            "failures": fail_table,
+            "source": "🐍 會計引擎"
+        })
+
     return accounting_issues
 
 def python_process_audit(dimension_data):
