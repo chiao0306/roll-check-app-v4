@@ -1670,61 +1670,78 @@ if st.session_state.photo_gallery:
         
         st.info(f"💰 本次成本: NT$ {cache['cost_twd']:.2f} (In: {cache['total_in']:,} / Out: {cache['total_out']:,})")
         
-        # 4. 規則展示 (v53: 全域變數連動 + 特規顯影)
+        # 4. 規則展示 (v54: 強制顯影版 - 改為直接遍歷命中紀錄)
         with st.expander("🏗️ 檢視 Excel 邏輯與規則參數", expanded=False):
             
-            # 1. 嘗試從 issue_list 中撈取隱藏的命中資料 (HIDDEN_DATA)
+            # 1. 撈取資料
             issues_list = st.session_state.get('accounting_results', [])
-            hidden_payload = next((item for item in issues_list if item.get('issue_type') == 'HIDDEN_DATA'), {})
-            rule_hits = hidden_payload.get('rule_hits', {})
             
-            # 🔥 關鍵修改：讀取最上方定義的全域變數，若沒讀到則預設 90
-            current_fuzz = globals().get('GLOBAL_FUZZ_THRESHOLD', 90) 
+            # 安全撈取：先印出 debug 訊息確認資料是否存在
+            hidden_payload = {}
+            for item in issues_list:
+                if item.get('issue_type') == 'HIDDEN_DATA':
+                    hidden_payload = item
+                    break
+            
+            rule_hits = hidden_payload.get('rule_hits', {})
+            current_fuzz = globals().get('GLOBAL_FUZZ_THRESHOLD', 90)
 
-            st.caption(f"ℹ️ 全域統一特規門檻: **{current_fuzz} 分** (所有引擎同步適用)")
+            st.caption(f"ℹ️ 全域統一特規門檻: **{current_fuzz} 分** (>=95分嚴格, <=85分寬鬆)")
+            
+            # 🔥 Debug 顯示：直接告訴我總共抓到幾筆
+            # st.write(f"Debug: 系統回傳了 {len(rule_hits)} 筆特規紀錄") 
 
             try:
+                # 讀取 Excel 僅為了補充資訊 (運費/倍率)
                 df_rules = pd.read_excel("rules.xlsx")
                 df_rules.columns = [c.strip() for c in df_rules.columns]
                 
-                # --- 核心邏輯：列出有觸發的規則 ---
-                triggered_rules_count = 0
-                
-                # 遍歷 DataFrame 確保順序
+                # 建立一個快速查詢表
+                rule_info_map = {}
                 for _, row in df_rules.iterrows():
-                    rule_name = str(row.get('Item_Name', '')).strip()
-                    if not rule_name: continue
-                    
-                    # 產生 Key 進行查找
-                    clean_name = rule_name.replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
-                    
-                    # 檢查是否命中
-                    hits = rule_hits.get(clean_name, [])
-                    if hits:
-                        triggered_rules_count += 1
+                    r_name = str(row.get('Item_Name', '')).strip()
+                    clean_k = r_name.replace(" ", "").replace("\n", "").replace('"', '').replace("'", "").strip()
+                    rule_info_map[clean_k] = row
+
+                # --- 核心邏輯修改：直接遍歷命中紀錄 (rule_hits) ---
+                # 不再管 Excel 有沒有對到名字，只要有命中就印出來！
+                
+                if not rule_hits:
+                     st.info(f"本次工令未觸發任何特規項目 (門檻 {current_fuzz} 分)。")
+                else:
+                    for rule_key, hits in rule_hits.items():
+                        # 嘗試找回原始規則資訊
+                        info = rule_info_map.get(rule_key, {})
                         
-                        # 顯示規則標題與基本參數
-                        st.markdown(f"#### ✅ {rule_name}")
+                        # 顯示標題
+                        st.markdown(f"#### ✅ {rule_key}")
                         
-                        # 規則參數列
+                        # 顯示參數 (如果找得到)
                         c1, c2, c3 = st.columns(3)
-                        c1.text(f"Local: {row.get('Unit_Rule_Local', '-')}")
-                        c2.text(f"Freight: {row.get('Unit_Rule_Freight', '-')}")
-                        c3.text(f"Agg: {row.get('Unit_Rule_Agg', '-')}")
+                        c1.text(f"Local: {info.get('Unit_Rule_Local', 'N/A')}")
+                        c2.text(f"Freight: {info.get('Unit_Rule_Freight', 'N/A')}")
+                        c3.text(f"Agg: {info.get('Unit_Rule_Agg', 'N/A')}")
                         
-                        # 配對明細表格
+                        # 顯示明細表格
                         hit_df = pd.DataFrame(hits)
+                        cols_to_show = ["明細名稱", "匹配類型", "分數", "頁碼"]
                         
-                        # 表格美化 (顯示：明細名稱、匹配類型、分數、頁碼)
-                        st.dataframe(
-                            hit_df[["明細名稱", "匹配類型", "分數", "頁碼"]].style.format({"分數": "{:.0f}"}), 
-                            use_container_width=True, 
-                            hide_index=True
-                        )
+                        # 安全顯示
+                        final_cols = [c for c in cols_to_show if c in hit_df.columns]
+                        if "分數" in final_cols:
+                            st.dataframe(hit_df[final_cols].style.format({"分數": "{:.0f}"}), use_container_width=True, hide_index=True)
+                        else:
+                            st.dataframe(hit_df, use_container_width=True, hide_index=True)
+                            
                         st.divider()
 
-                if triggered_rules_count == 0:
-                    st.info("本次工令未觸發任何特規項目。")
+                # --- 底部：完整的規則總表 ---
+                st.markdown("---")
+                with st.expander("📋 查看完整規則總表 (All Rules)", expanded=False):
+                    st.dataframe(df_rules, use_container_width=True, hide_index=True)
+
+            except Exception as e:
+                st.error(f"UI 顯示錯誤: {e}")
 
                 # --- 底部：完整的規則總表 (供查詢用) ---
                 st.markdown("---")
