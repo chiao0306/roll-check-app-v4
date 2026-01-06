@@ -762,9 +762,13 @@ def python_numerical_audit(dimension_data):
     
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官 (v32: 紅色警示 & 詳細列表版)
-    1. [總表內戰] 申請 vs 實交 -> 觸發紅色警示 (🚨)。
-    2. [明細匯總] 實交 vs 明細加總 -> 觸發紅色警示 (🛑) 並列出詳細清單。
+    Python 會計官 (v34: 完全互斥防禦版)
+    更新重點：
+    1. [再生互斥]: 嚴格區分「再生」與「未再生」。
+    2. [部位互斥]: 嚴格區分「本體」與「軸頸家族(軸頸/軸頭/軸位)」。
+       - 總表若為本體，絕對拒絕軸頸/軸頭/軸位。
+       - 總表若為軸頸，絕對拒絕本體。
+    3. [顯示優化]: 維持紅色警示與詳細表格。
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -819,12 +823,11 @@ def python_accounting_audit(dimension_data, res_main):
         q_deliver = safe_float(s.get('delivery_qty', 0)) 
         if q_deliver == 0 and 'target' in s: q_deliver = safe_float(s.get('target', 0))
 
-        # 🚨 紅色警示：總表內戰
         if abs(q_apply - q_deliver) > 0.01:
              accounting_issues.append({
                 "page": s.get('page', "總表"), 
                 "item": f"{s_title}", 
-                "issue_type": "🚨 總表數量異常", # 關鍵字改為紅色系
+                "issue_type": "🚨 總表數量異常", 
                 "common_reason": f"申請({q_apply}) != 實交({q_deliver})", 
                 "failures": [
                     {"頁碼": "總表", "項目名稱": "📝 申請數量", "數量": q_apply, "備註": "原始值"},
@@ -834,10 +837,7 @@ def python_accounting_audit(dimension_data, res_main):
             })
             
         global_sum_tracker[s_title] = {
-            "target": q_deliver, 
-            "actual": 0, 
-            "details": [], # 這裡我們會存詳細資料
-            "page": s.get('page', "總表")
+            "target": q_deliver, "actual": 0, "details": [], "page": s.get('page', "總表")
         }
 
     # =================================================
@@ -850,7 +850,7 @@ def python_accounting_audit(dimension_data, res_main):
         target_pc = safe_float(item.get("item_pc_target", 0)) 
         batch_qty = safe_float(item.get("batch_total_qty", 0))
         
-        # ... (規則匹配邏輯省略，保持不變) ...
+        # 2.1 規則匹配
         rule_set = rules_map.get(title_clean)
         if not rule_set:
             t_no = re.sub(r"[\(（].*?[\)）]", "", title_clean)
@@ -887,15 +887,17 @@ def python_accounting_audit(dimension_data, res_main):
                  "source": "🐍 會計引擎"
              })
 
-        # B. 重複檢查 (略，保持原狀)
+        # B. 重複檢查 (包含軸頸家族)
+        journal_family = ["軸頸", "軸頭", "軸位", "內孔", "JOURNAL"]
+        
         if "本體" in title_clean:
              for rid, count in id_counts.items():
                 if count > 1: accounting_issues.append({"page": page, "item": raw_title, "issue_type": "⚠️編號重複(本體)", "common_reason": f"{rid} 重複 {count}次", "failures": []})
-        elif any(k in title_clean for k in ["軸頸", "軸頭", "軸位", "內孔", "JOURNAL"]):
+        elif any(k in title_clean for k in journal_family):
              for rid, count in id_counts.items():
                 if count > 2: accounting_issues.append({"page": page, "item": raw_title, "issue_type": "⚠️編號重複(軸頸)", "common_reason": f"{rid} 重複 {count}次", "failures": []})
 
-        # C. 運費 & 總表歸戶
+        # C. 運費 & 歸戶
         fr_multiplier = parse_ratio(u_fr)
         freight_val = 0.0
         f_note = ""
@@ -920,7 +922,7 @@ def python_accounting_audit(dimension_data, res_main):
                 match = False
                 s_clean = clean_text(s_title)
                 
-                # 運費比對
+                # 運費通道
                 is_freight = False
                 if fuzz.partial_ratio("輥輪拆裝.車修或銲補運費", s_clean) > 70: is_freight = True
                 elif "運費" in s_clean or "FREIGHT" in s_clean: is_freight = True
@@ -928,11 +930,10 @@ def python_accounting_audit(dimension_data, res_main):
                 if is_freight:
                     if freight_val > 0:
                         data["actual"] += freight_val
-                        # 📝 [紀錄明細]
                         data["details"].append({"page": page, "title": raw_title, "val": freight_val, "note": f"運費 {f_note}"})
                     continue
 
-                # 一般項目比對
+                # 一般通道
                 match_A = (fuzz.partial_ratio(s_clean, title_clean) > 90)
                 if batch_qty > 0 and match_A: match = True
                 else:
@@ -940,78 +941,84 @@ def python_accounting_audit(dimension_data, res_main):
                     is_dis = "ROLL拆裝" in s_clean
                     is_mac = "ROLL車修" in s_clean
                     is_weld = "ROLL銲補" in s_clean or "焊" in s_clean
-                    has_part = "本體" in title_clean or any(k in title_clean for k in ["軸頸", "軸頭", "軸位", "JOURNAL"])
+                    
+                    # 判斷部位
+                    has_part_body = "本體" in title_clean
+                    has_part_journal = any(k in title_clean for k in journal_family) # 軸頸家族
+                    
                     has_act_mac = any(k in title_clean for k in ["再生", "精車", "未再生", "粗車"])
                     has_act_weld = ("銲補" in title_clean or "焊" in title_clean)
                     is_assy = ("組裝" in title_clean or "拆裝" in title_clean)
+                    
                     if is_dis and is_assy: match_B = True
-                    elif is_mac and has_part and has_act_mac: match_B = True
-                    elif is_weld and has_part and has_act_weld: match_B = True
+                    elif is_mac and (has_part_body or has_part_journal) and has_act_mac: match_B = True
+                    elif is_weld and (has_part_body or has_part_journal) and has_act_weld: match_B = True
                     
                     if agg_mode == "A": match = match_A
                     elif agg_mode == "AB": match = match_A or match_B
                     else: match = match_B if match_B else match_A
 
-                # 互斥鎖
+                # =========================================
+                # 🔥 [關鍵修正] 嚴格互斥鎖 v34 (含軸頸家族)
+                # =========================================
                 if match:
-                    sum_unregen = "未再生" in s_clean or "粗車" in s_clean
-                    item_regen = ("再生" in title_clean or "精車" in title_clean) and "未再生" not in title_clean
-                    if sum_unregen and item_regen: match = False
+                    s_upper = s_clean.upper()
+                    t_upper = title_clean.upper()
+
+                    # 1. 屬性標記
+                    s_is_unregen = "未再生" in s_clean or "粗車" in s_clean
+                    t_is_unregen = "未再生" in title_clean or "粗車" in title_clean
                     
-                    sum_body = "本體" in s_clean
-                    sum_journal = any(k in s_clean for k in ["軸頸", "軸頭"])
-                    item_body = "本體" in title_clean
-                    item_journal = any(k in title_clean for k in ["軸頸", "軸頭"])
-                    if sum_body and not sum_journal and item_journal: match = False
+                    # 再生 = (有再生) 且 (非未再生)
+                    s_is_regen = ("再生" in s_clean or "精車" in s_clean or "車修" in s_clean) and not s_is_unregen
+                    t_is_regen = ("再生" in title_clean or "精車" in title_clean or "車修" in title_clean) and not t_is_unregen
                     
-                    if "TOP" in s_clean.upper() and "BOTTOM" in title_clean.upper(): match = False
-                    if "BOTTOM" in s_clean.upper() and "TOP" in title_clean.upper(): match = False
+                    # 本體
+                    s_is_body = "本體" in s_clean
+                    t_is_body = "本體" in title_clean
+                    
+                    # 軸頸家族 (包含 軸頸、軸頭、軸位、內孔)
+                    s_is_journal = any(k in s_clean for k in journal_family)
+                    t_is_journal = any(k in title_clean for k in journal_family)
+
+                    # 2. 執行攔截
+                    
+                    # [鎖A] 再生 vs 未再生 (防止混淆)
+                    if s_is_regen and t_is_unregen: match = False
+                    if s_is_unregen and t_is_regen: match = False
+                    
+                    # [鎖B] 本體 vs 軸頸家族 (防止混淆)
+                    # 如果總表是「純本體」(沒提到軸頸)，但明細是「軸頸/軸頭/軸位」 -> 擋！
+                    if s_is_body and not s_is_journal and t_is_journal: match = False
+                    
+                    # 如果總表是「純軸頸」(沒提到本體)，但明細是「本體」 -> 擋！
+                    if s_is_journal and not s_is_body and t_is_body: match = False
+                    
+                    # [鎖C] TOP vs BOTTOM
+                    if "TOP" in s_upper and "BOTTOM" in t_upper: match = False
+                    if "BOTTOM" in s_upper and "TOP" in t_upper: match = False
 
                 if match:
                     data["actual"] += qty_agg
                     c_msg = f"x{agg_multiplier}" if agg_multiplier != 1.0 else ""
-                    # 📝 [紀錄明細]
                     data["details"].append({"page": page, "title": raw_title, "val": qty_agg, "note": c_msg})
 
     # =================================================
-    # 🕵️‍♂️ 第三關：明細總結算 (產生詳細表格)
+    # 🕵️‍♂️ 第三關：明細總結算
     # =================================================
     for s_title, data in global_sum_tracker.items():
         if abs(data["actual"] - data["target"]) > 0.01: 
-            
-            # 1. 建構詳細表格內容
             fail_table = []
-            
-            # (A) 基準列
-            fail_table.append({
-                "頁碼": "總表", 
-                "項目名稱": f"🎯 目標 (實交)", 
-                "數量": data["target"], 
-                "備註": "基準"
-            })
-            
-            # (B) 明細列 (逐一列出)
+            fail_table.append({"頁碼": "總表", "項目名稱": f"🎯 目標 (實交)", "數量": data["target"], "備註": "基準"})
             for d in data["details"]:
-                fail_table.append({
-                    "頁碼": f"P.{d['page']}",
-                    "項目名稱": d['title'],
-                    "數量": d['val'],
-                    "備註": d['note']
-                })
-            
-            # (C) 總計列
-            fail_table.append({
-                "頁碼": "∑", 
-                "項目名稱": "加總結果", 
-                "數量": data["actual"], 
-                "備註": "總計"
-            })
+                fail_table.append({"頁碼": f"P.{d['page']}", "項目名稱": d['title'], "數量": d['val'], "備註": d['note']})
+            fail_table.append({"頁碼": "∑", "項目名稱": "加總結果", "數量": data["actual"], "備註": "總計"})
 
             accounting_issues.append({
                 "page": data["page"], "item": s_title, 
-                "issue_type": "🛑 明細匯總不符", # 紅色警示
+                "issue_type": "🛑 明細匯總不符", 
                 "common_reason": f"實交({data['target']}) != 明細加總({data['actual']})", 
-                "failures": fail_table,  # 這裡放入我們做好的完整表格
+                "failures": fail_table, 
                 "source": "🐍 會計引擎"
             })
             
