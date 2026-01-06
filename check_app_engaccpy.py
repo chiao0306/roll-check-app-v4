@@ -350,25 +350,35 @@ def python_engineering_audit(dimension_data):
 
 def assign_category_by_python(item_title):
     """
-    Python 分類官 (v11: 熱處理/動平衡豁免版)
-    1. [豁免]: 動平衡、熱處理 -> 直接 Exempt (不驗尺寸)。
-    2. [既有功能]: 軸位/軸頸 Max Limit、SKIP 判斷等。
+    Python 分類官 (v12: 全域反向鎖 + 優先權修正版)
+    1. [豁免]: 動平衡、熱處理 -> 直接 Exempt。
+    2. [特規]: 讀取 rules.xlsx，使用 GLOBAL_FUZZ_THRESHOLD + token_sort_ratio 防止劫持。
+    3. [補底]: 關鍵字判斷，優先權：未再生 > 軸頸 > 焊補 > 精加工。
     """
     import pandas as pd
     from thefuzz import fuzz
     import re
 
+    # 🔥 1. 讀取全域門檻 (同步反向鎖標準)
+    CURRENT_THRESHOLD = globals().get('GLOBAL_FUZZ_THRESHOLD', 90)
+
     def clean_text(text):
         return str(text).replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
 
     title_clean = clean_text(item_title)
-    t = str(item_title).upper().replace(" ", "").replace("\n", "").replace('"', "")
+    t_upper = str(item_title).upper().replace(" ", "").replace("\n", "").replace('"', "")
 
-    # ⚡️ [新增] 動平衡、熱處理直接豁免 (不驗尺寸，但會計照常)
-    if any(k in t for k in ["動平衡", "BALANCING", "熱處理", "HEAT", "TREATING"]):
+    # ==========================================
+    # ⚡️ Phase 1: 絕對豁免 (動平衡/熱處理)
+    # ==========================================
+    if any(k in t_upper for k in ["動平衡", "BALANCING", "熱處理", "HEAT", "TREATING"]):
         return "exempt"
 
+    # ==========================================
+    # ⚡️ Phase 2: Excel 特規鎖 (反向鎖核心)
+    # ==========================================
     try:
+        # 讀取規則 (實務上建議快取 df，避免每次 IO)
         df = pd.read_excel("rules.xlsx")
         df.columns = [c.strip() for c in df.columns]
         
@@ -376,46 +386,58 @@ def assign_category_by_python(item_title):
         forced_rule = None
         
         for _, row in df.iterrows():
-            rule_val = str(row.get('Category_Rule', '')).strip()
-            if not rule_val or rule_val.lower() == 'nan': continue
-            
+            rule_cat = str(row.get('Category_Rule', '')).strip() # 注意：Excel 需有此欄位
             iname = str(row.get('Item_Name', '')).strip()
-            iname_clean = clean_text(iname)
             
-            score = fuzz.partial_ratio(iname_clean, title_clean)
-            if score < 95: 
-                 t_no = re.sub(r"[\(（].*?[\)）]", "", title_clean)
-                 sc_no = fuzz.partial_ratio(iname_clean, t_no)
-                 if sc_no > score: score = sc_no
+            # 如果沒有設定 Category 規則，就跳過
+            if not rule_cat or rule_cat.lower() == 'nan' or not iname: 
+                continue
             
-            if score > 85: 
+            clean_rule_name = clean_text(iname)
+            
+            # 🔥 [關鍵修改] 改用 token_sort_ratio + 全域門檻
+            # 這就是「反向鎖」：如果長度差太多或雜字太多，分數會低於門檻
+            score = fuzz.token_sort_ratio(clean_rule_name, title_clean)
+            
+            if score > CURRENT_THRESHOLD: 
                 if score > best_score:
                     best_score = score
-                    forced_rule = rule_val
+                    forced_rule = rule_cat
+                # 如果分數一樣，選字串長的 (通常更精確)
                 elif score == best_score:
-                    if len(rule_val) > len(forced_rule if forced_rule else ""):
-                        forced_rule = rule_val
+                    if len(rule_cat) > len(forced_rule if forced_rule else ""):
+                        forced_rule = rule_cat
 
+        # 如果命中了特規，解析規則
         if forced_rule:
             fr = forced_rule.upper()
             if "豁免" in fr or "EXEMPT" in fr or "SKIP" in fr: return "exempt"
-            
+            if "本體" in fr or "UN_REGEN" in fr or "未再生" in fr: return "un_regen"
             if "再生" in fr or "精車" in fr or "RANGE" in fr: return "range"
             if "銲" in fr or "焊" in fr or "MIN" in fr: return "min_limit"
             if "軸頸" in fr or "軸頭" in fr or "軸位" in fr or "MAX" in fr: return "max_limit"
-            if "本體" in fr or "UN_REGEN" in fr: return "un_regen"
             
     except Exception: pass
 
-    has_weld = any(k in t for k in ["銲補", "銲接", "焊", "WELD", "鉀"])
-    has_unregen = any(k in t for k in ["未再生", "UN_REGEN", "粗車"])
-    has_regen = any(k in t for k in ["再生", "研磨", "精加工", "車修", "KEYWAY", "GRIND", "MACHIN", "精車", "組裝", "拆裝", "裝配", "ASSY"])
+    # ==========================================
+    # ⚡️ Phase 3: 關鍵字補底 (優先權修正)
+    # ==========================================
     
-    if has_weld: return "min_limit"
-    if has_unregen:
-        if any(k in t for k in ["軸頸", "軸頭", "軸位", "內孔", "JOURNAL"]): return "max_limit"
+    # 1. 未再生 (最高優先，避免被車修誤判)
+    if any(k in t_upper for k in ["未再生", "UN_REGEN", "粗車"]):
         return "un_regen"
-    if has_regen: return "range"
+
+    # 2. 軸頸/軸頭 (通常是上限邏輯)
+    if any(k in t_upper for k in ["軸頸", "軸頭", "軸位", "JOURNAL"]): 
+        return "max_limit"
+
+    # 3. 焊補 (最小值邏輯)
+    if any(k in t_upper for k in ["銲補", "銲接", "焊", "WELD", "鉀"]): 
+        return "min_limit"
+
+    # 4. 精加工/一般車修 (區間邏輯)
+    if any(k in t_upper for k in ["再生", "研磨", "精加工", "KEYWAY", "GRIND", "MACHIN", "精車", "組裝", "拆裝", "裝配", "內孔", "ASSY"]): 
+        return "range"
 
     return "unknown"
 
