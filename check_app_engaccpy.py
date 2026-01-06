@@ -1493,6 +1493,30 @@ if st.session_state.photo_gallery:
             # --- 💡 [顯示結果區塊] 數量同步修正版 ---
     if st.session_state.analysis_result_cache:
         cache = st.session_state.analysis_result_cache
+        
+            # --- [新增] UI 顯示：表頭資訊卡片 ---
+            st.divider()
+            st.subheader("📋 表頭資訊偵測")
+            
+            # 從 AI 結果中提取資料
+            h_info = res_main.get("header_info", {})
+            current_job = h_info.get("job_no", "未偵測")
+            sch_date = h_info.get("scheduled_date", "未偵測")
+            act_date = h_info.get("actual_date", "未偵測")
+            
+            # 使用 Streamlit 的美觀指標元件顯示
+            col_h1, col_h2, col_h3 = st.columns(3)
+            with col_h1:
+                st.metric("工令單號 (Job No)", current_job, delta=None)
+            with col_h2:
+                st.metric("預定交貨日", sch_date)
+            with col_h3:
+                # 如果有遲交 (實際 > 預定)，讓它變紅字 (邏輯寫在 help 參數或直接用 delta)
+                st.metric("實際交貨日", act_date)
+            
+            st.divider()
+            # ----------------------------------
+
         all_issues = cache.get('all_issues', [])
         
         # 1. 頂部狀態條
