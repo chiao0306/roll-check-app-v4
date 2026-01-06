@@ -593,13 +593,35 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
 
 def python_numerical_audit(dimension_data):
     """
-    Python 工程引擎 (v28: 熱處理/動平衡豁免版)
-    1. [豁免]: 動平衡、熱處理 -> 直接跳過。
-    2. [權重]: 保持 v25/v26 邏輯 (Excel 規則 > 關鍵字)。
+    Python 工程引擎 (v29: 全域統一特規版)
+    升級內容：
+    1. [統一配對]: 引入與會計同級的配對邏輯 (GLOBAL_FUZZ_THRESHOLD + fuzz.ratio)。
+    2. [規則優先]: 若 Excel 特規配對成功且設定為 SKIP/EXEMPT，直接豁免。
+    3. [原有邏輯]: 保留熱處理/動平衡豁免，以及各種數值檢查邏輯。
     """
     grouped_errors = {}
     import re
+    import pandas as pd
+    from thefuzz import fuzz
+
+    # 🔥 1. 讀取全域門檻 (與會計同步)
+    CURRENT_THRESHOLD = globals().get('GLOBAL_FUZZ_THRESHOLD', 95)
+
     if not dimension_data: return []
+
+    # 🔥 2. 預先載入規則 (只載入一次)
+    rules_map = {}
+    try:
+        df = pd.read_excel("rules.xlsx")
+        df.columns = [c.strip() for c in df.columns]
+        for _, row in df.iterrows():
+            iname = str(row.get('Item_Name', '')).strip()
+            if iname: 
+                # 工程主要看 Local 規則 (是否豁免)
+                rules_map[str(iname).replace(" ", "").replace("\n", "").strip()] = {
+                    "u_local": str(row.get('Unit_Rule_Local', '')).strip()
+                }
+    except: pass
 
     for item in dimension_data:
         ds = str(item.get("ds", ""))
@@ -611,10 +633,44 @@ def python_numerical_audit(dimension_data):
         page_num = item.get("page", "?")
         raw_spec = str(item.get("std_spec", "")).replace('"', "")
         
-        # ⚡️ [新增] 動平衡、熱處理直接跳過
+        # =========================================================
+        # 🔥 3. 執行特規配對 (統一邏輯)
+        # =========================================================
+        title_clean = title.strip()
+        rule_set = None
+        
+        # A. 完全匹配
+        if title_clean in rules_map:
+            rule_set = rules_map[title_clean]
+        
+        # B. 去括號匹配
+        if not rule_set:
+            t_no = re.sub(r"[\(（].*?[\)）]", "", title_clean)
+            if t_no in rules_map:
+                rule_set = rules_map[t_no]
+        
+        # C. 模糊匹配 (使用全域門檻 + 嚴格比對)
+        if not rule_set and rules_map:
+            best_score = 0
+            for k, v in rules_map.items():
+                sc = fuzz.ratio(k, title_clean) # 嚴格比對
+                if sc > CURRENT_THRESHOLD and sc > best_score:
+                    best_score = sc
+                    rule_set = v
+        # =========================================================
+
+        # ⚡️ [既有豁免] 動平衡、熱處理直接跳過 (關鍵字優先)
         t_upper = title.upper()
         if any(k in t_upper for k in ["動平衡", "BALANCING", "熱處理", "HEAT"]):
             continue
+            
+        # ⚡️ [規則豁免] 如果 Excel 規則說要 SKIP，就跳過
+        if rule_set:
+            u_local = rule_set.get("u_local", "").upper()
+            if "SKIP" in u_local or "EXEMPT" in u_local or "豁免" in u_local:
+                continue
+
+        # --- 以下為數值提取與檢查邏輯 (保持 v28 原貌) ---
         
         mm_nums = [float(n) for n in re.findall(r"(\d+\.?\d*)\s*mm", raw_spec)]
         all_nums = [float(n) for n in re.findall(r"(\d+\.?\d*)", raw_spec)]
