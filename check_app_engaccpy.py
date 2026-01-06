@@ -421,36 +421,22 @@ def consolidate_issues(issues):
     🗂️ 異常合併器：將「項目」、「錯誤類型」、「原因」完全相同的異常合併成一張卡片
     """
     grouped = {}
-    
     for i in issues:
-        # 1. 產生合併鑰匙 (Key)：項目 + 類型 + 原因
-        # 這樣確保只有真正一樣的問題才會被並在一起
         key = (i.get('item', ''), i.get('issue_type', ''), i.get('common_reason', ''))
-        
         if key not in grouped:
-            # 初始化：複製第一筆資料
             grouped[key] = i.copy()
-            # 把頁碼轉成 Set 集合 (避免重複)
             grouped[key]['pages_set'] = {str(i.get('page', '?'))}
-            # 確保 failures 是獨立的 list
             grouped[key]['failures'] = i.get('failures', []).copy()
         else:
-            # 合併：把新的頁碼加進去
             grouped[key]['pages_set'].add(str(i.get('page', '?')))
-            # 合併：把新的證據 (failures) 加到表格裡
             grouped[key]['failures'].extend(i.get('failures', []))
             
-    # 2. 轉回 List 並整理頁碼格式
     result = []
     for key, val in grouped.items():
-        # 頁碼排序：讓它顯示 P.1, P.3, P.5 而不是亂跳
         sorted_pages = sorted(list(val['pages_set']), key=lambda x: int(x) if x.isdigit() else 999)
-        val['page'] = ", ".join(sorted_pages) # 變成字串 "1, 3, 5"
-        
-        # 移除暫存的 set
+        val['page'] = ", ".join(sorted_pages)
         del val['pages_set']
         result.append(val)
-        
     return result
 
 # --- 5. 總稽核 Agent (雙核心引擎版：Gemini + OpenAI) ---
@@ -1241,31 +1227,6 @@ def python_header_audit_batch(photo_gallery, ai_res_json):
 
     return header_issues
     
-def consolidate_issues(issue_list):
-    """
-    (修復報錯專用)
-    將重複的異常項目合併，讓報告更簡潔。
-    """
-    if not issue_list: return []
-    
-    # 這裡做一個簡單的去重：如果 "頁碼", "項目", "類型" 都一樣，就算同一筆
-    # (您可以根據需求調整，這裡提供最簡單的不報錯版本)
-    unique_map = {}
-    final_list = []
-    
-    for i in issue_list:
-        # 產生唯一指紋
-        key = f"{i.get('page')}_{i.get('item')}_{i.get('issue_type')}_{i.get('common_reason')}"
-        
-        if key not in unique_map:
-            unique_map[key] = True
-            final_list.append(i)
-        else:
-            # 如果已經有了，可以在這裡做計數累加 (這裡先略過，避免複雜)
-            pass
-            
-    return final_list
-
 # --- 6. 手機版 UI 與 核心執行邏輯 ---
 st.title("🏭 交貨單稽核")
 
