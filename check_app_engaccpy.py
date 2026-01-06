@@ -762,13 +762,12 @@ def python_numerical_audit(dimension_data):
     
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官 (v51: 特規隱形追蹤版)
+    Python 會計官 (v52: 規則數據後台版)
     功能：
     1. [特規命中紀錄]: 執行高門檻(95分)比對，記錄所有命中特規的項目。
-    2. [資料打包]: 將命中紀錄 (rule_hits_log) 打包在一個特殊的 "HIDDEN_DATA" 物件中回傳，
-       不產生顯性的異常卡片，供 UI 在「規則參數卡片」中調用。
+    2. [資料打包]: 將命中紀錄 (rule_hits_log) 打包在 "HIDDEN_DATA" 物件中回傳。
     3. [核心設定]: 
-       - FUZZ_THRESHOLD = 95 (高標防止劫持)
+       - FUZZ_THRESHOLD = 95 (防止規則劫持)
        - 車修白名單 = 嚴格模式 (僅再生/未再生)
        - 籃子識別 = 模糊抗噪
     """
@@ -901,7 +900,7 @@ def python_accounting_audit(dimension_data, res_main):
             rule_hits_log[matched_rule_name].append({
                 "明細名稱": raw_title,
                 "匹配類型": match_type,
-                "相似度": match_score,
+                "分數": match_score,
                 "頁碼": page
             })
 
@@ -969,7 +968,7 @@ def python_accounting_audit(dimension_data, res_main):
                     continue
 
                 # =========================================================
-                # 🧺 步驟 1: 籃子撈人 (v51)
+                # 🧺 步驟 1: 籃子撈人 (v52)
                 # =========================================================
                 match_A = (fuzz.partial_ratio(s_clean, title_clean) > 90)
                 match_B = False
@@ -979,11 +978,15 @@ def python_accounting_audit(dimension_data, res_main):
                 is_dis = fuzz.partial_ratio("ROLL拆裝", s_upper_check) > 80
                 is_mac = fuzz.partial_ratio("ROLL車修", s_upper_check) > 80
                 is_weld = (fuzz.partial_ratio("ROLL銲補", s_upper_check) > 80) or \
-                          ("焊" in s_upper_check) or ("鉀" in s_upper_check)
+                          ("焊" in s_upper_check) or \
+                          ("鉀" in s_upper_check)
                 
                 has_part_body = "本體" in title_clean
                 has_part_journal = any(k in title_clean for k in journal_family)
+                
+                # 白名單還原: 只保留嚴格動作
                 has_act_mac = any(k in title_clean for k in ["再生", "精車", "未再生", "粗車"])
+                
                 has_act_weld = ("銲補" in title_clean or "焊" in title_clean or "鉀" in title_clean)
                 is_assy = ("組裝" in title_clean or "拆裝" in title_clean)
                 
@@ -1575,65 +1578,61 @@ if st.session_state.photo_gallery:
         
         st.info(f"💰 本次成本: NT$ {cache['cost_twd']:.2f} (In: {cache['total_in']:,} / Out: {cache['total_out']:,})")
         
-        # 4. 規則展示 (v51: 整合特規命中顯示)
+                # 3. 規則展示 (v52: 整合特規命中顯示 + 數據分析)
         with st.expander("🏗️ 檢視 Excel 邏輯與規則參數", expanded=False):
             # 1. 嘗試從 issue_list 中撈取隱藏的命中資料
             issues_list = st.session_state.get('accounting_results', [])
             hidden_payload = next((item for item in issues_list if item.get('issue_type') == 'HIDDEN_DATA'), {})
             rule_hits = hidden_payload.get('rule_hits', {})
-            current_fuzz = hidden_payload.get('fuzz_threshold', 95) # 預設 95
+            current_fuzz = hidden_payload.get('fuzz_threshold', 95) 
 
-            st.caption(f"ℹ️ 當前特規配對門檻 (Fuzz Threshold): **{current_fuzz} 分** (可防止規則劫持)")
+            st.caption(f"ℹ️ 當前特規配對門檻 (Fuzz Threshold): **{current_fuzz} 分** (>=95分防止規則劫持)")
             
             try:
                 df_rules = pd.read_excel("rules.xlsx")
-                # 清洗欄位名稱
                 df_rules.columns = [c.strip() for c in df_rules.columns]
                 
-                # 準備顯示用的列表
-                display_data = []
+                # --- 核心邏輯：列出有觸發的規則 ---
+                triggered_rules_count = 0
                 
-                # 遍歷所有規則
+                # 遍歷 DataFrame 確保順序
                 for _, row in df_rules.iterrows():
                     rule_name = str(row.get('Item_Name', '')).strip()
                     if not rule_name: continue
                     
+                    # 產生 Key 進行查找
                     clean_name = rule_name.replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
                     
                     # 檢查是否命中
                     hits = rule_hits.get(clean_name, [])
-                    hit_count = len(hits)
-                    
-                    # 標記狀態
-                    status = "✅ 觸發" if hit_count > 0 else "⚪ 閒置"
-                    
-                    # 放入基本資料
-                    rule_info = {
-                        "狀態": status,
-                        "特規名稱 (Item_Name)": rule_name,
-                        "單項規則 (Local)": row.get('Unit_Rule_Local', ''),
-                        "運費規則 (Freight)": row.get('Unit_Rule_Freight', ''),
-                        "歸戶規則 (Agg)": row.get('Unit_Rule_Agg', ''),
-                        "匹配數": hit_count
-                    }
-                    
-                    # 如果有命中，將詳細資料藏在另一個變數，或者直接顯示
-                    # 這裡我們採用: 先顯示匯總表，若有命中則在下方展開
-                    
-                    if hit_count > 0:
-                        st.markdown(f"### ✅ {rule_name}")
-                        c1, c2, c3, c4 = st.columns(4)
-                        c1.info(f"Local: {row.get('Unit_Rule_Local', '-')}")
-                        c2.info(f"Freight: {row.get('Unit_Rule_Freight', '-')}")
-                        c3.info(f"Agg: {row.get('Unit_Rule_Agg', '-')}")
-                        c4.metric("匹配數量", hit_count)
+                    if hits:
+                        triggered_rules_count += 1
                         
-                        # 顯示匹配明細表格
+                        # 顯示規則標題與基本參數
+                        st.markdown(f"#### ✅ {rule_name}")
+                        
+                        # 規則參數列
+                        c1, c2, c3 = st.columns(3)
+                        c1.text(f"Local: {row.get('Unit_Rule_Local', '-')}")
+                        c2.text(f"Freight: {row.get('Unit_Rule_Freight', '-')}")
+                        c3.text(f"Agg: {row.get('Unit_Rule_Agg', '-')}")
+                        
+                        # 配對明細表格
                         hit_df = pd.DataFrame(hits)
-                        st.dataframe(hit_df, use_container_width=True, hide_index=True)
+                        
+                        # 表格美化 (顯示：明細名稱、匹配類型、分數、頁碼)
+                        st.dataframe(
+                            hit_df[["明細名稱", "匹配類型", "分數", "頁碼"]].style.format({"分數": "{:.0f}"}), 
+                            use_container_width=True, 
+                            hide_index=True
+                        )
                         st.divider()
-                
-                # 最後顯示完整的規則總表 (供查詢用)
+
+                if triggered_rules_count == 0:
+                    st.info("本次工令未觸發任何特規項目 (使用預設籃子邏輯)。")
+
+                # --- 底部：完整的規則總表 (供查詢用) ---
+                st.markdown("---")
                 with st.expander("📋 查看完整規則總表 (All Rules)", expanded=False):
                     st.dataframe(df_rules, use_container_width=True, hide_index=True)
 
