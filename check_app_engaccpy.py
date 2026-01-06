@@ -762,14 +762,16 @@ def python_numerical_audit(dimension_data):
     
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官 (v48: 回歸純淨版)
-    依據使用者指示調整：
-    1. [移除偵探]: 移除所有 Debug、Trace Log、遺珠偵測功能。
-    2. [白名單還原]: 車修籃動作僅保留 ["再生", "精車", "未再生", "粗車"]。
-       - 移除 "車修", "加工", "研磨" 等寬鬆關鍵字。
-    3. [核心保留]: 
-       - 籃子識別維持 Fuzzy (>80) 與全域大寫比對。
-       - 運費強制計入邏輯保留。
+    Python 會計官 (v50: 特規顯影版)
+    新增功能：
+    1. [特規顯影]: 新增「📋 特規觸發報告」卡片。
+       - 顯示目前的模糊比對門檻 (FUZZ_THRESHOLD)。
+       - 列出每一個特規 (Rule) 到底配對到了哪些項目 (Items)。
+       - 標註配對分數 (Score)，方便抓出「規則劫持」的兇手。
+    2. [核心維持]: 
+       - 門檻維持 95 (高標)。
+       - 車修籃動作維持嚴格模式 (無車修/加工)。
+       - 籃子識別維持模糊抗噪。
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -777,7 +779,9 @@ def python_accounting_audit(dimension_data, res_main):
     import re
     import pandas as pd 
 
-    # --- 0. 基礎工具 ---
+    # --- 0. 設定與工具 ---
+    FUZZ_THRESHOLD = 95 # 🔥 目前特規配對門檻 (可於此調整)
+
     def clean_text(text):
         return str(text).replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
 
@@ -813,6 +817,9 @@ def python_accounting_audit(dimension_data, res_main):
 
     summary_rows = res_main.get("summary_rows", [])
     
+    # 🔥 [新增] 特規命中紀錄器
+    rule_hits_log = {} # Key: Rule Name, Value: List of {"item": item_name, "score": score, "type": type}
+
     # =================================================
     # 🕵️‍♂️ 第一關：總表內戰
     # =================================================
@@ -849,19 +856,58 @@ def python_accounting_audit(dimension_data, res_main):
         target_pc = safe_float(item.get("item_pc_target", 0)) 
         batch_qty = safe_float(item.get("batch_total_qty", 0))
         
-        # 2.1 規則匹配
-        rule_set = rules_map.get(title_clean)
+        # 2.1 規則匹配 (含紀錄邏輯)
+        rule_set = None
+        matched_rule_name = None
+        match_type = ""
+        match_score = 0
+
+        # A. 完全匹配
+        if title_clean in rules_map:
+            rule_set = rules_map[title_clean]
+            matched_rule_name = title_clean
+            match_type = "完全匹配"
+            match_score = 100
+        
+        # B. 去括號匹配
         if not rule_set:
             t_no = re.sub(r"[\(（].*?[\)）]", "", title_clean)
-            rule_set = rules_map.get(t_no)
+            if t_no in rules_map:
+                rule_set = rules_map[t_no]
+                matched_rule_name = t_no
+                match_type = "去括號匹配"
+                match_score = 100
+
+        # C. 模糊匹配 (Fuzzy)
         if not rule_set and rules_map:
             best_score = 0
+            best_rule = None
             for k, v in rules_map.items():
-                sc = fuzz.partial_ratio(k, title_clean)
-                if sc > 90 and sc > best_score:
+                # 使用 ratio (整體嚴格) + 高門檻
+                sc = fuzz.ratio(k, title_clean) 
+                if sc > FUZZ_THRESHOLD and sc > best_score:
                     best_score = sc
                     rule_set = v
+                    best_rule = k
+            
+            if rule_set:
+                matched_rule_name = best_rule
+                match_type = "模糊匹配"
+                match_score = best_score
         
+        # 🔥 [記錄] 如果有匹配到，記錄下來
+        if matched_rule_name:
+            if matched_rule_name not in rule_hits_log:
+                rule_hits_log[matched_rule_name] = []
+            
+            rule_hits_log[matched_rule_name].append({
+                "item": raw_title,
+                "type": match_type,
+                "score": match_score,
+                "page": page
+            })
+
+        # --- 以下為既有邏輯 ---
         u_local = rule_set.get("u_local", "") if rule_set else ""
         u_fr = rule_set.get("u_fr", "") if rule_set else ""
         u_agg = rule_set.get("u_agg", "") if rule_set else ""
@@ -930,14 +976,13 @@ def python_accounting_audit(dimension_data, res_main):
                     continue
 
                 # =========================================================
-                # 🧺 步驟 1: 籃子撈人 (v48 純淨版)
+                # 🧺 步驟 1: 籃子撈人 (v50)
                 # =========================================================
                 match_A = (fuzz.partial_ratio(s_clean, title_clean) > 90)
                 match_B = False
                 
-                s_upper_check = s_clean.upper() # 強制轉大寫 (抗 Roller/ROLL)
+                s_upper_check = s_clean.upper() 
 
-                # 模糊籃子識別 (>80分)
                 is_dis = fuzz.partial_ratio("ROLL拆裝", s_upper_check) > 80
                 is_mac = fuzz.partial_ratio("ROLL車修", s_upper_check) > 80
                 is_weld = (fuzz.partial_ratio("ROLL銲補", s_upper_check) > 80) or \
@@ -947,7 +992,7 @@ def python_accounting_audit(dimension_data, res_main):
                 has_part_body = "本體" in title_clean
                 has_part_journal = any(k in title_clean for k in journal_family)
                 
-                # 🔥 [還原] 移除 "車修", "加工" 等。回復至嚴格模式。
+                # 白名單還原: 只保留嚴格動作
                 has_act_mac = any(k in title_clean for k in ["再生", "精車", "未再生", "粗車"])
                 
                 has_act_weld = ("銲補" in title_clean or "焊" in title_clean or "鉀" in title_clean)
@@ -957,7 +1002,6 @@ def python_accounting_audit(dimension_data, res_main):
                 elif is_mac and (has_part_body or has_part_journal) and has_act_mac: match_B = True
                 elif is_weld and (has_part_body or has_part_journal) and has_act_weld: match_B = True
                 
-                # 決定錄取誰 (如果 Rules 指定 A，就會略過上面的 match_B)
                 if agg_mode == "A": match = match_A
                 elif agg_mode == "AB": match = match_A or match_B
                 else: match = match_B if match_B else match_A
@@ -1010,6 +1054,28 @@ def python_accounting_audit(dimension_data, res_main):
                 "common_reason": f"實交({data['target']}) != 明細加總({data['actual']})", 
                 "failures": fail_table, "source": "🐍 會計引擎"
             })
+            
+    # 🔥 [新增] 特規顯影報告卡片
+    if rule_hits_log:
+        report_table = []
+        for r_name, hits in rule_hits_log.items():
+            for h in hits:
+                report_table.append({
+                    "特規名稱 (Excel)": r_name,
+                    "配對項目 (明細)": h['item'],
+                    "匹配方式": h['type'],
+                    "分數": h['score'],
+                    "頁碼": h['page']
+                })
+        
+        accounting_issues.append({
+            "page": "RULES", 
+            "item": "📋 特規觸發報告",
+            "issue_type": "ℹ️ 規則審計",
+            "common_reason": f"目前配對門檻: {FUZZ_THRESHOLD}分",
+            "failures": report_table,
+            "source": "🐍 會計引擎"
+        })
             
     return accounting_issues
 
