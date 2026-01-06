@@ -762,16 +762,15 @@ def python_numerical_audit(dimension_data):
     
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官 (v50: 特規顯影版)
-    新增功能：
-    1. [特規顯影]: 新增「📋 特規觸發報告」卡片。
-       - 顯示目前的模糊比對門檻 (FUZZ_THRESHOLD)。
-       - 列出每一個特規 (Rule) 到底配對到了哪些項目 (Items)。
-       - 標註配對分數 (Score)，方便抓出「規則劫持」的兇手。
-    2. [核心維持]: 
-       - 門檻維持 95 (高標)。
-       - 車修籃動作維持嚴格模式 (無車修/加工)。
-       - 籃子識別維持模糊抗噪。
+    Python 會計官 (v51: 特規隱形追蹤版)
+    功能：
+    1. [特規命中紀錄]: 執行高門檻(95分)比對，記錄所有命中特規的項目。
+    2. [資料打包]: 將命中紀錄 (rule_hits_log) 打包在一個特殊的 "HIDDEN_DATA" 物件中回傳，
+       不產生顯性的異常卡片，供 UI 在「規則參數卡片」中調用。
+    3. [核心設定]: 
+       - FUZZ_THRESHOLD = 95 (高標防止劫持)
+       - 車修白名單 = 嚴格模式 (僅再生/未再生)
+       - 籃子識別 = 模糊抗噪
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -779,8 +778,8 @@ def python_accounting_audit(dimension_data, res_main):
     import re
     import pandas as pd 
 
-    # --- 0. 設定與工具 ---
-    FUZZ_THRESHOLD = 95 # 🔥 目前特規配對門檻 (可於此調整)
+    # --- 0. 設定 ---
+    FUZZ_THRESHOLD = 95 # 🔥 特規配對門檻
 
     def clean_text(text):
         return str(text).replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
@@ -817,8 +816,8 @@ def python_accounting_audit(dimension_data, res_main):
 
     summary_rows = res_main.get("summary_rows", [])
     
-    # 🔥 [新增] 特規命中紀錄器
-    rule_hits_log = {} # Key: Rule Name, Value: List of {"item": item_name, "score": score, "type": type}
+    # 🔥 特規命中紀錄器
+    rule_hits_log = {} 
 
     # =================================================
     # 🕵️‍♂️ 第一關：總表內戰
@@ -856,7 +855,7 @@ def python_accounting_audit(dimension_data, res_main):
         target_pc = safe_float(item.get("item_pc_target", 0)) 
         batch_qty = safe_float(item.get("batch_total_qty", 0))
         
-        # 2.1 規則匹配 (含紀錄邏輯)
+        # 2.1 規則匹配 (紀錄邏輯)
         rule_set = None
         matched_rule_name = None
         match_type = ""
@@ -878,12 +877,11 @@ def python_accounting_audit(dimension_data, res_main):
                 match_type = "去括號匹配"
                 match_score = 100
 
-        # C. 模糊匹配 (Fuzzy)
+        # C. 模糊匹配 (Fuzzy Ratio > 95)
         if not rule_set and rules_map:
             best_score = 0
             best_rule = None
             for k, v in rules_map.items():
-                # 使用 ratio (整體嚴格) + 高門檻
                 sc = fuzz.ratio(k, title_clean) 
                 if sc > FUZZ_THRESHOLD and sc > best_score:
                     best_score = sc
@@ -895,16 +893,16 @@ def python_accounting_audit(dimension_data, res_main):
                 match_type = "模糊匹配"
                 match_score = best_score
         
-        # 🔥 [記錄] 如果有匹配到，記錄下來
+        # 記錄命中
         if matched_rule_name:
             if matched_rule_name not in rule_hits_log:
                 rule_hits_log[matched_rule_name] = []
             
             rule_hits_log[matched_rule_name].append({
-                "item": raw_title,
-                "type": match_type,
-                "score": match_score,
-                "page": page
+                "明細名稱": raw_title,
+                "匹配類型": match_type,
+                "相似度": match_score,
+                "頁碼": page
             })
 
         # --- 以下為既有邏輯 ---
@@ -924,11 +922,7 @@ def python_accounting_audit(dimension_data, res_main):
              accounting_issues.append({
                  "page": page, "item": raw_title, "issue_type": "🛑 統計不符(單項)", 
                  "common_reason": f"標題 {target_pc} != 內文 {actual_item_qty}", 
-                 "failures": [
-                     {"頁碼": page, "項目名稱": "目標 (括號)", "數量": target_pc, "備註": "標題"},
-                     {"頁碼": page, "項目名稱": "實際 (計數)", "數量": actual_item_qty, "備註": "內文"}
-                 ], 
-                 "source": "🐍 會計引擎"
+                 "failures": [], "source": "🐍 會計引擎"
              })
 
         # B. 重複檢查
@@ -968,7 +962,6 @@ def python_accounting_audit(dimension_data, res_main):
             for s_title, data in global_sum_tracker.items():
                 s_clean = clean_text(s_title)
                 
-                # 運費通道
                 if (fuzz.partial_ratio("輥輪拆裝.車修或銲補運費", s_clean) > 70) or ("運費" in s_clean):
                     if freight_val > 0:
                         data["actual"] += freight_val
@@ -976,7 +969,7 @@ def python_accounting_audit(dimension_data, res_main):
                     continue
 
                 # =========================================================
-                # 🧺 步驟 1: 籃子撈人 (v50)
+                # 🧺 步驟 1: 籃子撈人 (v51)
                 # =========================================================
                 match_A = (fuzz.partial_ratio(s_clean, title_clean) > 90)
                 match_B = False
@@ -986,15 +979,11 @@ def python_accounting_audit(dimension_data, res_main):
                 is_dis = fuzz.partial_ratio("ROLL拆裝", s_upper_check) > 80
                 is_mac = fuzz.partial_ratio("ROLL車修", s_upper_check) > 80
                 is_weld = (fuzz.partial_ratio("ROLL銲補", s_upper_check) > 80) or \
-                          ("焊" in s_upper_check) or \
-                          ("鉀" in s_upper_check)
+                          ("焊" in s_upper_check) or ("鉀" in s_upper_check)
                 
                 has_part_body = "本體" in title_clean
                 has_part_journal = any(k in title_clean for k in journal_family)
-                
-                # 白名單還原: 只保留嚴格動作
                 has_act_mac = any(k in title_clean for k in ["再生", "精車", "未再生", "粗車"])
-                
                 has_act_weld = ("銲補" in title_clean or "焊" in title_clean or "鉀" in title_clean)
                 is_assy = ("組裝" in title_clean or "拆裝" in title_clean)
                 
@@ -1007,7 +996,7 @@ def python_accounting_audit(dimension_data, res_main):
                 else: match = match_B if match_B else match_A
 
                 # =========================================================
-                # 🛑 步驟 2: 攔截者 (The Interceptor)
+                # 🛑 步驟 2: 攔截者
                 # =========================================================
                 if match:
                     s_upper = s_clean.upper()
@@ -1025,10 +1014,8 @@ def python_accounting_audit(dimension_data, res_main):
 
                     if s_is_regen and t_is_unregen: match = False
                     if s_is_unregen and t_is_regen: match = False
-                    
                     if s_is_body and not s_is_journal and t_is_journal: match = False
                     if s_is_journal and not s_is_body and t_is_body: match = False
-                    
                     if "TOP" in s_upper and "BOTTOM" in t_upper: match = False
                     if "BOTTOM" in s_upper and "TOP" in t_upper: match = False
 
@@ -1055,26 +1042,12 @@ def python_accounting_audit(dimension_data, res_main):
                 "failures": fail_table, "source": "🐍 會計引擎"
             })
             
-    # 🔥 [新增] 特規顯影報告卡片
+    # 🔥🔥🔥 [關鍵]: 將命中資料當作一個隱藏的 ISSUE 回傳 (TYPE=HIDDEN_DATA)
     if rule_hits_log:
-        report_table = []
-        for r_name, hits in rule_hits_log.items():
-            for h in hits:
-                report_table.append({
-                    "特規名稱 (Excel)": r_name,
-                    "配對項目 (明細)": h['item'],
-                    "匹配方式": h['type'],
-                    "分數": h['score'],
-                    "頁碼": h['page']
-                })
-        
         accounting_issues.append({
-            "page": "RULES", 
-            "item": "📋 特規觸發報告",
-            "issue_type": "ℹ️ 規則審計",
-            "common_reason": f"目前配對門檻: {FUZZ_THRESHOLD}分",
-            "failures": report_table,
-            "source": "🐍 會計引擎"
+            "issue_type": "HIDDEN_DATA",
+            "rule_hits": rule_hits_log,
+            "fuzz_threshold": FUZZ_THRESHOLD
         })
             
     return accounting_issues
@@ -1602,10 +1575,70 @@ if st.session_state.photo_gallery:
         
         st.info(f"💰 本次成本: NT$ {cache['cost_twd']:.2f} (In: {cache['total_in']:,} / Out: {cache['total_out']:,})")
         
-        # 4. 規則檢視
-        with st.expander("🔍 檢視 Excel 規則與邏輯參數", expanded=False):
-            rules_text = get_dynamic_rules(cache.get('full_text_for_search',''), debug_mode=True)
-            st.markdown(rules_text)
+        # 4. 規則展示 (v51: 整合特規命中顯示)
+        with st.expander("🏗️ 檢視 Excel 邏輯與規則參數", expanded=False):
+            # 1. 嘗試從 issue_list 中撈取隱藏的命中資料
+            issues_list = st.session_state.get('accounting_results', [])
+            hidden_payload = next((item for item in issues_list if item.get('issue_type') == 'HIDDEN_DATA'), {})
+            rule_hits = hidden_payload.get('rule_hits', {})
+            current_fuzz = hidden_payload.get('fuzz_threshold', 95) # 預設 95
+
+            st.caption(f"ℹ️ 當前特規配對門檻 (Fuzz Threshold): **{current_fuzz} 分** (可防止規則劫持)")
+            
+            try:
+                df_rules = pd.read_excel("rules.xlsx")
+                # 清洗欄位名稱
+                df_rules.columns = [c.strip() for c in df_rules.columns]
+                
+                # 準備顯示用的列表
+                display_data = []
+                
+                # 遍歷所有規則
+                for _, row in df_rules.iterrows():
+                    rule_name = str(row.get('Item_Name', '')).strip()
+                    if not rule_name: continue
+                    
+                    clean_name = rule_name.replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
+                    
+                    # 檢查是否命中
+                    hits = rule_hits.get(clean_name, [])
+                    hit_count = len(hits)
+                    
+                    # 標記狀態
+                    status = "✅ 觸發" if hit_count > 0 else "⚪ 閒置"
+                    
+                    # 放入基本資料
+                    rule_info = {
+                        "狀態": status,
+                        "特規名稱 (Item_Name)": rule_name,
+                        "單項規則 (Local)": row.get('Unit_Rule_Local', ''),
+                        "運費規則 (Freight)": row.get('Unit_Rule_Freight', ''),
+                        "歸戶規則 (Agg)": row.get('Unit_Rule_Agg', ''),
+                        "匹配數": hit_count
+                    }
+                    
+                    # 如果有命中，將詳細資料藏在另一個變數，或者直接顯示
+                    # 這裡我們採用: 先顯示匯總表，若有命中則在下方展開
+                    
+                    if hit_count > 0:
+                        st.markdown(f"### ✅ {rule_name}")
+                        c1, c2, c3, c4 = st.columns(4)
+                        c1.info(f"Local: {row.get('Unit_Rule_Local', '-')}")
+                        c2.info(f"Freight: {row.get('Unit_Rule_Freight', '-')}")
+                        c3.info(f"Agg: {row.get('Unit_Rule_Agg', '-')}")
+                        c4.metric("匹配數量", hit_count)
+                        
+                        # 顯示匹配明細表格
+                        hit_df = pd.DataFrame(hits)
+                        st.dataframe(hit_df, use_container_width=True, hide_index=True)
+                        st.divider()
+                
+                # 最後顯示完整的規則總表 (供查詢用)
+                with st.expander("📋 查看完整規則總表 (All Rules)", expanded=False):
+                    st.dataframe(df_rules, use_container_width=True, hide_index=True)
+
+            except Exception as e:
+                st.error(f"讀取 rules.xlsx 失敗: {e}")
                 
         # 5. 原始數據檢視
         with st.expander("📊 檢視 AI 抄錄原始數據", expanded=False):
