@@ -1724,12 +1724,52 @@ if st.session_state.photo_gallery:
                         st.divider()
 
                 if triggered_rules_count == 0:
-                    st.info("本次工令未觸發任何特規項目 (使用預設籃子邏輯)。")
+                    st.info("本次工令未觸發任何特規項目。")
 
                 # --- 底部：完整的規則總表 (供查詢用) ---
                 st.markdown("---")
                 with st.expander("📋 查看完整規則總表 (All Rules)", expanded=False):
                     st.dataframe(df_rules, use_container_width=True, hide_index=True)
+                
+                # 🔥🔥🔥 [新增] X光分數檢測器 (貼在規則展示卡片的最下方) 🔥🔥🔥
+                st.markdown("---")
+                st.subheader("🕵️‍♂️ X光檢測：為什麼沒抓到？")
+                st.caption(f"這裡列出前 10 筆項目的最高分規則，幫您決定 GLOBAL_FUZZ_THRESHOLD 該設多少 (目前: {current_fuzz})")
+                
+                # 取得一些實際項目來測試
+                sample_items = []
+                # 嘗試從會計輸入抓資料
+                acc_input = st.session_state.get('accounting_input_data', [])
+                if acc_input:
+                    sample_items = [item.get('item_title', '') for item in acc_input[:10]]
+                
+                if sample_items:
+                    debug_data = []
+                    for item_title in sample_items:
+                        clean_title = item_title.replace(" ", "").replace("\n", "").strip()
+                        best_score = 0
+                        best_rule = "無"
+                        
+                        # 跑一次模擬比對
+                        for k, v in rules_map.items():
+                            # 注意：這裡要跟引擎用一樣的 ratio
+                            sc = fuzz.ratio(k, clean_title)
+                            if sc > best_score:
+                                best_score = sc
+                                best_rule = k
+                        
+                        status = "🔴 落榜"
+                        if best_score > current_fuzz: status = "🟢 錄取"
+                        
+                        debug_data.append({
+                            "工令項目": clean_title,
+                            "最像的規則": best_rule,
+                            "計算分數": best_score,
+                            "狀態": status
+                        })
+                    
+                    st.dataframe(pd.DataFrame(debug_data))
+                # 🔥🔥🔥 [結束] 🔥🔥🔥
 
             except Exception as e:
                 st.error(f"讀取 rules.xlsx 失敗: {e}")
