@@ -1387,29 +1387,26 @@ if st.session_state.photo_gallery:
 
     trigger_analysis = start_btn or is_auto_start
 
-    if trigger_analysis:
-        # ⚡️ 新增這行：強制清除上一筆的結果
+        if trigger_analysis:
+        # 強制清除上一筆
         st.session_state.analysis_result_cache = None 
-        
         st.session_state.auto_start_analysis = False
         total_start = time.time()
         
         with st.status("總稽核官正在進行全方位分析...", expanded=True) as status_box:
             progress_bar = st.progress(0)
             
-            # 1. OCR (這段保留，速度很快)
+            # 1. OCR
             status_box.write("👀 正在進行 OCR 文字識別...")
             ocr_start = time.time()
             
             def process_task(index, item):
-                if item.get('full_text'):
-                    return index, item.get('header_text',''), item['full_text'], None
+                if item.get('full_text'): return index, item.get('header_text',''), item['full_text'], None
                 try:
                     item['file'].seek(0)
                     _, h, f, _, _ = extract_layout_with_azure(item['file'], DOC_ENDPOINT, DOC_KEY)
                     return index, h, f, None
-                except Exception as e:
-                    return index, None, None, str(e)
+                except Exception as e: return index, None, None, str(e)
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
                 futures = [executor.submit(process_task, i, item) for i, item in enumerate(st.session_state.photo_gallery)]
@@ -1421,12 +1418,12 @@ if st.session_state.photo_gallery:
 
             ocr_duration = time.time() - ocr_start
             
-            # 2. 組合所有文字 (關鍵：一次丟進去)
+            # 2. 組合文字
             combined_input = ""
             for i, p in enumerate(st.session_state.photo_gallery):
                 combined_input += f"\n=== Page {i+1} ===\n{p.get('full_text','')}\n"
 
-            # 3. 呼叫 AI (這裡只會跑一次，約 20-30 秒)
+            # 3. AI 分析
             status_box.write("🤖 AI 正在全卷分析...")
             res_main = agent_unified_check(combined_input, combined_input, GEMINI_KEY, main_model_name)
             progress_bar.progress(0.8)
@@ -1435,19 +1432,17 @@ if st.session_state.photo_gallery:
             status_box.write("🐍 Python 正在進行邏輯比對...")
             dim_data = res_main.get("dimension_data", [])
             
-            # ⚡️ [插入點]：Python 奪權！強制覆寫 AI 的分類
             for item in dim_data:
-                # 即使 AI 有填 category，我們也用 Python 的邏輯覆蓋它，保證 100% 一致性
-                # 或者，如果 AI 沒填，這裡就是補填的關鍵
                 new_cat = assign_category_by_python(item.get("item_title", ""))
                 item["category"] = new_cat
-                # 順便把 category 寫進 rules 供前端顯示 (選用)
                 if "sl" not in item: item["sl"] = {}
                 item["sl"]["lt"] = new_cat
             
             python_numeric_issues = python_numerical_audit(dim_data)
             python_accounting_issues = python_accounting_audit(dim_data, res_main)
             python_process_issues = python_process_audit(dim_data)
+            
+            # ✅ 改用新的 Batch 版表頭稽核
             python_header_issues = python_header_audit_batch(st.session_state.photo_gallery, res_main)
 
             ai_filtered_issues = []
@@ -1461,12 +1456,12 @@ if st.session_state.photo_gallery:
 
             all_issues = ai_filtered_issues + python_numeric_issues + python_accounting_issues + python_process_issues + python_header_issues
             
-            # 5. 存檔與完成
+            # 5. 存檔 (Cache)
             usage = res_main.get("_token_usage", {"input": 0, "output": 0})
             
-            # ⭐️ [關鍵修正] 這裡必須把 freight_target 和 summary_rows 存進去，不然顯示時會抓不到！
             st.session_state.analysis_result_cache = {
                 "job_no": res_main.get("job_no", "Unknown"),
+                "header_info": res_main.get("header_info", {}), # ✅ 記得存這個，UI 才能顯示！
                 "all_issues": all_issues,
                 "total_duration": time.time() - total_start,
                 "cost_twd": (usage.get("input", 0)*0.3 + usage.get("output", 0)*2.5) / 1000000 * 32.5,
@@ -1476,12 +1471,10 @@ if st.session_state.photo_gallery:
                 "time_eng": time.time() - total_start - ocr_duration,
                 
                 "ai_extracted_data": dim_data,
-                "python_debug_data": python_debug_data,
+                # "python_debug_data": python_debug_data,  <-- ❌ 刪除這行
                 
-                # 👇 這裡是我幫您補上的，為了新的看板功能
                 "freight_target": res_main.get("freight_target", 0),
                 "summary_rows": res_main.get("summary_rows", []),
-                
                 "full_text_for_search": combined_input,
                 "combined_input": combined_input
             }
@@ -1490,96 +1483,61 @@ if st.session_state.photo_gallery:
             status_box.update(label="✅ 分析完成！", state="complete", expanded=False)
             st.rerun()
 
-            # --- 💡 [顯示結果區塊] 數量同步修正版 ---
+    # --- 💡 顯示結果區塊 ---
     if st.session_state.analysis_result_cache:
         cache = st.session_state.analysis_result_cache
         
-            # --- [新增] UI 顯示：表頭資訊卡片 ---
-            st.divider()
-            st.subheader("📋 表頭資訊偵測")
-            
-            # 從 AI 結果中提取資料
-            h_info = res_main.get("header_info", {})
-            current_job = h_info.get("job_no", "未偵測")
-            sch_date = h_info.get("scheduled_date", "未偵測")
-            act_date = h_info.get("actual_date", "未偵測")
-            
-            # 使用 Streamlit 的美觀指標元件顯示
-            col_h1, col_h2, col_h3 = st.columns(3)
-            with col_h1:
-                st.metric("工令單號 (Job No)", current_job, delta=None)
-            with col_h2:
-                st.metric("預定交貨日", sch_date)
-            with col_h3:
-                # 如果有遲交 (實際 > 預定)，讓它變紅字 (邏輯寫在 help 參數或直接用 delta)
-                st.metric("實際交貨日", act_date)
-            
-            st.divider()
-            # ----------------------------------
-
-        all_issues = cache.get('all_issues', [])
+        # ✅ [新版 UI] 表頭資訊卡片 (讀取 cache)
+        st.divider()
+        st.subheader("📋 表頭資訊偵測")
         
+        # 這裡改用 cache.get
+        h_info = cache.get("header_info", {}) 
+        current_job = h_info.get("job_no", "未偵測")
+        sch_date = h_info.get("scheduled_date", "未偵測")
+        act_date = h_info.get("actual_date", "未偵測")
+        
+        col_h1, col_h2, col_h3 = st.columns(3)
+        with col_h1: st.metric("工令單號", current_job)
+        with col_h2: st.metric("預定交貨日", sch_date)
+        with col_h3: st.metric("實際交貨日", act_date)
+        st.divider()
+
         # 1. 頂部狀態條
         st.success(f"工令: {cache['job_no']} | ⏱️ {cache['total_duration']:.1f}s")
         st.info(f"💰 本次成本: NT$ {cache['cost_twd']:.2f} (In: {cache['total_in']:,} / Out: {cache['total_out']:,})")
-        st.caption(f"細節耗時: Azure OCR {cache['ocr_duration']:.1f}s | AI 分析 {cache['time_eng']:.1f}s")
-
+        
         # 2. 規則檢視
         with st.expander("🔍 檢視 Excel 規則與邏輯參數", expanded=False):
             rules_text = get_dynamic_rules(cache.get('full_text_for_search',''), debug_mode=True)
             st.markdown(rules_text)
                 
-                # 3. 原始數據檢視
+        # 3. 原始數據檢視
         with st.expander("📊 檢視 AI 抄錄原始數據", expanded=False):
             st.markdown("**1. 核心指標摘要**")
-            
-            # f_target = cache.get('freight_target', 0)  <-- 這行可以刪掉或是留著不理它
             sum_rows_len = len(cache.get("summary_rows", []))
-            
-            # 👇 修改這裡：只保留工令與總表資訊
             summary_df = pd.DataFrame([{
                 "工令單號": cache.get("job_no", "N/A"),
                 "總表行數": sum_rows_len,
                 "總表狀態": "正常" if sum_rows_len > 0 else "空值"
             }])
-            
             st.dataframe(summary_df, hide_index=True, use_container_width=True)
-            
             st.divider()
  
-            # B. 總表清單 (⚡️ 修改點：新增頁碼欄位)
             st.markdown("**2. 左上角統計表 (Summary Rows)**")
             sum_rows = cache.get("summary_rows", [])
-            
             if sum_rows:
                 df_sum = pd.DataFrame(sum_rows)
-                # 確保 page 欄位存在 (如果舊的 Cache 沒有 page，補上 "?")
-                if "page" not in df_sum.columns:
-                    df_sum["page"] = "?"
-                
-                # 重新命名與排序：把頁碼放在第一欄
+                if "page" not in df_sum.columns: df_sum["page"] = "?"
                 df_sum.rename(columns={"page": "頁碼", "title": "項目名稱", "target": "實交數量"}, inplace=True)
-                
-                # 調整顯示順序
-                cols = ["頁碼", "項目名稱", "實交數量"]
-                # 確保只顯示存在的欄位 (防呆)
-                cols = [c for c in cols if c in df_sum.columns]
-                
+                cols = [c for c in ["頁碼", "項目名稱", "實交數量"] if c in df_sum.columns]
                 st.dataframe(df_sum[cols], hide_index=True, use_container_width=True)
             else:
-                st.caption("無數據 (變數 summary_rows 為空)")
+                st.caption("無數據")
 
             st.divider()
-
             st.markdown("**3. 全卷詳細抄錄數據 (JSON)**")
             st.json(cache.get("ai_extracted_data", []), expanded=True)
-
-        # 4. Python Debug
-        with st.expander("🐍 Python 硬邏輯偵測結果", expanded=False):
-            if cache.get('python_debug_data'):
-                st.dataframe(cache['python_debug_data'], use_container_width=True, hide_index=True)
-            else:
-                st.caption("無偵測資料")
 
         # ========================================================
         # ⚡️ [修正重點]：先進行合併，再根據合併後的清單來計算數量
