@@ -940,7 +940,7 @@ def python_accounting_audit(dimension_data, res_main):
                         data["details"].append({"page": page, "title": raw_title, "val": freight_val, "note": f"運費 {f_note}"})
                     continue
 
-                # =========================================================
+                                # =========================================================
                 # 🧺 步驟 1: 籃子撈人
                 # =========================================================
                 match_A = (fuzz.partial_ratio(s_clean, title_clean) > 90)
@@ -950,13 +950,15 @@ def python_accounting_audit(dimension_data, res_main):
                 else:
                     is_dis = "ROLL拆裝" in s_clean
                     is_mac = "ROLL車修" in s_clean
-                    is_weld = "ROLL銲補" in s_clean or "焊" in s_clean
+                    # 🔥 [修改] 新增 "鉀" 到總表銲補識別 (銲=焊=鉀)
+                    is_weld = "ROLL銲補" in s_clean or "焊" in s_clean or "鉀" in s_clean
                     
                     has_part_body = "本體" in title_clean
                     has_part_journal = any(k in title_clean for k in journal_family)
                     
                     has_act_mac = any(k in title_clean for k in ["再生", "精車", "未再生", "粗車"])
-                    has_act_weld = ("銲補" in title_clean or "焊" in title_clean)
+                    # 🔥 [修改] 新增 "鉀" 到明細動作識別
+                    has_act_weld = ("銲補" in title_clean or "焊" in title_clean or "鉀" in title_clean)
                     is_assy = ("組裝" in title_clean or "拆裝" in title_clean)
                     
                     if is_dis and is_assy: match_B = True
