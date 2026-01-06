@@ -1240,6 +1240,31 @@ def python_header_audit_batch(photo_gallery, ai_res_json):
             pass # 日期格式讀不懂，跳過
 
     return header_issues
+    
+def consolidate_issues(issue_list):
+    """
+    (修復報錯專用)
+    將重複的異常項目合併，讓報告更簡潔。
+    """
+    if not issue_list: return []
+    
+    # 這裡做一個簡單的去重：如果 "頁碼", "項目", "類型" 都一樣，就算同一筆
+    # (您可以根據需求調整，這裡提供最簡單的不報錯版本)
+    unique_map = {}
+    final_list = []
+    
+    for i in issue_list:
+        # 產生唯一指紋
+        key = f"{i.get('page')}_{i.get('item')}_{i.get('issue_type')}_{i.get('common_reason')}"
+        
+        if key not in unique_map:
+            unique_map[key] = True
+            final_list.append(i)
+        else:
+            # 如果已經有了，可以在這裡做計數累加 (這裡先略過，避免複雜)
+            pass
+            
+    return final_list
 
 # --- 6. 手機版 UI 與 核心執行邏輯 ---
 st.title("🏭 交貨單稽核")
@@ -1484,23 +1509,37 @@ if st.session_state.photo_gallery:
             st.rerun()
 
     # --- 💡 顯示結果區塊 ---
+        # --- 💡 顯示結果區塊 ---
     if st.session_state.analysis_result_cache:
         cache = st.session_state.analysis_result_cache
         
-        # ✅ [新版 UI] 表頭資訊卡片 (讀取 cache)
+        # ✅ [UI 修改] 改用 Caption + Markdown (字體較小)
         st.divider()
         st.subheader("📋 表頭資訊偵測")
         
-        # 這裡改用 cache.get
         h_info = cache.get("header_info", {}) 
         current_job = h_info.get("job_no", "未偵測")
         sch_date = h_info.get("scheduled_date", "未偵測")
         act_date = h_info.get("actual_date", "未偵測")
         
         col_h1, col_h2, col_h3 = st.columns(3)
-        with col_h1: st.metric("工令單號", current_job)
-        with col_h2: st.metric("預定交貨日", sch_date)
-        with col_h3: st.metric("實際交貨日", act_date)
+        
+        with col_h1:
+            st.caption("工令單號")
+            st.markdown(f"**{current_job}**") # 使用粗體小字
+            
+        with col_h2:
+            st.caption("預定交貨日")
+            st.markdown(f"**{sch_date}**")
+            
+        with col_h3:
+            st.caption("實際交貨日")
+            # 如果有日期，根據邏輯變色 (選用)
+            if act_date != "未偵測" and sch_date != "未偵測" and act_date > sch_date:
+                st.markdown(f":red[**{act_date}**] (逾期)")
+            else:
+                st.markdown(f"**{act_date}**")
+        
         st.divider()
 
         # 1. 頂部狀態條
