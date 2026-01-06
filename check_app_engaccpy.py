@@ -512,8 +512,6 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
          {{
            "page": 數字, "item_title": "標題", "batch_total_qty": 0, "category": null, 
            "item_pc_target": 0,
-           "accounting_rules": {{ "local": "", "agg": "", "freight": "" }},
-           "sl": {{ "lt": "null", "t": 0 }},
            "std_spec": "原始規格文字",
            "ds": "ID:值|ID:值" 
          }}
