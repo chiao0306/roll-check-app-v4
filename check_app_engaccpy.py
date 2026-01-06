@@ -1670,10 +1670,10 @@ if st.session_state.photo_gallery:
         
         st.info(f"💰 本次成本: NT$ {cache['cost_twd']:.2f} (In: {cache['total_in']:,} / Out: {cache['total_out']:,})")
         
-            # 4. 規則展示 (v57: 資料源修正版)
+        # 4. 規則展示 (v58: 完整欄位六宮格版)
         with st.expander("🏗️ 檢視 Excel 邏輯與規則參數", expanded=False):
             
-            # 🔥 1. 修正資料源：改讀 analysis_result_cache (這才是最新資料！)
+            # 1. 修正資料源：改讀 analysis_result_cache
             target_list = []
             if st.session_state.analysis_result_cache:
                 target_list = st.session_state.analysis_result_cache.get('all_issues', [])
@@ -1714,11 +1714,23 @@ if st.session_state.photo_gallery:
                         info = rule_info_map.get(rule_key, {})
                         
                         st.markdown(f"#### ✅ {rule_key}")
-                        c1, c2, c3 = st.columns(3)
-                        c1.text(f"Local: {info.get('Unit_Rule_Local', 'N/A')}")
-                        c2.text(f"Freight: {info.get('Unit_Rule_Freight', 'N/A')}")
-                        c3.text(f"Agg: {info.get('Unit_Rule_Agg', 'N/A')}")
                         
+                        # 🔥🔥🔥 [版面修改] 改為 2 欄排列，顯示 6 個欄位 🔥🔥🔥
+                        c_left, c_right = st.columns(2)
+                        
+                        with c_left:
+                            st.markdown(f"**Local:** `{info.get('Unit_Rule_Local', '-')}`")
+                            st.markdown(f"**Freight:** `{info.get('Unit_Rule_Freight', '-')}`")
+                            st.markdown(f"**Agg:** `{info.get('Unit_Rule_Agg', '-')}`")
+                            
+                        with c_right:
+                            # 嘗試讀取更多欄位，若 Excel 沒這欄位會顯示 '-'
+                            st.markdown(f"**Category:** `{info.get('Category', '-')}`")
+                            st.markdown(f"**Process:** `{info.get('Process_Rule', '-')}`")
+                            st.markdown(f"**Logic:** `{info.get('Logic_Prompt', '-')}`")
+                        # -----------------------------------------------------
+                        
+                        # 顯示明細表格
                         hit_df = pd.DataFrame(hits)
                         cols_to_show = ["明細名稱", "分數", "匹配類型", "頁碼"]
                         final_cols = [c for c in cols_to_show if c in hit_df.columns]
@@ -1727,12 +1739,11 @@ if st.session_state.photo_gallery:
                             st.dataframe(hit_df[final_cols].style.format({"分數": "{:.0f}"}), use_container_width=True, hide_index=True)
                         else:
                             st.dataframe(hit_df, use_container_width=True, hide_index=True)
+                        st.divider()
                 else:
                     if target_list:
-                        # 有跑分析，但沒抓到 (這才合理)
                         st.info(f"本次工令未觸發任何特規項目 (門檻: {current_fuzz})。")
                     else:
-                        # 真的還沒跑分析
                         st.warning("⚠️ 尚未執行分析或無分析結果。")
 
                 # 底部：完整的規則總表
@@ -1740,7 +1751,7 @@ if st.session_state.photo_gallery:
                 with st.expander("📋 查看完整規則總表 (All Rules)", expanded=False):
                     st.dataframe(df_rules, use_container_width=True, hide_index=True)
 
-                # 🔥 X光機 (保留您的除錯工具)
+                # 🔥 X光機 (保留)
                 st.markdown("---")
                 st.subheader("🕵️‍♂️ X光檢測：為什麼沒抓到？")
                 st.caption(f"這裡列出前 10 筆項目的最高分規則，幫您決定 GLOBAL_FUZZ_THRESHOLD 該設多少 (目前: {current_fuzz})")
@@ -1756,6 +1767,8 @@ if st.session_state.photo_gallery:
                         clean_title = item_title.replace(" ", "").replace("\n", "").strip()
                         best_score = 0
                         best_rule = "無"
+                        
+                        # 記得這裡要跟您最後決定使用的 fuzz 方式同步 (目前建議 token_sort_ratio)
                         for k in rules_map_for_xray.keys():
                             sc = fuzz.token_sort_ratio(k, clean_title)
                             if sc > best_score:
