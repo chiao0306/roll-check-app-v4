@@ -762,12 +762,11 @@ def python_numerical_audit(dimension_data):
     
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官 (v45: 遺珠偵測版)
-    功能升級：
-    1. [遺珠偵測]: 若總表觸發 Mode B (車修/銲補/拆裝)，但明細被拒絕，
-       程式會記錄原因 (缺部位? 缺動作?) 並顯示於 "遺珠之憾" 卡片。
-    2. [強力清洗]: clean_text 改用 regex \s+ 清除所有隱形空白。
-    3. [車修回歸]: 為了避免 OCR 誤判 "再生" 導致漏抓，暫時加回 "車修" 關鍵字作為安全網。
+    Python 會計官 (v46: 全域偵探版)
+    新增偵測：
+    1. [攔截記錄]: 若項目通過籃子但被 Interceptor 擋下，記錄原因 (如: 🛡️ 再生衝突)。
+    2. [豁免記錄]: 若項目被 Rules 判定為 EXEMPT 但看起來像目標，記錄原因 (🎫 被規則豁免)。
+    3. [籃子記錄]: 保留原本的籃子遺珠偵測 (🗑️ 缺部位/動作)。
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -777,7 +776,6 @@ def python_accounting_audit(dimension_data, res_main):
 
     # --- 0. 基礎工具 ---
     def clean_text(text):
-        # 強力清洗：移除所有 whitespace (含 \n, \r, \t, \u3000 等)
         text = str(text).replace('"', '').replace("'", "")
         return re.sub(r"\s+", "", text).strip()
 
@@ -812,15 +810,12 @@ def python_accounting_audit(dimension_data, res_main):
     except: pass 
 
     summary_rows = res_main.get("summary_rows", [])
-    
-    # 準備 Debug 收集器
     debug_missed_items = [] 
 
     # =================================================
-    # 🕵️‍♂️ 第一關：總表內戰 (申請 vs 實交)
+    # 🕵️‍♂️ 第一關：總表內戰
     # =================================================
     global_sum_tracker = {}
-    
     for s in summary_rows:
         s_title = s.get('title', 'Unknown')
         q_apply = safe_float(s.get('apply_qty', 0))      
@@ -839,7 +834,6 @@ def python_accounting_audit(dimension_data, res_main):
                 ], 
                 "source": "🐍 會計引擎"
             })
-            
         global_sum_tracker[s_title] = {
             "target": q_deliver, "actual": 0, "details": [], "page": s.get('page', "總表")
         }
@@ -879,16 +873,11 @@ def python_accounting_audit(dimension_data, res_main):
         # A. 單項檢查
         is_local_exempt = "豁免" in str(u_local) or "SKIP" in str(u_local).upper() or "EXEMPT" in str(u_local).upper()
         actual_item_qty = raw_count if batch_qty > 0 else raw_count * parse_ratio(u_local)
-
         if not is_local_exempt and abs(actual_item_qty - target_pc) > 0.01 and target_pc > 0:
              accounting_issues.append({
                  "page": page, "item": raw_title, "issue_type": "🛑 統計不符(單項)", 
                  "common_reason": f"標題 {target_pc} != 內文 {actual_item_qty}", 
-                 "failures": [
-                     {"頁碼": page, "項目名稱": "目標 (括號)", "數量": target_pc, "備註": "標題"},
-                     {"頁碼": page, "項目名稱": "實際 (計數)", "數量": actual_item_qty, "備註": "內文"}
-                 ], 
-                 "source": "🐍 會計引擎"
+                 "failures": [], "source": "🐍 會計引擎"
              })
 
         # B. 重複檢查
@@ -905,7 +894,6 @@ def python_accounting_audit(dimension_data, res_main):
         freight_val = 0.0
         f_note = ""
         u_fr_upper = str(u_fr).upper()
-        
         is_fr_exempt = "豁免" in u_fr_upper or "SKIP" in u_fr_upper
         is_forced_include = "計入" in str(u_fr) or "INCLUDED" in u_fr_upper
         is_default_target = ("本體" in title_clean and "未再生" in title_clean) or ("新品組裝" in title_clean)
@@ -914,6 +902,7 @@ def python_accounting_audit(dimension_data, res_main):
             freight_val = actual_item_qty * fr_multiplier
             f_note = f"x{fr_multiplier}" if fr_multiplier != 1.0 else ""
 
+        # 確定 Agg Mode
         agg_mode = "B" 
         if u_agg:
             p_clean = str(u_agg).upper().replace(" ", "")
@@ -921,122 +910,114 @@ def python_accounting_audit(dimension_data, res_main):
             elif "AB" in p_clean: agg_mode = "AB"
             elif "A" in p_clean: agg_mode = "A"
 
-        if agg_mode != "EXEMPT":
-            agg_multiplier = parse_ratio(u_agg)
-            qty_agg = batch_qty if batch_qty > 0 else actual_item_qty * agg_multiplier
+        # 開始歸戶掃描
+        agg_multiplier = parse_ratio(u_agg)
+        qty_agg = batch_qty if batch_qty > 0 else actual_item_qty * agg_multiplier
 
-            for s_title, data in global_sum_tracker.items():
+        # 即使是 EXEMPT 也要跑一次迴圈，為了 Debug "被豁免" 的項目
+        for s_title, data in global_sum_tracker.items():
+            s_clean = clean_text(s_title)
+            
+            # 運費通道 (省略...)
+            if (fuzz.partial_ratio("輥輪拆裝.車修或銲補運費", s_clean) > 70) or ("運費" in s_clean):
+                if freight_val > 0 and agg_mode != "EXEMPT":
+                    data["actual"] += freight_val
+                    data["details"].append({"page": page, "title": raw_title, "val": freight_val, "note": f"運費 {f_note}"})
+                continue
+
+            # =========================================================
+            # 🧺 步驟 1: 籃子撈人
+            # =========================================================
+            match_A = (fuzz.partial_ratio(s_clean, title_clean) > 90)
+            match_B = False
+            s_upper_check = s_clean.upper()
+            
+            # 模糊籃子識別
+            is_dis = fuzz.partial_ratio("ROLL拆裝", s_upper_check) > 80
+            is_mac = fuzz.partial_ratio("ROLL車修", s_upper_check) > 80
+            is_weld = (fuzz.partial_ratio("ROLL銲補", s_upper_check) > 80) or ("焊" in s_upper_check) or ("鉀" in s_upper_check)
+            
+            has_part_body = "本體" in title_clean
+            has_part_journal = any(k in title_clean for k in journal_family)
+            has_act_mac = any(k in title_clean for k in ["再生", "精車", "未再生", "粗車", "車修", "加工", "研磨"])
+            has_act_weld = ("銲補" in title_clean or "焊" in title_clean or "鉀" in title_clean)
+            is_assy = ("組裝" in title_clean or "拆裝" in title_clean)
+            
+            if is_dis and is_assy: match_B = True
+            elif is_mac and (has_part_body or has_part_journal) and has_act_mac: match_B = True
+            elif is_weld and (has_part_body or has_part_journal) and has_act_weld: match_B = True
+            
+            # 🔥 [Debug 1] 籃子遺珠
+            if is_mac and not match_B and agg_mode != "EXEMPT":
+                reason = []
+                if not (has_part_body or has_part_journal): reason.append("缺部位")
+                if not has_act_mac: reason.append("缺動作")
+                if reason:
+                    debug_missed_items.append({"summary": s_title, "item": raw_title, "reason": "🗑️ " + "+".join(reason), "page": page})
+
+            # 決定是否匹配
+            match = False
+            if agg_mode == "EXEMPT":
+                # 🔥 [Debug 2] 被豁免偵測
+                # 如果它其實符合條件，但是被 Excel 規則強制豁免了
+                if match_B or match_A:
+                    debug_missed_items.append({"summary": s_title, "item": raw_title, "reason": "🎫 被規則豁免 (EXEMPT)", "page": page})
                 match = False
-                s_clean = clean_text(s_title)
+            elif agg_mode == "A": match = match_A
+            elif agg_mode == "AB": match = match_A or match_B
+            else: match = match_B if match_B else match_A
+
+            # =========================================================
+            # 🛑 步驟 2: 攔截者 (The Interceptor)
+            # =========================================================
+            if match:
+                s_upper = s_clean.upper()
+                t_upper = title_clean.upper()
                 
-                # 運費通道
-                is_freight = False
-                if fuzz.partial_ratio("輥輪拆裝.車修或銲補運費", s_clean) > 70: is_freight = True
-                elif "運費" in s_clean or "FREIGHT" in s_clean: is_freight = True
+                # ... (屬性定義略) ...
+                s_is_unregen = "未再生" in s_clean or "粗車" in s_clean
+                t_is_unregen = "未再生" in title_clean or "粗車" in title_clean
+                s_is_regen = ("再生" in s_clean or "精車" in s_clean) and not s_is_unregen
+                t_is_regen = ("再生" in title_clean or "精車" in title_clean or "車修" in title_clean) and not t_is_unregen
                 
-                if is_freight:
-                    if freight_val > 0:
-                        data["actual"] += freight_val
-                        data["details"].append({"page": page, "title": raw_title, "val": freight_val, "note": f"運費 {f_note}"})
-                    continue
+                s_is_body = "本體" in s_clean
+                t_is_body = "本體" in title_clean
+                s_is_journal = any(k in s_clean for k in journal_family)
+                t_is_journal = any(k in title_clean for k in journal_family)
 
-                # =========================================================
-                # 🧺 步驟 1: 籃子撈人
-                # =========================================================
-                match_A = (fuzz.partial_ratio(s_clean, title_clean) > 90)
-                match_B = False
+                block_reason = None
+                
+                if s_is_regen and t_is_unregen: block_reason = "🛡️ 再生衝突 (總表再生 vs 明細未再生)"
+                if s_is_unregen and t_is_regen: block_reason = "🛡️ 再生衝突 (總表未再生 vs 明細再生)"
+                
+                if s_is_body and not s_is_journal and t_is_journal: block_reason = "🛡️ 部位衝突 (總表本體 vs 明細軸頸)"
+                if s_is_journal and not s_is_body and t_is_body: block_reason = "🛡️ 部位衝突 (總表軸頸 vs 明細本體)"
+                
+                if "TOP" in s_upper and "BOTTOM" in t_upper: block_reason = "🛡️ 位置衝突"
+                if "BOTTOM" in s_upper and "TOP" in t_upper: block_reason = "🛡️ 位置衝突"
+                
+                if block_reason:
+                    match = False
+                    # 🔥 [Debug 3] 被攔截偵測
+                    debug_missed_items.append({"summary": s_title, "item": raw_title, "reason": block_reason, "page": page})
 
-                if batch_qty > 0 and match_A: match_B = True
-                else:
-                    s_upper_check = s_clean.upper()
-                    
-                    # 模糊籃子 (>80分)
-                    is_dis = fuzz.partial_ratio("ROLL拆裝", s_upper_check) > 80
-                    is_mac = fuzz.partial_ratio("ROLL車修", s_upper_check) > 80
-                    is_weld = (fuzz.partial_ratio("ROLL銲補", s_upper_check) > 80) or \
-                              ("焊" in s_upper_check) or \
-                              ("鉀" in s_upper_check)
-                    
-                    has_part_body = "本體" in title_clean
-                    has_part_journal = any(k in title_clean for k in journal_family)
-                    
-                    # 🔥 [安全網]: 加回 "車修" 關鍵字，防止 "再生" 亂碼
-                    has_act_mac = any(k in title_clean for k in ["再生", "精車", "未再生", "粗車", "車修", "加工", "研磨"])
-                    
-                    has_act_weld = ("銲補" in title_clean or "焊" in title_clean or "鉀" in title_clean)
-                    is_assy = ("組裝" in title_clean or "拆裝" in title_clean)
-                    
-                    if is_dis and is_assy: match_B = True
-                    elif is_mac and (has_part_body or has_part_journal) and has_act_mac: match_B = True
-                    elif is_weld and (has_part_body or has_part_journal) and has_act_weld: match_B = True
-                    
-                    # 🔥 [Debug] 遺珠偵測
-                    if is_mac and not match_B:
-                        reason = []
-                        if not (has_part_body or has_part_journal): reason.append("缺部位")
-                        if not has_act_mac: reason.append("缺動作")
-                        if is_dis and is_assy: reason.append("被拆裝籃搶走") # 理論上不會發生
-                        
-                        if reason:
-                            debug_missed_items.append({
-                                "summary": s_title,
-                                "item": raw_title,
-                                "reason": "+".join(reason),
-                                "page": page
-                            })
-
-                if agg_mode == "A": match = match_A
-                elif agg_mode == "AB": match = match_A or match_B
-                else: match = match_B if match_B else match_A
-
-                # =========================================================
-                # 🛑 步驟 2: 攔截者 (The Interceptor)
-                # =========================================================
-                if match:
-                    s_upper = s_clean.upper()
-                    t_upper = title_clean.upper()
-
-                    s_is_unregen = "未再生" in s_clean or "粗車" in s_clean
-                    t_is_unregen = "未再生" in title_clean or "粗車" in title_clean
-                    
-                    s_is_regen = ("再生" in s_clean or "精車" in s_clean) and not s_is_unregen
-                    t_is_regen = ("再生" in title_clean or "精車" in title_clean or "車修" in title_clean) and not t_is_unregen
-                    
-                    s_is_body = "本體" in s_clean
-                    t_is_body = "本體" in title_clean
-                    s_is_journal = any(k in s_clean for k in journal_family)
-                    t_is_journal = any(k in title_clean for k in journal_family)
-
-                    if s_is_regen and t_is_unregen: match = False
-                    if s_is_unregen and t_is_regen: match = False
-                    
-                    if s_is_body and not s_is_journal and t_is_journal: match = False
-                    if s_is_journal and not s_is_body and t_is_body: match = False
-                    
-                    if "TOP" in s_upper and "BOTTOM" in t_upper: match = False
-                    if "BOTTOM" in s_upper and "TOP" in t_upper: match = False
-
-                if match:
-                    data["actual"] += qty_agg
-                    c_msg = f"x{agg_multiplier}" if agg_multiplier != 1.0 else ""
-                    data["details"].append({"page": page, "title": raw_title, "val": qty_agg, "note": c_msg})
+            if match:
+                data["actual"] += qty_agg
+                c_msg = f"x{agg_multiplier}" if agg_multiplier != 1.0 else ""
+                data["details"].append({"page": page, "title": raw_title, "val": qty_agg, "note": c_msg})
 
     # =================================================
     # 🕵️‍♂️ 第三關：明細總結算
     # =================================================
     for s_title, data in global_sum_tracker.items():
         if abs(data["actual"] - data["target"]) > 0.01: 
-            
             s_upper = clean_text(s_title).upper()
-            is_mode_b = False
-            if (fuzz.partial_ratio("ROLL拆裝", s_upper) > 80) or \
-               (fuzz.partial_ratio("ROLL車修", s_upper) > 80) or \
-               (fuzz.partial_ratio("ROLL銲補", s_upper) > 80) or \
-               ("焊" in s_upper) or ("鉀" in s_upper):
-                is_mode_b = True
+            is_mode_b = (fuzz.partial_ratio("ROLL拆裝", s_upper) > 80) or \
+                        (fuzz.partial_ratio("ROLL車修", s_upper) > 80) or \
+                        (fuzz.partial_ratio("ROLL銲補", s_upper) > 80) or \
+                        ("焊" in s_upper) or ("鉀" in s_upper)
             
-            display_title = s_title
-            if is_mode_b: display_title += " (Mode B)"
+            display_title = s_title + (" (Mode B)" if is_mode_b else "")
 
             fail_table = []
             fail_table.append({"頁碼": "總表", "項目名稱": f"🎯 目標 (實交)", "數量": data["target"], "備註": "基準"})
@@ -1045,25 +1026,22 @@ def python_accounting_audit(dimension_data, res_main):
             fail_table.append({"頁碼": "∑", "項目名稱": "加總結果", "數量": data["actual"], "備註": "總計"})
 
             accounting_issues.append({
-                "page": data["page"], "item": display_title,
-                "issue_type": "🛑 明細匯總不符", 
+                "page": data["page"], "item": display_title, "issue_type": "🛑 明細匯總不符", 
                 "common_reason": f"實交({data['target']}) != 明細加總({data['actual']})", 
-                "failures": fail_table, 
-                "source": "🐍 會計引擎"
+                "failures": fail_table, "source": "🐍 會計引擎"
             })
     
-    # 🔥 [Debug] 顯示遺珠
+    # 🔥 [Debug Output]
     if debug_missed_items:
         fail_table = []
-        for miss in debug_missed_items[:20]: # 只顯示前20個避免洗版
+        for miss in debug_missed_items[:30]: 
             fail_table.append({"總表": miss['summary'], "被拒明細": miss['item'], "原因": miss['reason'], "頁碼": miss['page']})
         
         accounting_issues.append({
-            "page": "DEBUG", "item": "🕵️‍♂️ 遺珠之憾",
+            "page": "DEBUG", "item": "🕵️‍♂️ 遺珠偵探報告",
             "issue_type": "⚠️ 潛在漏抓",
-            "common_reason": "符合籃子但被過濾",
-            "failures": fail_table,
-            "source": "🐍 會計引擎"
+            "common_reason": "列出所有被過濾的項目",
+            "failures": fail_table, "source": "🐍 會計引擎"
         })
 
     return accounting_issues
