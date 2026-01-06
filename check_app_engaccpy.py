@@ -1119,18 +1119,25 @@ def python_accounting_audit(dimension_data, res_main):
 
 def python_process_audit(dimension_data):
     """
-    Python 流程引擎 (v23: 熱處理/動平衡排除版)
-    1. [排除]: 動平衡、熱處理 -> 不參與工序溯源與尺寸比較。
-    2. [既有功能]: 軸位/軸頸軌道、Stage 1~4 檢查。
+    Python 流程引擎 (v24: 全域統一特規版)
+    升級內容：
+    1. [統一配對]: 引入與會計/工程同級的配對邏輯 (GLOBAL_FUZZ_THRESHOLD + fuzz.ratio)。
+       - 徹底解決 "規則劫持" 導致的錯誤工序判定。
+    2. [規則優先]: 若 Excel 特規配對成功且設定為 SKIP/EXEMPT，直接跳過檢查。
+    3. [既有功能]: 保留熱處理/動平衡關鍵字排除、工序溯源、尺寸邏輯。
     """
     process_issues = []
     import re
     import pandas as pd
     from thefuzz import fuzz
 
+    # 🔥 1. 讀取全域門檻 (與會計/工程同步)
+    CURRENT_THRESHOLD = globals().get('GLOBAL_FUZZ_THRESHOLD', 95)
+
     def clean_text(text):
         return str(text).replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
 
+    # 2. 載入規則
     rules_map = {}
     try:
         df = pd.read_excel("rules.xlsx")
@@ -1138,6 +1145,7 @@ def python_process_audit(dimension_data):
         for _, row in df.iterrows():
             iname = str(row.get('Item_Name', '')).strip()
             p_rule = str(row.get('Process_Rule', '')).strip()
+            # 流程引擎主要看 Process_Rule
             if iname and p_rule and p_rule.lower() != 'nan':
                 rules_map[clean_text(iname)] = p_rule
     except: pass
@@ -1153,26 +1161,45 @@ def python_process_audit(dimension_data):
         title_clean = clean_text(title)
         ds = str(item.get("ds", ""))
         
-        # ⚡️ [新增] 動平衡、熱處理直接跳過流程檢查
+        # ⚡️ [既有豁免] 動平衡、熱處理直接跳過流程檢查 (關鍵字優先)
         t_upper = title_clean.upper()
         if any(k in t_upper for k in ["動平衡", "BALANCING", "熱處理", "HEAT"]):
             continue
 
-        track = "Unknown"
-        stage = 0
+        # =========================================================
+        # 🔥 3. 執行特規配對 (統一邏輯)
+        # =========================================================
         forced_rule = None
+        
+        # A. 完全匹配
+        if title_clean in rules_map:
+            forced_rule = rules_map[title_clean]
+        
+        # B. 去括號匹配
+        if not forced_rule:
+            t_no = re.sub(r"[\(（].*?[\)）]", "", title_clean)
+            if t_no in rules_map:
+                forced_rule = rules_map[t_no]
 
-        if rules_map:
+        # C. 模糊匹配 (使用全域門檻 + 嚴格比對)
+        if not forced_rule and rules_map:
             best_score = 0
             for k, v in rules_map.items():
-                sc = fuzz.partial_ratio(k, title_clean)
-                if sc > 85 and sc > best_score:
+                sc = fuzz.ratio(k, title_clean) # 嚴格比對 (原為 partial_ratio)
+                if sc > CURRENT_THRESHOLD and sc > best_score:
                     best_score = sc
                     forced_rule = v
+        # =========================================================
+
+        track = "Unknown"
+        stage = 0
         
+        # 如果配對到規則，解析規則內容
         if forced_rule:
             fr = forced_rule.upper()
-            if "豁免" in fr or "EXEMPT" in fr or "SKIP" in fr: continue 
+            # ⚡️ [規則豁免] 如果規則說 SKIP，跳過
+            if "豁免" in fr or "EXEMPT" in fr or "SKIP" in fr: 
+                continue 
             
             if "本體" in fr: track = "本體"
             elif "軸頸" in fr or "軸頭" in fr or "軸位" in fr: track = "軸頸"
@@ -1182,6 +1209,7 @@ def python_process_audit(dimension_data):
             elif "再生" in fr or "精車" in fr: stage = 3
             elif "研磨" in fr: stage = 4
 
+        # 如果規則沒指定(或沒配到)，使用預設關鍵字判斷
         if stage == 0:
             if "研磨" in title: stage = 4
             elif any(k in title for k in ["銲補", "銲接", "焊", "鉀"]): stage = 2
@@ -1194,6 +1222,7 @@ def python_process_audit(dimension_data):
         
         if track == "Unknown" or stage == 0: continue 
 
+        # --- 以下為數值收集邏輯 (保持不變) ---
         segments = ds.split("|")
         for seg in segments:
             parts = seg.split(":")
@@ -1210,6 +1239,7 @@ def python_process_audit(dimension_data):
                 "val": val, "page": p_num, "title": title
             }
 
+    # --- 以下為檢查邏輯 (缺漏工序 + 尺寸倒置) 保持不變 ---
     for (rid, track), stages_data in history.items():
         present_stages = sorted(stages_data.keys())
         if not present_stages: continue
