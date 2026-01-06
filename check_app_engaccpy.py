@@ -653,7 +653,7 @@ def python_numerical_audit(dimension_data):
         if not rule_set and rules_map:
             best_score = 0
             for k, v in rules_map.items():
-                sc = fuzz.ratio(k, title_clean) # 嚴格比對
+                sc = fuzz.token_sort_ratio(k, title_clean) # 嚴格比對
                 if sc > CURRENT_THRESHOLD and sc > best_score:
                     best_score = sc
                     rule_set = v
@@ -942,7 +942,7 @@ def python_accounting_audit(dimension_data, res_main):
             best_score = 0
             best_rule = None
             for k, v in rules_map.items():
-                sc = fuzz.ratio(k, title_clean) 
+                sc = fuzz.token_sort_ratio(k, title_clean) 
                 # 🔥 改用 CURRENT_THRESHOLD
                 if sc > CURRENT_THRESHOLD and sc > best_score:
                     best_score = sc
@@ -1185,7 +1185,7 @@ def python_process_audit(dimension_data):
         if not forced_rule and rules_map:
             best_score = 0
             for k, v in rules_map.items():
-                sc = fuzz.ratio(k, title_clean) # 嚴格比對 (原為 partial_ratio)
+                sc = fuzz.token_sort_ratio(k, title_clean) # 嚴格比對 (原為 partial_ratio)
                 if sc > CURRENT_THRESHOLD and sc > best_score:
                     best_score = sc
                     forced_rule = v
@@ -1757,7 +1757,7 @@ if st.session_state.photo_gallery:
                         best_score = 0
                         best_rule = "無"
                         for k in rules_map_for_xray.keys():
-                            sc = fuzz.ratio(k, clean_title)
+                            sc = fuzz.token_sort_ratio(k, clean_title)
                             if sc > best_score:
                                 best_score = sc
                                 best_rule = k
