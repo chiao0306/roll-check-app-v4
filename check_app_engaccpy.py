@@ -1116,14 +1116,15 @@ def python_accounting_audit(dimension_data, res_main):
                 c_msg = "計入總量" if batch_qty > 0 else (f"計入 (x{agg_multiplier})" if agg_multiplier != 1.0 else "計入")
                 data["details"].append({"id": f"{raw_title} (P.{page})", "val": qty_agg, "calc": c_msg})
 
-    # 3. 異常結算
+    # 3. 異常結算 (總表比對: 左 vs 右)
     for s_title, data in global_sum_tracker.items():
-        if abs(data["actual"] - data["target"]) > 0.01 and data["target"] > 0:
+        # [v30 修改] 明確的警示邏輯：申請 vs 實交，只要不相等就報警
+        if abs(data["actual"] - data["target"]) > 0.01: 
             accounting_issues.append({
                 "page": data["page"], "item": s_title, 
-                "issue_type": "統計不符(總帳)", 
-                "common_reason": f"標註 {data['target']} != 實際 {data['actual']}", 
-                "failures": [{"id": "🔍 基準", "val": data["target"]}] + data["details"] + [{"id": "🧮 實際", "val": data["actual"]}], 
+                "issue_type": "⚠️ 總量不符", 
+                "common_reason": f"申請({data['target']}) != 實交({data['actual']})", 
+                "failures": [{"id": "📝 申請", "val": data["target"]}, {"id": "🚛 實交", "val": data["actual"]}], 
                 "source": "🐍 會計引擎"
             })
             
@@ -1269,6 +1270,103 @@ def python_process_audit(dimension_data):
                     })
 
     return process_issues
+    
+def python_header_audit(all_pages_results):
+    """
+    Python 表頭稽核官 (v1: 工令與日期專用)
+    1. 工令一致性 & 格式檢查 (10碼: W/R/O/Y + 9英數)
+    2. 日期一致性 (預定日期 / 實際日期)
+    3. 日期時效 (實際 <= 預定)
+    """
+    header_issues = []
+    import re
+    from datetime import datetime
+    
+    # 收集資料
+    job_nos = []
+    dates_scheduled = []
+    dates_actual = []
+    
+    for idx, page_data in enumerate(all_pages_results):
+        h_info = page_data.get("header_info", {})
+        
+        # A. 工令 (去空格，保留英數)
+        j = h_info.get("job_no", "Unknown")
+        if j and j != "Unknown":
+            j_clean = j.upper().replace(" ", "").replace("-", "") 
+            job_nos.append((idx + 1, j_clean))
+            
+        # B. 日期
+        d_sch = h_info.get("scheduled_date", "Unknown")
+        d_act = h_info.get("actual_date", "Unknown")
+        
+        if d_sch and d_sch != "Unknown": dates_scheduled.append((idx + 1, d_sch))
+        if d_act and d_act != "Unknown": dates_actual.append((idx + 1, d_act))
+
+    # --- 1. 工令檢查 ---
+    if job_nos:
+        # Regex: W/R/O/Y 開頭 + 9個英數 (共10碼)
+        valid_jobs = []
+        pattern = r"^[WROY][A-Z0-9]{9}$"
+        
+        for p, j in job_nos:
+            if not re.match(pattern, j):
+                header_issues.append({
+                    "page": f"P.{p}", "item": "工令格式", "issue_type": "⚠️ 格式錯誤",
+                    "common_reason": f"工令 {j} 格式不符 (需10碼，W/R/O/Y開頭)",
+                    "failures": [{"id": "讀取值", "val": j}], "source": "🐍 表頭稽核"
+                })
+            else:
+                valid_jobs.append(j)
+        
+        # 混單檢查 (只看合規的工令，必須唯一)
+        distinct_valid_jobs = list(set(valid_jobs))
+        if len(distinct_valid_jobs) > 1:
+            header_issues.append({
+                "page": "多頁", "item": "工令單號", "issue_type": "🚨 嚴重混單",
+                "common_reason": f"偵測到多種工令：{distinct_valid_jobs}，請確認文件是否混雜。",
+                "failures": [{"id": f"P.{p}", "val": j} for p, j in job_nos if j in distinct_valid_jobs],
+                "source": "🐍 表頭稽核"
+            })
+
+    # --- 2. 日期檢查 ---
+    # 預定日期一致性
+    distinct_sch = list(set([d[1] for d in dates_scheduled]))
+    if len(distinct_sch) > 1:
+        header_issues.append({
+            "page": "多頁", "item": "預定交貨日", "issue_type": "📅 日期不一",
+            "common_reason": f"預定日期不一致：{distinct_sch}",
+            "failures": [{"id": f"P.{p}", "val": d} for p, d in dates_scheduled], "source": "🐍 表頭稽核"
+        })
+        
+    # 實際日期一致性
+    distinct_act = list(set([d[1] for d in dates_actual]))
+    if len(distinct_act) > 1:
+        header_issues.append({
+            "page": "多頁", "item": "實際交貨日", "issue_type": "📅 日期不一",
+            "common_reason": f"實際日期不一致：{distinct_act}",
+            "failures": [{"id": f"P.{p}", "val": d} for p, d in dates_actual], "source": "🐍 表頭稽核"
+        })
+
+    # 時效檢查 (實際 <= 預定)
+    target_sch_str = distinct_sch[0] if len(distinct_sch) == 1 else None
+    target_act_str = distinct_act[0] if len(distinct_act) == 1 else None
+    
+    if target_sch_str and target_act_str:
+        try:
+            dt_sch = datetime.strptime(target_sch_str.replace("-", "/"), "%Y/%m/%d")
+            dt_act = datetime.strptime(target_act_str.replace("-", "/"), "%Y/%m/%d")
+            
+            if dt_act > dt_sch:
+                 header_issues.append({
+                    "page": "表頭", "item": "交貨時效", "issue_type": "⏰ 逾期交貨",
+                    "common_reason": f"實際 {target_act_str} 晚於 預定 {target_sch_str}",
+                    "failures": [{"id": "延遲天數", "val": f"{(dt_act - dt_sch).days} 天"}], 
+                    "source": "🐍 表頭稽核"
+                })
+        except: pass
+
+    return header_issues
 
 # --- 6. 手機版 UI 與 核心執行邏輯 ---
 st.title("🏭 交貨單稽核")
