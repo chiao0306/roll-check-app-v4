@@ -1742,11 +1742,6 @@ if st.session_state.photo_gallery:
 
             except Exception as e:
                 st.error(f"UI 顯示錯誤: {e}")
-
-                # --- 底部：完整的規則總表 (供查詢用) ---
-                st.markdown("---")
-                with st.expander("📋 查看完整規則總表 (All Rules)", expanded=False):
-                    st.dataframe(df_rules, use_container_width=True, hide_index=True)
                 
                 # 🔥🔥🔥 [新增] X光分數檢測器 (貼在規則展示卡片的最下方) 🔥🔥🔥
                 st.markdown("---")
