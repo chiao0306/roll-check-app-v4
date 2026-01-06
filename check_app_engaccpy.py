@@ -1566,12 +1566,30 @@ if st.session_state.photo_gallery:
  
             st.markdown("**2. 左上角統計表 (Summary Rows)**")
             sum_rows = cache.get("summary_rows", [])
+            
             if sum_rows:
                 df_sum = pd.DataFrame(sum_rows)
+                
+                # 1. 確保頁碼欄位存在
                 if "page" not in df_sum.columns: df_sum["page"] = "?"
-                df_sum.rename(columns={"page": "頁碼", "title": "項目名稱", "target": "實交數量"}, inplace=True)
-                cols = [c for c in ["頁碼", "項目名稱", "實交數量"] if c in df_sum.columns]
-                st.dataframe(df_sum[cols], hide_index=True, use_container_width=True)
+                
+                # 2. 欄位更名 (兼容舊版 target 與新版 delivery_qty)
+                rename_map = {
+                    "page": "頁碼", 
+                    "title": "項目名稱", 
+                    "apply_qty": "申請數量",    # ✅ 新增：申請數量
+                    "delivery_qty": "實交數量", # ✅ 新增：實交數量
+                    "target": "實交數量"        # 舊版兼容 (若無 delivery_qty 則用 target)
+                }
+                df_sum.rename(columns=rename_map, inplace=True)
+                
+                # 3. 指定顯示順序 (確保欄位不會消失)
+                # 先列出我們想要的順序
+                desired_cols = ["頁碼", "項目名稱", "申請數量", "實交數量"]
+                # 只保留 DataFrame 中真的存在的欄位
+                final_cols = [c for c in desired_cols if c in df_sum.columns]
+                
+                st.dataframe(df_sum[final_cols], hide_index=True, use_container_width=True)
             else:
                 st.caption("無數據")
 
