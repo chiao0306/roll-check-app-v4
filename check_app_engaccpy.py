@@ -762,14 +762,13 @@ def python_numerical_audit(dimension_data):
     
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官 (v36: 中性車修修正版)
-    修復重點：
-    1. [關鍵修正] 將「車修」從「再生定義」中移除。
-       - 修正前: "ROLL車修" 被視為 "再生"，導致 "未再生" 被誤擋。
-       - 修正後: "ROLL車修" 為中性詞，不啟動互斥鎖，全收錄。
-    2. [保留強互斥]: 
-       - 若總表寫 "再生"，依然絕對攔截 "未再生"。
-       - 若總表寫 "本體"，依然絕對攔截 "軸頸"。
+    Python 會計官 (v37: 最終完美版)
+    修復與新增：
+    1. [中性車修]: "ROLL車修" 視為中性大通配符。
+       - 不觸發再生鎖 -> 未再生/再生 通吃。
+       - 不觸發部位鎖 -> 本體/軸頸 通吃。
+    2. [運費強制]: Excel 運費規則欄填入 "計入" 或 "Included" 即強制計算運費。
+    3. [功能保留]: 總表內戰(紅燈)、詳細對帳單(紅燈)、嚴格互斥鎖(針對專用總表)。
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -897,13 +896,21 @@ def python_accounting_audit(dimension_data, res_main):
              for rid, count in id_counts.items():
                 if count > 2: accounting_issues.append({"page": page, "item": raw_title, "issue_type": "⚠️編號重複(軸頸)", "common_reason": f"{rid} 重複 {count}次", "failures": []})
 
-        # C. 運費 & 歸戶
+        # C. 運費 & 歸戶 (新增 Included 強制判斷)
         fr_multiplier = parse_ratio(u_fr)
         freight_val = 0.0
         f_note = ""
-        is_fr_exempt = "豁免" in str(u_fr) or "SKIP" in str(u_fr).upper()
-        is_default_target = ("本體" in title_clean and "未再生" in title_clean) or ("新品組裝" in title_clean) or ("計入" in str(u_fr))
-        if not is_fr_exempt and (is_default_target or fr_multiplier != 1.0):
+        u_fr_upper = str(u_fr).upper()
+        
+        is_fr_exempt = "豁免" in u_fr_upper or "SKIP" in u_fr_upper
+        
+        # 🔥 [運費強制令] 加入 "計入" 或 "INCLUDED" 判斷
+        is_forced_include = "計入" in str(u_fr) or "INCLUDED" in u_fr_upper
+        
+        is_default_target = ("本體" in title_clean and "未再生" in title_clean) or ("新品組裝" in title_clean)
+        
+        # 如果不是豁免 且 (是預設目標 OR 強制計入 OR 倍率不為1)
+        if not is_fr_exempt and (is_default_target or is_forced_include or fr_multiplier != 1.0):
             freight_val = actual_item_qty * fr_multiplier
             f_note = f"x{fr_multiplier}" if fr_multiplier != 1.0 else ""
 
@@ -934,7 +941,7 @@ def python_accounting_audit(dimension_data, res_main):
                     continue
 
                 # =========================================================
-                # 🧺 步驟 1: 籃子撈人 (Broad Matching)
+                # 🧺 步驟 1: 籃子撈人
                 # =========================================================
                 match_A = (fuzz.partial_ratio(s_clean, title_clean) > 90)
                 match_B = False
@@ -953,6 +960,7 @@ def python_accounting_audit(dimension_data, res_main):
                     is_assy = ("組裝" in title_clean or "拆裝" in title_clean)
                     
                     if is_dis and is_assy: match_B = True
+                    # 車修籃：有部位 + 有動作 (再生/未再生都算)
                     elif is_mac and (has_part_body or has_part_journal) and has_act_mac: match_B = True
                     elif is_weld and (has_part_body or has_part_journal) and has_act_weld: match_B = True
                 
@@ -961,7 +969,7 @@ def python_accounting_audit(dimension_data, res_main):
                 else: match = match_B if match_B else match_A
 
                 # =========================================================
-                # 🛑 步驟 2: 攔截者 (The Interceptor) - 絕對防禦 v36
+                # 🛑 步驟 2: 攔截者 (The Interceptor) v37
                 # =========================================================
                 if match:
                     s_upper = s_clean.upper()
@@ -971,7 +979,7 @@ def python_accounting_audit(dimension_data, res_main):
                     s_is_unregen = "未再生" in s_clean or "粗車" in s_clean
                     t_is_unregen = "未再生" in title_clean or "粗車" in title_clean
                     
-                    # 🔥 [關鍵修正]: 移除 "車修"！讓 ROLL車修 變中性。
+                    # 🔥 [關鍵修正]: 移除 "車修"！讓 "ROLL車修" 變中性。
                     # 只有明確寫 "再生" 或 "精車" 才算是再生專用
                     s_is_regen = ("再生" in s_clean or "精車" in s_clean) and not s_is_unregen
                     t_is_regen = ("再生" in title_clean or "精車" in title_clean or "車修" in title_clean) and not t_is_unregen
@@ -984,12 +992,12 @@ def python_accounting_audit(dimension_data, res_main):
                     # 2. 執行攔截
                     
                     # [攔截 A] 再生 vs 未再生
-                    # 因為 "ROLL車修" 現在 s_is_regen = False, s_is_unregen = False
-                    # 所以它不會觸發這裡的任何一條攔截，再生/未再生通通放行！
+                    # 因為 "ROLL車修" 既不是 s_is_regen 也不是 s_is_unregen，所以不會攔截！
                     if s_is_regen and t_is_unregen: match = False
                     if s_is_unregen and t_is_regen: match = False
                     
                     # [攔截 B] 本體 vs 軸頸
+                    # 因為 "ROLL車修" 既不是 s_is_body 也不是 s_is_journal，所以不會攔截！
                     if s_is_body and not s_is_journal and t_is_journal: match = False
                     if s_is_journal and not s_is_body and t_is_body: match = False
                     
