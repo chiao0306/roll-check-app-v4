@@ -13,6 +13,9 @@ from thefuzz import fuzz
 from collections import Counter
 import re
 
+GLOBAL_FUZZ_THRESHOLD = 95 
+
+
 # --- 1. 頁面設定 ---
 st.set_page_config(page_title="交貨單稽核", page_icon="🏭", layout="centered")
 
