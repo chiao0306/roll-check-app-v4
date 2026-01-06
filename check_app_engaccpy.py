@@ -1670,7 +1670,7 @@ if st.session_state.photo_gallery:
         
         st.info(f"💰 本次成本: NT$ {cache['cost_twd']:.2f} (In: {cache['total_in']:,} / Out: {cache['total_out']:,})")
         
-     # 4. 規則展示 (v56: 強力顯影最終版)
+         # 4. 規則展示 (v56: 強力顯影最終版)
     with st.expander("🏗️ 檢視 Excel 邏輯與規則參數", expanded=False):
         
         # 1. 直接從 session_state 暴力撈取資料
@@ -1748,7 +1748,7 @@ if st.session_state.photo_gallery:
         except Exception as e:
             st.error(f"UI 顯示錯誤 (請確認 rules.xlsx 存在): {e}")
 
-                        st.divider()
+                    st.divider()
                 
                 # 🔥🔥🔥 [新增] X光分數檢測器 (貼在規則展示卡片的最下方) 🔥🔥🔥
                 st.markdown("---")
