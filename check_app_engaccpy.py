@@ -1748,7 +1748,7 @@ if st.session_state.photo_gallery:
         except Exception as e:
             st.error(f"UI 顯示錯誤 (請確認 rules.xlsx 存在): {e}")
 
-                    st.divider()
+                st.divider()
                 
                 # 🔥🔥🔥 [新增] X光分數檢測器 (貼在規則展示卡片的最下方) 🔥🔥🔥
                 st.markdown("---")
