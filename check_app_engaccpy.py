@@ -762,12 +762,9 @@ def python_numerical_audit(dimension_data):
     
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官 (v31: 雙重稽核最終版)
-    功能確認：
-    1. [總表內戰] 申請數量 vs 實交數量 (不符即報警)。
-    2. [單項稽核] 標題括號數量 vs 實測行數。
-    3. [總表稽核] 實交數量 vs 明細加總 (含運費結算)。
-    4. [防呆機制] 重複編號、互斥鎖 (Top/Bottom, 軸頸/本體)。
+    Python 會計官 (v32: 紅色警示 & 詳細列表版)
+    1. [總表內戰] 申請 vs 實交 -> 觸發紅色警示 (🚨)。
+    2. [明細匯總] 實交 vs 明細加總 -> 觸發紅色警示 (🛑) 並列出詳細清單。
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -812,41 +809,39 @@ def python_accounting_audit(dimension_data, res_main):
     summary_rows = res_main.get("summary_rows", [])
     
     # =================================================
-    # 🕵️‍♂️ 第一關：總表內戰 (申請 vs 實交) & 初始化追蹤器
+    # 🕵️‍♂️ 第一關：總表內戰 (申請 vs 實交)
     # =================================================
     global_sum_tracker = {}
     
     for s in summary_rows:
         s_title = s.get('title', 'Unknown')
-        
-        # 取得數據
-        q_apply = safe_float(s.get('apply_qty', 0))      # 申請
-        q_deliver = safe_float(s.get('delivery_qty', 0)) # 實交
-        # 防呆：如果舊 cache 只有 target，就當作實交
-        if q_deliver == 0 and 'target' in s:
-            q_deliver = safe_float(s.get('target', 0))
+        q_apply = safe_float(s.get('apply_qty', 0))      
+        q_deliver = safe_float(s.get('delivery_qty', 0)) 
+        if q_deliver == 0 and 'target' in s: q_deliver = safe_float(s.get('target', 0))
 
-        # 1.1 執行內戰檢查
+        # 🚨 紅色警示：總表內戰
         if abs(q_apply - q_deliver) > 0.01:
              accounting_issues.append({
                 "page": s.get('page', "總表"), 
                 "item": f"{s_title}", 
-                "issue_type": "⚠️ 總表數量異常", 
+                "issue_type": "🚨 總表數量異常", # 關鍵字改為紅色系
                 "common_reason": f"申請({q_apply}) != 實交({q_deliver})", 
-                "failures": [{"id": "📝 申請", "val": q_apply}, {"id": "🚛 實交", "val": q_deliver}], 
+                "failures": [
+                    {"頁碼": "總表", "項目名稱": "📝 申請數量", "數量": q_apply, "備註": "原始值"},
+                    {"頁碼": "總表", "項目名稱": "🚛 實交數量", "數量": q_deliver, "備註": "核對值"}
+                ], 
                 "source": "🐍 會計引擎"
             })
             
-        # 1.2 建立總帳追蹤器 (以「實交數量」為準，因為這是會計付款依據)
         global_sum_tracker[s_title] = {
             "target": q_deliver, 
             "actual": 0, 
-            "details": [], 
+            "details": [], # 這裡我們會存詳細資料
             "page": s.get('page', "總表")
         }
 
     # =================================================
-    # 🕵️‍♂️ 第二關：逐項掃描 (單項、重複、運費、歸戶)
+    # 🕵️‍♂️ 第二關：逐項掃描
     # =================================================
     for item in dimension_data:
         raw_title = item.get("item_title", "")
@@ -855,7 +850,7 @@ def python_accounting_audit(dimension_data, res_main):
         target_pc = safe_float(item.get("item_pc_target", 0)) 
         batch_qty = safe_float(item.get("batch_total_qty", 0))
         
-        # --- 2.1 規則匹配 (Regex/Fuzzy) ---
+        # ... (規則匹配邏輯省略，保持不變) ...
         rule_set = rules_map.get(title_clean)
         if not rule_set:
             t_no = re.sub(r"[\(（].*?[\)）]", "", title_clean)
@@ -877,19 +872,22 @@ def python_accounting_audit(dimension_data, res_main):
         raw_count = len(data_list) if data_list else 0
         id_counts = Counter([str(e[0]).strip() for e in data_list if len(e)>0])
 
-        # --- 2.2 單項數量檢查 (Local Check) ---
+        # A. 單項檢查
         is_local_exempt = "豁免" in str(u_local) or "SKIP" in str(u_local).upper() or "EXEMPT" in str(u_local).upper()
         actual_item_qty = raw_count if batch_qty > 0 else raw_count * parse_ratio(u_local)
 
         if not is_local_exempt and abs(actual_item_qty - target_pc) > 0.01 and target_pc > 0:
              accounting_issues.append({
-                 "page": page, "item": raw_title, "issue_type": "統計不符(單項)", 
+                 "page": page, "item": raw_title, "issue_type": "🛑 統計不符(單項)", 
                  "common_reason": f"標題 {target_pc} != 內文 {actual_item_qty}", 
-                 "failures": [{"id": "目標", "val": target_pc}, {"id": "實際", "val": actual_item_qty}], 
+                 "failures": [
+                     {"頁碼": page, "項目名稱": "目標 (括號)", "數量": target_pc, "備註": "標題"},
+                     {"頁碼": page, "項目名稱": "實際 (計數)", "數量": actual_item_qty, "備註": "內文"}
+                 ], 
                  "source": "🐍 會計引擎"
              })
 
-        # --- 2.3 編號重複檢查 (Duplicate Check) ---
+        # B. 重複檢查 (略，保持原狀)
         if "本體" in title_clean:
              for rid, count in id_counts.items():
                 if count > 1: accounting_issues.append({"page": page, "item": raw_title, "issue_type": "⚠️編號重複(本體)", "common_reason": f"{rid} 重複 {count}次", "failures": []})
@@ -897,18 +895,16 @@ def python_accounting_audit(dimension_data, res_main):
              for rid, count in id_counts.items():
                 if count > 2: accounting_issues.append({"page": page, "item": raw_title, "issue_type": "⚠️編號重複(軸頸)", "common_reason": f"{rid} 重複 {count}次", "failures": []})
 
-        # --- 2.4 運費計算 (Freight Calc) ---
-        is_fr_exempt = "豁免" in str(u_fr) or "SKIP" in str(u_fr).upper()
-        is_default_target = ("本體" in title_clean and "未再生" in title_clean) or ("新品組裝" in title_clean) or ("計入" in str(u_fr))
+        # C. 運費 & 總表歸戶
         fr_multiplier = parse_ratio(u_fr)
         freight_val = 0.0
         f_note = ""
-        
+        is_fr_exempt = "豁免" in str(u_fr) or "SKIP" in str(u_fr).upper()
+        is_default_target = ("本體" in title_clean and "未再生" in title_clean) or ("新品組裝" in title_clean) or ("計入" in str(u_fr))
         if not is_fr_exempt and (is_default_target or fr_multiplier != 1.0):
             freight_val = actual_item_qty * fr_multiplier
-            f_note = f"計入 (x{fr_multiplier})" if fr_multiplier != 1.0 else "計入"
+            f_note = f"x{fr_multiplier}" if fr_multiplier != 1.0 else ""
 
-        # --- 2.5 總表歸戶 (Summary Aggregation) ---
         agg_mode = "B" 
         if u_agg:
             p_clean = str(u_agg).upper().replace(" ", "")
@@ -924,19 +920,19 @@ def python_accounting_audit(dimension_data, res_main):
                 match = False
                 s_clean = clean_text(s_title)
                 
-                # A. 運費專屬通道
+                # 運費比對
                 is_freight = False
-                # 模糊指紋與關鍵字
                 if fuzz.partial_ratio("輥輪拆裝.車修或銲補運費", s_clean) > 70: is_freight = True
                 elif "運費" in s_clean or "FREIGHT" in s_clean: is_freight = True
                 
                 if is_freight:
                     if freight_val > 0:
                         data["actual"] += freight_val
-                        data["details"].append({"id": raw_title, "val": freight_val, "calc": f_note})
-                    continue # 運費歸戶完就換下一行總表
+                        # 📝 [紀錄明細]
+                        data["details"].append({"page": page, "title": raw_title, "val": freight_val, "note": f"運費 {f_note}"})
+                    continue
 
-                # B. 一般項目比對通道
+                # 一般項目比對
                 match_A = (fuzz.partial_ratio(s_clean, title_clean) > 90)
                 if batch_qty > 0 and match_A: match = True
                 else:
@@ -948,7 +944,6 @@ def python_accounting_audit(dimension_data, res_main):
                     has_act_mac = any(k in title_clean for k in ["再生", "精車", "未再生", "粗車"])
                     has_act_weld = ("銲補" in title_clean or "焊" in title_clean)
                     is_assy = ("組裝" in title_clean or "拆裝" in title_clean)
-                    
                     if is_dis and is_assy: match_B = True
                     elif is_mac and has_part and has_act_mac: match_B = True
                     elif is_weld and has_part and has_act_weld: match_B = True
@@ -957,7 +952,7 @@ def python_accounting_audit(dimension_data, res_main):
                     elif agg_mode == "AB": match = match_A or match_B
                     else: match = match_B if match_B else match_A
 
-                # C. 互斥鎖 (Mutex Locks)
+                # 互斥鎖
                 if match:
                     sum_unregen = "未再生" in s_clean or "粗車" in s_clean
                     item_regen = ("再生" in title_clean or "精車" in title_clean) and "未再生" not in title_clean
@@ -974,20 +969,49 @@ def python_accounting_audit(dimension_data, res_main):
 
                 if match:
                     data["actual"] += qty_agg
-                    c_msg = "計入" if agg_multiplier == 1.0 else f"計入 (x{agg_multiplier})"
-                    data["details"].append({"id": f"{raw_title} (P.{page})", "val": qty_agg, "calc": c_msg})
+                    c_msg = f"x{agg_multiplier}" if agg_multiplier != 1.0 else ""
+                    # 📝 [紀錄明細]
+                    data["details"].append({"page": page, "title": raw_title, "val": qty_agg, "note": c_msg})
 
     # =================================================
-    # 🕵️‍♂️ 第三關：明細總結算 (含運費)
+    # 🕵️‍♂️ 第三關：明細總結算 (產生詳細表格)
     # =================================================
     for s_title, data in global_sum_tracker.items():
-        # 這裡會結算到：1.一般項目 2.運費項目
         if abs(data["actual"] - data["target"]) > 0.01: 
+            
+            # 1. 建構詳細表格內容
+            fail_table = []
+            
+            # (A) 基準列
+            fail_table.append({
+                "頁碼": "總表", 
+                "項目名稱": f"🎯 目標 (實交)", 
+                "數量": data["target"], 
+                "備註": "基準"
+            })
+            
+            # (B) 明細列 (逐一列出)
+            for d in data["details"]:
+                fail_table.append({
+                    "頁碼": f"P.{d['page']}",
+                    "項目名稱": d['title'],
+                    "數量": d['val'],
+                    "備註": d['note']
+                })
+            
+            # (C) 總計列
+            fail_table.append({
+                "頁碼": "∑", 
+                "項目名稱": "加總結果", 
+                "數量": data["actual"], 
+                "備註": "總計"
+            })
+
             accounting_issues.append({
                 "page": data["page"], "item": s_title, 
-                "issue_type": "⚠️ 明細匯總不符", 
+                "issue_type": "🛑 明細匯總不符", # 紅色警示
                 "common_reason": f"實交({data['target']}) != 明細加總({data['actual']})", 
-                "failures": [{"id": "🚛 實交", "val": data["target"]}, {"id": "∑ 明細", "val": data["actual"]}], 
+                "failures": fail_table,  # 這裡放入我們做好的完整表格
                 "source": "🐍 會計引擎"
             })
             
@@ -1582,25 +1606,21 @@ if st.session_state.photo_gallery:
 
                 c1.markdown(f"**{page_display} | {item.get('item')}** `{source_label}`")
                 
-                if any(kw in issue_type for kw in ["統計", "數量", "流程", "溯源"]):
-                    c2.error(f"🛑 {issue_type}")
+                # 🛑 針對紅色警示顯示 Error (紅框)
+                # 只要 issue_type 裡有這些關鍵字，或者有 🚨🛑 符號
+                if any(kw in issue_type for kw in ["統計", "數量", "流程", "溯源", "總表", "匯總", "🚨", "🛑"]):
+                    c2.error(f"{issue_type}")
                 else:
-                    c2.warning(f"⚠️ {issue_type}")
+                    c2.warning(f"{issue_type}")
                 
                 st.caption(f"原因: {item.get('common_reason', '')}")
                 
                 failures = item.get('failures', [])
                 if failures:
-                    table_data = []
-                    for f in failures:
-                        if isinstance(f, dict):
-                            table_data.append({
-                                "項目/編號": f.get('id', '未知'), 
-                                "實測/計數": f.get('val', 'N/A'),
-                                "標準/備註": f.get('target', ''),
-                                "狀態": f.get('calc', '')
-                            })
-                    st.dataframe(table_data, use_container_width=True, hide_index=True)
+                    # ✅ [修改] 直接顯示我們在 Python 引擎裡整理好的表格
+                    # 因為我們已經把 Key 設為中文 ("頁碼", "項目名稱"... )
+                    # 所以直接丟給 st.dataframe 即可，不用再轉換了！
+                    st.dataframe(failures, use_container_width=True, hide_index=True)
         
         st.divider()
         
