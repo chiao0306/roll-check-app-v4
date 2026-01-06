@@ -1387,7 +1387,7 @@ if st.session_state.photo_gallery:
 
     trigger_analysis = start_btn or is_auto_start
 
-        if trigger_analysis:
+    if trigger_analysis:
         # 強制清除上一筆
         st.session_state.analysis_result_cache = None 
         st.session_state.auto_start_analysis = False
