@@ -1472,11 +1472,9 @@ if st.session_state.photo_gallery:
        # --- 💡 顯示結果區塊 ---
     if st.session_state.analysis_result_cache:
         cache = st.session_state.analysis_result_cache
-        
-        # ✅ 1. [關鍵修正] 從 cache 中取出 all_issues (之前報錯就是因為少了這行！)
         all_issues = cache.get('all_issues', [])
 
-        # ✅ 2. [UI 修改] 表頭資訊卡片 (小字版)
+        # --- 📋 表頭資訊偵測 (手機版強製橫排優化) ---
         st.divider()
         st.subheader("📋 表頭資訊偵測")
         
@@ -1484,27 +1482,32 @@ if st.session_state.photo_gallery:
         current_job = h_info.get("job_no", "未偵測")
         sch_date = h_info.get("scheduled_date", "未偵測")
         act_date = h_info.get("actual_date", "未偵測")
-        
-        col_h1, col_h2, col_h3 = st.columns(3)
-        
-        with col_h1:
-            st.caption("工令單號")
-            st.markdown(f"**{current_job}**")
-            
-        with col_h2:
-            st.caption("預定交貨日")
-            st.markdown(f"**{sch_date}**")
-            
-        with col_h3:
-            st.caption("實際交貨日")
-            # 簡單變色邏輯
-            try:
-                if act_date != "未偵測" and sch_date != "未偵測" and act_date > sch_date:
-                    st.markdown(f":red[**{act_date}**] (逾期)")
-                else:
-                    st.markdown(f"**{act_date}**")
-            except:
-                st.markdown(f"**{act_date}**")
+
+        # 1. 先處理紅色警示的 HTML 樣式字串
+        act_date_html = f"<b>{act_date}</b>"
+        try:
+            if act_date != "未偵測" and sch_date != "未偵測" and act_date > sch_date:
+                # 如果逾期，變紅色 (#ff4b4b 是 Streamlit 的標準紅)
+                act_date_html = f"<b style='color: #ff4b4b;'>{act_date} (逾期)</b>"
+        except: pass
+
+        # 2. 使用 HTML Flexbox 強制橫向排列
+        st.markdown(f"""
+        <div style="display: flex; flex-direction: row; justify-content: space-between; width: 100%;">
+            <div style="flex: 1; padding-right: 5px;">
+                <div style="font-size: 12px; color: gray; margin-bottom: 2px;">工令單號</div>
+                <div style="font-size: 16px; font-weight: bold;">{current_job}</div>
+            </div>
+            <div style="flex: 1; padding-right: 5px;">
+                <div style="font-size: 12px; color: gray; margin-bottom: 2px;">預定交貨日</div>
+                <div style="font-size: 16px; font-weight: bold;">{sch_date}</div>
+            </div>
+            <div style="flex: 1;">
+                <div style="font-size: 12px; color: gray; margin-bottom: 2px;">實際交貨日</div>
+                <div style="font-size: 16px;">{act_date_html}</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
         
         st.divider()
 
