@@ -778,7 +778,7 @@ def python_accounting_audit(dimension_data, res_main):
     import pandas as pd 
 
     # --- 0. 設定 ---
-    FUZZ_THRESHOLD = 95 # 🔥 特規配對門檻
+    FUZZ_THRESHOLD = 90 # 🔥 特規配對門檻
 
     def clean_text(text):
         return str(text).replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
