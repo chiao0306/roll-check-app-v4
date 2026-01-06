@@ -765,14 +765,15 @@ def python_numerical_audit(dimension_data):
     
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官 (v52: 規則數據後台版)
-    功能：
-    1. [特規命中紀錄]: 執行高門檻(95分)比對，記錄所有命中特規的項目。
-    2. [資料打包]: 將命中紀錄 (rule_hits_log) 打包在 "HIDDEN_DATA" 物件中回傳。
-    3. [核心設定]: 
-       - FUZZ_THRESHOLD = 95 (防止規則劫持)
-       - 車修白名單 = 嚴格模式 (僅再生/未再生)
-       - 籃子識別 = 模糊抗噪
+    Python 會計官 (v53: 全域特規模糊比對版)
+    修改重點：
+    1. [全域連動]: 不再使用寫死的 FUZZ_THRESHOLD。
+       - 改為讀取 globals().get('GLOBAL_FUZZ_THRESHOLD', 90)。
+       - 讓會計、工程、流程能統一使用外部設定的門檻。
+    2. [功能保留]: 
+       - 執行高門檻比對 (預設使用全域設定)。
+       - 將命中紀錄打包回傳 (HIDDEN_DATA)。
+       - 核心籃子邏輯維持不變。
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -780,8 +781,9 @@ def python_accounting_audit(dimension_data, res_main):
     import re
     import pandas as pd 
 
-    # --- 0. 設定 ---
-    FUZZ_THRESHOLD = 90 # 🔥 特規配對門檻
+    # --- 0. 設定 (改為讀取全域變數) ---
+    # 嘗試讀取全域設定，如果沒設定則預設為 90 (依您提供的代碼預設值)
+    CURRENT_THRESHOLD = globals().get('GLOBAL_FUZZ_THRESHOLD', 90)
 
     def clean_text(text):
         return str(text).replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
@@ -879,13 +881,14 @@ def python_accounting_audit(dimension_data, res_main):
                 match_type = "去括號匹配"
                 match_score = 100
 
-        # C. 模糊匹配 (Fuzzy Ratio > 95)
+        # C. 模糊匹配 (使用全域變數 CURRENT_THRESHOLD)
         if not rule_set and rules_map:
             best_score = 0
             best_rule = None
             for k, v in rules_map.items():
                 sc = fuzz.ratio(k, title_clean) 
-                if sc > FUZZ_THRESHOLD and sc > best_score:
+                # 🔥 改用 CURRENT_THRESHOLD
+                if sc > CURRENT_THRESHOLD and sc > best_score:
                     best_score = sc
                     rule_set = v
                     best_rule = k
@@ -1053,7 +1056,7 @@ def python_accounting_audit(dimension_data, res_main):
         accounting_issues.append({
             "issue_type": "HIDDEN_DATA",
             "rule_hits": rule_hits_log,
-            "fuzz_threshold": FUZZ_THRESHOLD
+            "fuzz_threshold": CURRENT_THRESHOLD # 🔥 顯示目前實際使用的門檻
         })
             
     return accounting_issues
