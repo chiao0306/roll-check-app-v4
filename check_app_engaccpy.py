@@ -762,13 +762,14 @@ def python_numerical_audit(dimension_data):
     
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官 (v34: 完全互斥防禦版)
-    更新重點：
-    1. [再生互斥]: 嚴格區分「再生」與「未再生」。
-    2. [部位互斥]: 嚴格區分「本體」與「軸頸家族(軸頸/軸頭/軸位)」。
-       - 總表若為本體，絕對拒絕軸頸/軸頭/軸位。
-       - 總表若為軸頸，絕對拒絕本體。
-    3. [顯示優化]: 維持紅色警示與詳細表格。
+    Python 會計官 (v36: 中性車修修正版)
+    修復重點：
+    1. [關鍵修正] 將「車修」從「再生定義」中移除。
+       - 修正前: "ROLL車修" 被視為 "再生"，導致 "未再生" 被誤擋。
+       - 修正後: "ROLL車修" 為中性詞，不啟動互斥鎖，全收錄。
+    2. [保留強互斥]: 
+       - 若總表寫 "再生"，依然絕對攔截 "未再生"。
+       - 若總表寫 "本體"，依然絕對攔截 "軸頸"。
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -887,9 +888,8 @@ def python_accounting_audit(dimension_data, res_main):
                  "source": "🐍 會計引擎"
              })
 
-        # B. 重複檢查 (包含軸頸家族)
+        # B. 重複檢查
         journal_family = ["軸頸", "軸頭", "軸位", "內孔", "JOURNAL"]
-        
         if "本體" in title_clean:
              for rid, count in id_counts.items():
                 if count > 1: accounting_issues.append({"page": page, "item": raw_title, "issue_type": "⚠️編號重複(本體)", "common_reason": f"{rid} 重複 {count}次", "failures": []})
@@ -933,18 +933,20 @@ def python_accounting_audit(dimension_data, res_main):
                         data["details"].append({"page": page, "title": raw_title, "val": freight_val, "note": f"運費 {f_note}"})
                     continue
 
-                # 一般通道
+                # =========================================================
+                # 🧺 步驟 1: 籃子撈人 (Broad Matching)
+                # =========================================================
                 match_A = (fuzz.partial_ratio(s_clean, title_clean) > 90)
-                if batch_qty > 0 and match_A: match = True
+                match_B = False
+
+                if batch_qty > 0 and match_A: match_B = True
                 else:
-                    match_B = False
                     is_dis = "ROLL拆裝" in s_clean
                     is_mac = "ROLL車修" in s_clean
                     is_weld = "ROLL銲補" in s_clean or "焊" in s_clean
                     
-                    # 判斷部位
                     has_part_body = "本體" in title_clean
-                    has_part_journal = any(k in title_clean for k in journal_family) # 軸頸家族
+                    has_part_journal = any(k in title_clean for k in journal_family)
                     
                     has_act_mac = any(k in title_clean for k in ["再生", "精車", "未再生", "粗車"])
                     has_act_weld = ("銲補" in title_clean or "焊" in title_clean)
@@ -953,14 +955,14 @@ def python_accounting_audit(dimension_data, res_main):
                     if is_dis and is_assy: match_B = True
                     elif is_mac and (has_part_body or has_part_journal) and has_act_mac: match_B = True
                     elif is_weld and (has_part_body or has_part_journal) and has_act_weld: match_B = True
-                    
-                    if agg_mode == "A": match = match_A
-                    elif agg_mode == "AB": match = match_A or match_B
-                    else: match = match_B if match_B else match_A
+                
+                if agg_mode == "A": match = match_A
+                elif agg_mode == "AB": match = match_A or match_B
+                else: match = match_B if match_B else match_A
 
-                # =========================================
-                # 🔥 [關鍵修正] 嚴格互斥鎖 v34 (含軸頸家族)
-                # =========================================
+                # =========================================================
+                # 🛑 步驟 2: 攔截者 (The Interceptor) - 絕對防禦 v36
+                # =========================================================
                 if match:
                     s_upper = s_clean.upper()
                     t_upper = title_clean.upper()
@@ -969,32 +971,29 @@ def python_accounting_audit(dimension_data, res_main):
                     s_is_unregen = "未再生" in s_clean or "粗車" in s_clean
                     t_is_unregen = "未再生" in title_clean or "粗車" in title_clean
                     
-                    # 再生 = (有再生) 且 (非未再生)
-                    s_is_regen = ("再生" in s_clean or "精車" in s_clean or "車修" in s_clean) and not s_is_unregen
+                    # 🔥 [關鍵修正]: 移除 "車修"！讓 ROLL車修 變中性。
+                    # 只有明確寫 "再生" 或 "精車" 才算是再生專用
+                    s_is_regen = ("再生" in s_clean or "精車" in s_clean) and not s_is_unregen
                     t_is_regen = ("再生" in title_clean or "精車" in title_clean or "車修" in title_clean) and not t_is_unregen
                     
-                    # 本體
                     s_is_body = "本體" in s_clean
                     t_is_body = "本體" in title_clean
-                    
-                    # 軸頸家族 (包含 軸頸、軸頭、軸位、內孔)
                     s_is_journal = any(k in s_clean for k in journal_family)
                     t_is_journal = any(k in title_clean for k in journal_family)
 
                     # 2. 執行攔截
                     
-                    # [鎖A] 再生 vs 未再生 (防止混淆)
+                    # [攔截 A] 再生 vs 未再生
+                    # 因為 "ROLL車修" 現在 s_is_regen = False, s_is_unregen = False
+                    # 所以它不會觸發這裡的任何一條攔截，再生/未再生通通放行！
                     if s_is_regen and t_is_unregen: match = False
                     if s_is_unregen and t_is_regen: match = False
                     
-                    # [鎖B] 本體 vs 軸頸家族 (防止混淆)
-                    # 如果總表是「純本體」(沒提到軸頸)，但明細是「軸頸/軸頭/軸位」 -> 擋！
+                    # [攔截 B] 本體 vs 軸頸
                     if s_is_body and not s_is_journal and t_is_journal: match = False
-                    
-                    # 如果總表是「純軸頸」(沒提到本體)，但明細是「本體」 -> 擋！
                     if s_is_journal and not s_is_body and t_is_body: match = False
                     
-                    # [鎖C] TOP vs BOTTOM
+                    # [攔截 C] 方向
                     if "TOP" in s_upper and "BOTTOM" in t_upper: match = False
                     if "BOTTOM" in s_upper and "TOP" in t_upper: match = False
 
