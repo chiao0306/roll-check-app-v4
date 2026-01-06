@@ -1670,16 +1670,19 @@ if st.session_state.photo_gallery:
         
         st.info(f"💰 本次成本: NT$ {cache['cost_twd']:.2f} (In: {cache['total_in']:,} / Out: {cache['total_out']:,})")
         
-                # 3. 規則展示 (v52: 整合特規命中顯示 + 數據分析)
+        # 4. 規則展示 (v53: 全域變數連動 + 特規顯影)
         with st.expander("🏗️ 檢視 Excel 邏輯與規則參數", expanded=False):
-            # 1. 嘗試從 issue_list 中撈取隱藏的命中資料
+            
+            # 1. 嘗試從 issue_list 中撈取隱藏的命中資料 (HIDDEN_DATA)
             issues_list = st.session_state.get('accounting_results', [])
             hidden_payload = next((item for item in issues_list if item.get('issue_type') == 'HIDDEN_DATA'), {})
             rule_hits = hidden_payload.get('rule_hits', {})
-            current_fuzz = hidden_payload.get('fuzz_threshold', 95) 
-
-            st.caption(f"ℹ️ 當前特規配對門檻 (Fuzz Threshold): **{current_fuzz} 分** (>=95分防止規則劫持)")
             
+            # 🔥 關鍵修改：讀取最上方定義的全域變數，若沒讀到則預設 90
+            current_fuzz = globals().get('GLOBAL_FUZZ_THRESHOLD', 90) 
+
+            st.caption(f"ℹ️ 全域統一特規門檻: **{current_fuzz} 分** (所有引擎同步適用)")
+
             try:
                 df_rules = pd.read_excel("rules.xlsx")
                 df_rules.columns = [c.strip() for c in df_rules.columns]
