@@ -1469,12 +1469,14 @@ if st.session_state.photo_gallery:
             status_box.update(label="✅ 分析完成！", state="complete", expanded=False)
             st.rerun()
 
-    # --- 💡 顯示結果區塊 ---
-        # --- 💡 顯示結果區塊 ---
+       # --- 💡 顯示結果區塊 ---
     if st.session_state.analysis_result_cache:
         cache = st.session_state.analysis_result_cache
         
-        # ✅ [UI 修改] 改用 Caption + Markdown (字體較小)
+        # ✅ 1. [關鍵修正] 從 cache 中取出 all_issues (之前報錯就是因為少了這行！)
+        all_issues = cache.get('all_issues', [])
+
+        # ✅ 2. [UI 修改] 表頭資訊卡片 (小字版)
         st.divider()
         st.subheader("📋 表頭資訊偵測")
         
@@ -1487,7 +1489,7 @@ if st.session_state.photo_gallery:
         
         with col_h1:
             st.caption("工令單號")
-            st.markdown(f"**{current_job}**") # 使用粗體小字
+            st.markdown(f"**{current_job}**")
             
         with col_h2:
             st.caption("預定交貨日")
@@ -1495,24 +1497,27 @@ if st.session_state.photo_gallery:
             
         with col_h3:
             st.caption("實際交貨日")
-            # 如果有日期，根據邏輯變色 (選用)
-            if act_date != "未偵測" and sch_date != "未偵測" and act_date > sch_date:
-                st.markdown(f":red[**{act_date}**] (逾期)")
-            else:
+            # 簡單變色邏輯
+            try:
+                if act_date != "未偵測" and sch_date != "未偵測" and act_date > sch_date:
+                    st.markdown(f":red[**{act_date}**] (逾期)")
+                else:
+                    st.markdown(f"**{act_date}**")
+            except:
                 st.markdown(f"**{act_date}**")
         
         st.divider()
 
-        # 1. 頂部狀態條
+        # 3. 頂部狀態條
         st.success(f"工令: {cache['job_no']} | ⏱️ {cache['total_duration']:.1f}s")
         st.info(f"💰 本次成本: NT$ {cache['cost_twd']:.2f} (In: {cache['total_in']:,} / Out: {cache['total_out']:,})")
         
-        # 2. 規則檢視
+        # 4. 規則檢視
         with st.expander("🔍 檢視 Excel 規則與邏輯參數", expanded=False):
             rules_text = get_dynamic_rules(cache.get('full_text_for_search',''), debug_mode=True)
             st.markdown(rules_text)
                 
-        # 3. 原始數據檢視
+        # 5. 原始數據檢視
         with st.expander("📊 檢視 AI 抄錄原始數據", expanded=False):
             st.markdown("**1. 核心指標摘要**")
             sum_rows_len = len(cache.get("summary_rows", []))
@@ -1540,35 +1545,31 @@ if st.session_state.photo_gallery:
             st.json(cache.get("ai_extracted_data", []), expanded=True)
 
         # ========================================================
-        # ⚡️ [修正重點]：先進行合併，再根據合併後的清單來計算數量
+        # ⚡️ [修正重點]：現在 all_issues 已經定義了，這裡就不會報錯了
         # ========================================================
         
-        # 1. 執行合併 (把 51 個異常壓縮成 N 類)
+        # 1. 執行合併
         consolidated_list = consolidate_issues(all_issues)
 
-        # 2. 過濾出「真正的錯誤」 (排除僅是未匹配規則的警告)
-        # 注意：我們是在 consolidated_list 上做篩選，這樣數量才會對
+        # 2. 過濾出「真正的錯誤」
         real_errors_consolidated = [i for i in consolidated_list if "未匹配" not in i.get('issue_type', '')]
 
-        # 3. 顯示結論 (使用合併後的數量)
+        # 3. 顯示結論
         if not all_issues:
             st.balloons()
             st.success("✅ 全數合格！")
         elif not real_errors_consolidated:
-            # 這裡用 len(consolidated_list) 代表還有幾個黃色警告
             st.success(f"✅ 數值合格！ (但有 {len(consolidated_list)} 類項目未匹配規則)")
         else:
-            # 這裡顯示紅色的異常「類別」數量
             st.error(f"發現 {len(real_errors_consolidated)} 類異常")
 
-        # 4. 卡片循環顯示 (使用合併後的清單)
+        # 4. 卡片循環顯示
         for item in consolidated_list:
             with st.container(border=True):
                 c1, c2 = st.columns([3, 1])
                 source_label = item.get('source', '')
                 issue_type = item.get('issue_type', '異常')
                 
-                # 頁碼顯示優化
                 page_str = item.get('page', '?')
                 if "," in str(page_str):
                     page_display = f"Pages: {page_str}"
@@ -1599,9 +1600,9 @@ if st.session_state.photo_gallery:
         
         st.divider()
         
-        # ... (這裡接你原本剩下的代碼即可，也要記得縮排往左移)
+        # 下載按鈕邏輯
         current_job_no = cache.get('job_no', 'Unknown')
-        safe_job_no = current_job_no.replace("/", "_").replace("\\", "_").strip()
+        safe_job_no = str(current_job_no).replace("/", "_").replace("\\", "_").strip()
         file_name_str = f"{safe_job_no}_cleaned.json"
 
         # 準備匯出資料
@@ -1626,7 +1627,6 @@ if st.session_state.photo_gallery:
             type="primary"
         )
 
-        # 💡 使用 .get() 可以防止因為找不到標籤而直接報錯當機
         with st.expander("👀 查看傳給 AI 的最終文字 (Prompt Input)"):
             st.caption("這才是 AI 真正讀到的內容 (已過濾雜訊)：")
             st.code(cache.get('combined_input', '無資料'), language='markdown')
