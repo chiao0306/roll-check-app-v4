@@ -1532,7 +1532,7 @@ if st.session_state.photo_gallery:
         py_t = cache.get('py_duration', 0)
         
         st.success(
-            f"⏱️ 總耗時: {total_t:.1f}s  "
+            f"總耗時: {total_t:.1f}s  "
             f"( OCR: {ocr_t:.1f}s | AI: {ai_t:.1f}s | Py: {py_t:.2f}s )"
         )
         
