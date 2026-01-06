@@ -1625,7 +1625,7 @@ if st.session_state.photo_gallery:
         else:
             st.error(f"發現 {len(real_errors_consolidated)} 類異常")
 
-        # 4. 卡片循環顯示 (v38: 欄位中文化 + 樣式置中優化)
+        # 4. 卡片循環顯示 (v39: 數值精修版)
         for item in consolidated_list:
             with st.container(border=True):
                 c1, c2 = st.columns([3, 1])
@@ -1654,9 +1654,7 @@ if st.session_state.photo_gallery:
                     # 1. 轉成 DataFrame
                     df = pd.DataFrame(failures)
                     
-                    # 2. 欄位中文化 (Mapping)
-                    # 針對工程引擎產生的 id/val/target 進行改名
-                    # 針對會計引擎已經是中文的，則保持原樣
+                    # 2. 欄位中文化
                     rename_map = {
                         "id": "編號",
                         "val": "實測",
@@ -1667,24 +1665,38 @@ if st.session_state.photo_gallery:
                     df.rename(columns=rename_map, inplace=True)
                     
                     # 3. 樣式調整 (置中與靠左)
-                    # 先把所有欄位預設為「置中」
                     styler = df.style.set_properties(**{
                         'text-align': 'center', 
-                        'white-space': 'nowrap' # 避免內容太多自動換行變很醜
+                        'white-space': 'nowrap'
                     })
                     
-                    # 標題列也要置中
                     styler.set_table_styles([
                         dict(selector='th', props=[('text-align', 'center')])
                     ])
 
-                    # 4. 特殊欄位強制「靠左」
-                    # 如果表格裡有 "項目名稱" (會計表) 或 "編號" (工程表)，通常靠左比較好看
+                    # 針對文字較長的欄位靠左
                     left_align_cols = [c for c in ["項目名稱", "編號", "Item"] if c in df.columns]
                     if left_align_cols:
                         styler.set_properties(subset=left_align_cols, **{'text-align': 'left'})
 
-                    # 5. 顯示表格 (use_container_width=True 會自動撐開寬度)
+                    # 🔥 [新增] 4. 智能數值格式化 (Smart Formatting)
+                    # 邏輯：整數顯示整數 (10)，小數顯示兩位 (10.53)
+                    def smart_fmt(x):
+                        try:
+                            f = float(x)
+                            # 如果跟四捨五入後的自己差很小，就當作整數
+                            if abs(f - round(f)) < 0.000001: 
+                                return f"{int(f)}"
+                            return f"{f:.2f}"
+                        except:
+                            return str(x)
+
+                    # 鎖定可能出現數字的欄位
+                    target_cols = [c for c in ["實測", "目標", "數量"] if c in df.columns]
+                    if target_cols:
+                        styler.format(smart_fmt, subset=target_cols)
+
+                    # 5. 顯示表格
                     st.dataframe(styler, use_container_width=True, hide_index=True)
 
         st.divider()
