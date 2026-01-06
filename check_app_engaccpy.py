@@ -1271,100 +1271,74 @@ def python_process_audit(dimension_data):
 
     return process_issues
     
-def python_header_audit(all_pages_results):
+def python_header_audit_batch(photo_gallery, ai_res_json):
     """
-    Python 表頭稽核官 (v1: 工令與日期專用)
-    1. 工令一致性 & 格式檢查 (10碼: W/R/O/Y + 9英數)
-    2. 日期一致性 (預定日期 / 實際日期)
-    3. 日期時效 (實際 <= 預定)
+    Python 表頭稽核官 (Batch 架構適配版 v30)
+    1. [Raw Text] 掃描每一頁 OCR 文字，檢查工令是否混單 (Regex)。
+    2. [AI JSON] 檢查 AI 讀出的工令格式 (10碼)。
+    3. [AI JSON] 檢查日期邏輯 (實際 <= 預定)。
     """
     header_issues = []
     import re
     from datetime import datetime
-    
-    # 收集資料
-    job_nos = []
-    dates_scheduled = []
-    dates_actual = []
-    
-    for idx, page_data in enumerate(all_pages_results):
-        h_info = page_data.get("header_info", {})
-        
-        # A. 工令 (去空格，保留英數)
-        j = h_info.get("job_no", "Unknown")
-        if j and j != "Unknown":
-            j_clean = j.upper().replace(" ", "").replace("-", "") 
-            job_nos.append((idx + 1, j_clean))
-            
-        # B. 日期
-        d_sch = h_info.get("scheduled_date", "Unknown")
-        d_act = h_info.get("actual_date", "Unknown")
-        
-        if d_sch and d_sch != "Unknown": dates_scheduled.append((idx + 1, d_sch))
-        if d_act and d_act != "Unknown": dates_actual.append((idx + 1, d_act))
 
-    # --- 1. 工令檢查 ---
-    if job_nos:
-        # Regex: W/R/O/Y 開頭 + 9個英數 (共10碼)
-        valid_jobs = []
-        pattern = r"^[WROY][A-Z0-9]{9}$"
-        
-        for p, j in job_nos:
-            if not re.match(pattern, j):
-                header_issues.append({
-                    "page": f"P.{p}", "item": "工令格式", "issue_type": "⚠️ 格式錯誤",
-                    "common_reason": f"工令 {j} 格式不符 (需10碼，W/R/O/Y開頭)",
-                    "failures": [{"id": "讀取值", "val": j}], "source": "🐍 表頭稽核"
-                })
-            else:
-                valid_jobs.append(j)
-        
-        # 混單檢查 (只看合規的工令，必須唯一)
-        distinct_valid_jobs = list(set(valid_jobs))
-        if len(distinct_valid_jobs) > 1:
+    # --- 1. 混單檢查 (利用 OCR 原始文字) ---
+    # 策略：直接用 Regex 在每一頁的文字裡撈 W/R/O/Y 開頭的字串
+    job_pattern = r"([WROY][A-Z0-9]{9})" # 抓 10 碼
+    found_jobs_map = {} # { "工令號": [頁碼list] }
+
+    for idx, item in enumerate(photo_gallery):
+        txt = item.get('full_text', '').upper().replace(" ", "").replace("-", "")
+        # 尋找所有疑似工令的字串
+        matches = re.findall(job_pattern, txt)
+        for job in matches:
+            if job not in found_jobs_map: found_jobs_map[job] = []
+            found_jobs_map[job].append(idx + 1)
+
+    # 如果找到多種不同的工令 -> 報警
+    if len(found_jobs_map) > 1:
+        details = [f"{k} (P.{v})" for k, v in found_jobs_map.items()]
+        header_issues.append({
+            "page": "多頁", "item": "工令單號", "issue_type": "🚨 嚴重混單",
+            "common_reason": f"偵測到多種工令：{', '.join(details)}",
+            "failures": [{"id": "內容", "val": str(found_jobs_map)}],
+            "source": "🐍 表頭稽核(OCR)"
+        })
+
+    # --- 2. 格式與日期檢查 (利用 AI JSON) ---
+    h_info = ai_res_json.get("header_info", {})
+    
+    # 工令格式 (針對 AI 最終認定的那一組)
+    ai_job = h_info.get("job_no", "Unknown")
+    if ai_job and ai_job != "Unknown":
+        clean_job = ai_job.upper().replace(" ", "").replace("-", "")
+        if not re.match(r"^[WROY][A-Z0-9]{9}$", clean_job):
             header_issues.append({
-                "page": "多頁", "item": "工令單號", "issue_type": "🚨 嚴重混單",
-                "common_reason": f"偵測到多種工令：{distinct_valid_jobs}，請確認文件是否混雜。",
-                "failures": [{"id": f"P.{p}", "val": j} for p, j in job_nos if j in distinct_valid_jobs],
-                "source": "🐍 表頭稽核"
+                "page": "表頭", "item": "工令格式", "issue_type": "⚠️ 格式錯誤",
+                "common_reason": f"AI 識別工令 {ai_job} 格式不符 (需10碼，W/R/O/Y開頭)",
+                "failures": [{"id": "識別值", "val": ai_job}],
+                "source": "🐍 表頭稽核(AI)"
             })
 
-    # --- 2. 日期檢查 ---
-    # 預定日期一致性
-    distinct_sch = list(set([d[1] for d in dates_scheduled]))
-    if len(distinct_sch) > 1:
-        header_issues.append({
-            "page": "多頁", "item": "預定交貨日", "issue_type": "📅 日期不一",
-            "common_reason": f"預定日期不一致：{distinct_sch}",
-            "failures": [{"id": f"P.{p}", "val": d} for p, d in dates_scheduled], "source": "🐍 表頭稽核"
-        })
-        
-    # 實際日期一致性
-    distinct_act = list(set([d[1] for d in dates_actual]))
-    if len(distinct_act) > 1:
-        header_issues.append({
-            "page": "多頁", "item": "實際交貨日", "issue_type": "📅 日期不一",
-            "common_reason": f"實際日期不一致：{distinct_act}",
-            "failures": [{"id": f"P.{p}", "val": d} for p, d in dates_actual], "source": "🐍 表頭稽核"
-        })
-
-    # 時效檢查 (實際 <= 預定)
-    target_sch_str = distinct_sch[0] if len(distinct_sch) == 1 else None
-    target_act_str = distinct_act[0] if len(distinct_act) == 1 else None
+    # 日期邏輯 (實際 <= 預定)
+    d_sch = h_info.get("scheduled_date", "Unknown")
+    d_act = h_info.get("actual_date", "Unknown")
     
-    if target_sch_str and target_act_str:
+    if d_sch != "Unknown" and d_act != "Unknown":
         try:
-            dt_sch = datetime.strptime(target_sch_str.replace("-", "/"), "%Y/%m/%d")
-            dt_act = datetime.strptime(target_act_str.replace("-", "/"), "%Y/%m/%d")
+            # 嘗試解析 YYYY/MM/DD
+            dt_sch = datetime.strptime(d_sch.replace("-", "/"), "%Y/%m/%d")
+            dt_act = datetime.strptime(d_act.replace("-", "/"), "%Y/%m/%d")
             
             if dt_act > dt_sch:
                  header_issues.append({
                     "page": "表頭", "item": "交貨時效", "issue_type": "⏰ 逾期交貨",
-                    "common_reason": f"實際 {target_act_str} 晚於 預定 {target_sch_str}",
+                    "common_reason": f"實際 {d_act} 晚於 預定 {d_sch}",
                     "failures": [{"id": "延遲天數", "val": f"{(dt_act - dt_sch).days} 天"}], 
-                    "source": "🐍 表頭稽核"
+                    "source": "🐍 表頭稽核(AI)"
                 })
-        except: pass
+        except:
+            pass # 日期格式讀不懂，跳過
 
     return header_issues
 
@@ -1575,7 +1549,7 @@ if st.session_state.photo_gallery:
             python_numeric_issues = python_numerical_audit(dim_data)
             python_accounting_issues = python_accounting_audit(dim_data, res_main)
             python_process_issues = python_process_audit(dim_data)
-            python_header_issues, python_debug_data = python_header_check(st.session_state.photo_gallery)
+            python_header_issues = python_header_audit_batch(st.session_state.photo_gallery, res_main)
 
             ai_filtered_issues = []
             ai_raw_issues = res_main.get("issues", [])
