@@ -477,14 +477,17 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
        - **範例**：若 ID 清楚但數值模糊 -> `"V100:[!]"`；若整個儲存格都看不清 -> `"[!] : [!]"`。
        - **跳過策略**：一旦標記為 `[!]`，請立即跳到下一格，不要浪費 Token 描述雜訊。
 
-    #### 💰 模組 B：會計指標提取 (AI 任務：抄錄)
+        #### 💰 模組 B：會計指標提取 (AI 任務：抄錄)
     ⚠️ **注意範圍**：你只能從標記為 `=== [SUMMARY_TABLE (總表)] ===` 的區域提取數據。
-    
-    1. **統計表**：請鎖定 `實交數量` 欄位。抄錄每一行的「名稱」與「實交數量」到 `summary_rows`。
+    1. **統計表**：請提取每一行的以下三個欄位：
+       - **項目名稱 (title)**
+       - **申請數量 (apply_qty)**：通常在左側。
+       - **實交數量 (delivery_qty)**：通常在右側 (這是會計核對的基準)。
+       
     2. **頁碼標註**：請務必在每個 `summary_rows` 物件中記錄該行所在的頁碼 (`page`)。
 
     #### 📋 模組 C：表頭資訊 (Header Info)
-    請在單據最上方尋找以下資訊：
+    ⚠️ **注意範圍**：你只能從標記為 `=== [SUMMARY_TABLE (總表)] ===` 的區域提取數據。
     1. **工令單號 (job_no)**：通常是 10 碼，由英文字母 (W, R, O, Y) 開頭。
     2. **預定交貨日 (scheduled_date)**：請將日期統一格式化為 "YYYY/MM/DD"。
     3. **實際交貨日 (actual_date)**：請將日期統一格式化為 "YYYY/MM/DD"。
@@ -499,7 +502,7 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
           "actual_date": "YYYY/MM/DD"
       }},
       "summary_rows": [ 
-          {{ "page": 頁碼, "title": "名", "target": 數字 }} 
+          {{ "page": 頁碼, "title": "名", "apply_qty": 數字, "delivery_qty": 數字 }} 
       ], 
       "issues": [], 
       "dimension_data": [
@@ -759,9 +762,12 @@ def python_numerical_audit(dimension_data):
     
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官 (v29: 軸位擴充版)
-    1. [關鍵字擴充]: 加入「軸位」= 軸頸 (限次檢查 + 互斥鎖)。
-    2. [保留核心]: Top/Bottom 互斥鎖、運費模糊比對、連鎖計算。
+    Python 會計官 (v31: 雙重稽核最終版)
+    功能確認：
+    1. [總表內戰] 申請數量 vs 實交數量 (不符即報警)。
+    2. [單項稽核] 標題括號數量 vs 實測行數。
+    3. [總表稽核] 實交數量 vs 明細加總 (含運費結算)。
+    4. [防呆機制] 重複編號、互斥鎖 (Top/Bottom, 軸頸/本體)。
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -769,7 +775,7 @@ def python_accounting_audit(dimension_data, res_main):
     import re
     import pandas as pd 
 
-    # 0. 基礎工具
+    # --- 0. 基礎工具 ---
     def clean_text(text):
         return str(text).replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
 
@@ -784,12 +790,11 @@ def python_accounting_audit(dimension_data, res_main):
         if not rule_str: return 1.0
         match = re.search(r"(\d+)\s*/\s*(\d+)", str(rule_str))
         if match:
-            n = float(match.group(1))
-            d = float(match.group(2))
+            n, d = float(match.group(1)), float(match.group(2))
             if d != 0: return n / d
         return 1.0
 
-    # 1. 載入規則 & 總表基準
+    # --- 1. 載入規則 ---
     rules_map = {}
     try:
         df = pd.read_excel("rules.xlsx")
@@ -805,26 +810,52 @@ def python_accounting_audit(dimension_data, res_main):
     except: pass 
 
     summary_rows = res_main.get("summary_rows", [])
-    global_sum_tracker = {
-        s['title']: {
-            "target": safe_float(s['target']), 
+    
+    # =================================================
+    # 🕵️‍♂️ 第一關：總表內戰 (申請 vs 實交) & 初始化追蹤器
+    # =================================================
+    global_sum_tracker = {}
+    
+    for s in summary_rows:
+        s_title = s.get('title', 'Unknown')
+        
+        # 取得數據
+        q_apply = safe_float(s.get('apply_qty', 0))      # 申請
+        q_deliver = safe_float(s.get('delivery_qty', 0)) # 實交
+        # 防呆：如果舊 cache 只有 target，就當作實交
+        if q_deliver == 0 and 'target' in s:
+            q_deliver = safe_float(s.get('target', 0))
+
+        # 1.1 執行內戰檢查
+        if abs(q_apply - q_deliver) > 0.01:
+             accounting_issues.append({
+                "page": s.get('page', "總表"), 
+                "item": f"{s_title}", 
+                "issue_type": "⚠️ 總表數量異常", 
+                "common_reason": f"申請({q_apply}) != 實交({q_deliver})", 
+                "failures": [{"id": "📝 申請", "val": q_apply}, {"id": "🚛 實交", "val": q_deliver}], 
+                "source": "🐍 會計引擎"
+            })
+            
+        # 1.2 建立總帳追蹤器 (以「實交數量」為準，因為這是會計付款依據)
+        global_sum_tracker[s_title] = {
+            "target": q_deliver, 
             "actual": 0, 
             "details": [], 
             "page": s.get('page', "總表")
-        } 
-        for s in summary_rows if s.get('title')
-    }
-    
-    # 2. 逐項過帳
+        }
+
+    # =================================================
+    # 🕵️‍♂️ 第二關：逐項掃描 (單項、重複、運費、歸戶)
+    # =================================================
     for item in dimension_data:
         raw_title = item.get("item_title", "")
         title_clean = clean_text(raw_title) 
         page = item.get("page", "?")
         target_pc = safe_float(item.get("item_pc_target", 0)) 
-        
         batch_qty = safe_float(item.get("batch_total_qty", 0))
         
-        # 查找規則
+        # --- 2.1 規則匹配 (Regex/Fuzzy) ---
         rule_set = rules_map.get(title_clean)
         if not rule_set:
             t_no = re.sub(r"[\(（].*?[\)）]", "", title_clean)
@@ -841,175 +872,122 @@ def python_accounting_audit(dimension_data, res_main):
         u_fr = rule_set.get("u_fr", "") if rule_set else ""
         u_agg = rule_set.get("u_agg", "") if rule_set else ""
         
-        u_local_norm = u_local.upper()
-        u_fr_norm = u_fr.upper()
-        u_agg_norm = u_agg.upper()
-
         ds = str(item.get("ds", ""))
         data_list = [pair.split(":") for pair in ds.split("|") if ":" in pair]
-        
-        if not data_list: raw_count = 0
-        else: raw_count = len(data_list)
-        
+        raw_count = len(data_list) if data_list else 0
         id_counts = Counter([str(e[0]).strip() for e in data_list if len(e)>0])
 
-        # === 2.1 單項數量核對 (Local) ===
-        is_local_exempt = "豁免" in u_local or "SKIP" in u_local_norm or "EXEMPT" in u_local_norm
-        
-        actual_item_qty = 0
-        if batch_qty > 0:
-            actual_item_qty = raw_count 
-        else:
-            multiplier = parse_ratio(u_local)
-            actual_item_qty = raw_count * multiplier
+        # --- 2.2 單項數量檢查 (Local Check) ---
+        is_local_exempt = "豁免" in str(u_local) or "SKIP" in str(u_local).upper() or "EXEMPT" in str(u_local).upper()
+        actual_item_qty = raw_count if batch_qty > 0 else raw_count * parse_ratio(u_local)
 
-            if not is_local_exempt and abs(actual_item_qty - target_pc) > 0.01 and target_pc > 0:
-                 accounting_issues.append({
-                     "page": page, "item": raw_title, "issue_type": "統計不符(單項)", 
-                     "common_reason": f"標題 {target_pc} != 內文 {actual_item_qty} (行數{raw_count} × 規則{multiplier})", 
-                     "failures": [{"id": "目標", "val": target_pc}, {"id": "實際", "val": actual_item_qty}], 
-                     "source": "🐍 會計引擎"
-                 })
+        if not is_local_exempt and abs(actual_item_qty - target_pc) > 0.01 and target_pc > 0:
+             accounting_issues.append({
+                 "page": page, "item": raw_title, "issue_type": "統計不符(單項)", 
+                 "common_reason": f"標題 {target_pc} != 內文 {actual_item_qty}", 
+                 "failures": [{"id": "目標", "val": target_pc}, {"id": "實際", "val": actual_item_qty}], 
+                 "source": "🐍 會計引擎"
+             })
 
-        # === 2.2 重複警示 ===
+        # --- 2.3 編號重複檢查 (Duplicate Check) ---
         if "本體" in title_clean:
              for rid, count in id_counts.items():
                 if count > 1: accounting_issues.append({"page": page, "item": raw_title, "issue_type": "⚠️編號重複(本體)", "common_reason": f"{rid} 重複 {count}次", "failures": []})
-        # ⚡️ [擴充] 加入 "軸位"
         elif any(k in title_clean for k in ["軸頸", "軸頭", "軸位", "內孔", "JOURNAL"]):
              for rid, count in id_counts.items():
                 if count > 2: accounting_issues.append({"page": page, "item": raw_title, "issue_type": "⚠️編號重複(軸頸)", "common_reason": f"{rid} 重複 {count}次", "failures": []})
 
-        # === 2.3 運費計算 (Freight) ===
-        is_fr_exempt = "豁免" in u_fr or "SKIP" in u_fr_norm or "EXEMPT" in u_fr.upper()
-        is_default_target = ("本體" in title_clean and "未再生" in title_clean) or ("新品組裝" in title_clean) or ("計入" in u_fr)
-        
+        # --- 2.4 運費計算 (Freight Calc) ---
+        is_fr_exempt = "豁免" in str(u_fr) or "SKIP" in str(u_fr).upper()
+        is_default_target = ("本體" in title_clean and "未再生" in title_clean) or ("新品組裝" in title_clean) or ("計入" in str(u_fr))
+        fr_multiplier = parse_ratio(u_fr)
         freight_val = 0.0
         f_note = ""
-
-        if is_fr_exempt: 
-            freight_val = 0.0
-        elif is_default_target or parse_ratio(u_fr) != 1.0: 
-            fr_multiplier = parse_ratio(u_fr)
+        
+        if not is_fr_exempt and (is_default_target or fr_multiplier != 1.0):
             freight_val = actual_item_qty * fr_multiplier
-            
-            if fr_multiplier != 1.0: f_note = f"計入 (x{fr_multiplier})"
-            else: f_note = "計入"
+            f_note = f"計入 (x{fr_multiplier})" if fr_multiplier != 1.0 else "計入"
 
-        # === 2.4 總表對帳 (Agg) ===
+        # --- 2.5 總表歸戶 (Summary Aggregation) ---
         agg_mode = "B" 
         if u_agg:
-            parts = str(u_agg).upper().split(",")
-            for p in parts:
-                p_clean = p.replace(" ", "")
-                if "豁免" in p_clean or "EXEMPT" in p_clean or "SKIP" in p_clean: agg_mode = "EXEMPT"
-                elif p_clean == "AB": agg_mode = "AB"
-                elif p_clean == "A": agg_mode = "A"
-                elif p_clean == "B": agg_mode = "B"
+            p_clean = str(u_agg).upper().replace(" ", "")
+            if "EXEMPT" in p_clean or "SKIP" in p_clean: agg_mode = "EXEMPT"
+            elif "AB" in p_clean: agg_mode = "AB"
+            elif "A" in p_clean: agg_mode = "A"
 
-        if agg_mode == "EXEMPT": continue 
-        
-        agg_multiplier = parse_ratio(u_agg)
-        if batch_qty > 0:
-            qty_agg = batch_qty 
-        else:
-            qty_agg = actual_item_qty * agg_multiplier
+        if agg_mode != "EXEMPT":
+            agg_multiplier = parse_ratio(u_agg)
+            qty_agg = batch_qty if batch_qty > 0 else actual_item_qty * agg_multiplier
 
-        for s_title, data in global_sum_tracker.items():
-            match = False
-            s_clean = clean_text(s_title)
-            
-            # --- 運費識別 (保留 v27 的長字串指紋) ---
-            target_freight_str = "輥輪拆裝.車修或銲補運費"
-            f_score = fuzz.partial_ratio(target_freight_str, s_clean)
-            is_freight = False
-            if f_score > 70: is_freight = True
-            elif "運費" in s_clean: is_freight = True
-            elif "FREIGHT" in s_clean: is_freight = True
-
-            if is_freight:
-                if freight_val > 0:
-                    data["actual"] += freight_val
-                    data["details"].append({"id": raw_title, "val": freight_val, "calc": f_note})
-                continue 
-            
-            match_A = (fuzz.partial_ratio(s_clean, title_clean) > 90)
-            
-            if batch_qty > 0 and match_A:
-                match = True
-            else:
-                match_B = False
-                is_dis = "ROLL拆裝" in s_clean
-                is_mac = "ROLL車修" in s_clean
-                is_weld = "ROLL銲補" in s_clean or "ROLL焊補" in s_clean
+            for s_title, data in global_sum_tracker.items():
+                match = False
+                s_clean = clean_text(s_title)
                 
-                # ⚡️ [擴充] 加入 "軸位"
-                has_part = "本體" in title_clean or any(k in title_clean for k in ["軸頸", "軸頭", "軸位", "JOURNAL"])
-                has_act_mac = any(k in title_clean for k in ["再生", "精車", "未再生", "粗車"])
-                has_act_weld = ("銲補" in title_clean or "焊" in title_clean)
-                is_assy = ("組裝" in title_clean or "拆裝" in title_clean)
-
-                if is_dis and is_assy: match_B = True
-                elif is_mac and has_part and has_act_mac: match_B = True
-                elif is_weld and has_part and has_act_weld: match_B = True
+                # A. 運費專屬通道
+                is_freight = False
+                # 模糊指紋與關鍵字
+                if fuzz.partial_ratio("輥輪拆裝.車修或銲補運費", s_clean) > 70: is_freight = True
+                elif "運費" in s_clean or "FREIGHT" in s_clean: is_freight = True
                 
-                if agg_mode == "A": match = match_A
-                elif agg_mode == "AB": match = match_A or match_B
-                else: match = match_B if match_B else match_A
+                if is_freight:
+                    if freight_val > 0:
+                        data["actual"] += freight_val
+                        data["details"].append({"id": raw_title, "val": freight_val, "calc": f_note})
+                    continue # 運費歸戶完就換下一行總表
 
-            if match:
-                # 1. 動作/KEYWAY 互斥
-                sum_unregen = "未再生" in s_clean or "粗車" in s_clean
-                sum_regen = ("再生" in s_clean or "精車" in s_clean) and not sum_unregen
-                sum_weld = "銲補" in s_clean or "焊" in s_clean
-                sum_keyway = "KEYWAY" in s_clean
-                
-                item_unregen = "未再生" in title_clean or "粗車" in title_clean
-                item_regen = ("再生" in title_clean or "精車" in title_clean) and not item_unregen
-                item_weld = "銲補" in title_clean or "焊" in title_clean
-                item_keyway = "KEYWAY" in title_clean
+                # B. 一般項目比對通道
+                match_A = (fuzz.partial_ratio(s_clean, title_clean) > 90)
+                if batch_qty > 0 and match_A: match = True
+                else:
+                    match_B = False
+                    is_dis = "ROLL拆裝" in s_clean
+                    is_mac = "ROLL車修" in s_clean
+                    is_weld = "ROLL銲補" in s_clean or "焊" in s_clean
+                    has_part = "本體" in title_clean or any(k in title_clean for k in ["軸頸", "軸頭", "軸位", "JOURNAL"])
+                    has_act_mac = any(k in title_clean for k in ["再生", "精車", "未再生", "粗車"])
+                    has_act_weld = ("銲補" in title_clean or "焊" in title_clean)
+                    is_assy = ("組裝" in title_clean or "拆裝" in title_clean)
+                    
+                    if is_dis and is_assy: match_B = True
+                    elif is_mac and has_part and has_act_mac: match_B = True
+                    elif is_weld and has_part and has_act_weld: match_B = True
+                    
+                    if agg_mode == "A": match = match_A
+                    elif agg_mode == "AB": match = match_A or match_B
+                    else: match = match_B if match_B else match_A
 
-                if sum_weld and (item_unregen or item_regen) and not item_weld: match = False
-                elif sum_unregen and (item_regen or item_weld): match = False
-                elif sum_regen and (item_unregen or item_weld): match = False
-                
-                if sum_keyway and (item_unregen or item_regen or item_weld) and not item_keyway: match = False
-                if item_keyway and (sum_unregen or sum_regen or sum_weld) and not sum_keyway: match = False
+                # C. 互斥鎖 (Mutex Locks)
+                if match:
+                    sum_unregen = "未再生" in s_clean or "粗車" in s_clean
+                    item_regen = ("再生" in title_clean or "精車" in title_clean) and "未再生" not in title_clean
+                    if sum_unregen and item_regen: match = False
+                    
+                    sum_body = "本體" in s_clean
+                    sum_journal = any(k in s_clean for k in ["軸頸", "軸頭"])
+                    item_body = "本體" in title_clean
+                    item_journal = any(k in title_clean for k in ["軸頸", "軸頭"])
+                    if sum_body and not sum_journal and item_journal: match = False
+                    
+                    if "TOP" in s_clean.upper() and "BOTTOM" in title_clean.upper(): match = False
+                    if "BOTTOM" in s_clean.upper() and "TOP" in title_clean.upper(): match = False
 
-                # 2. 部位互斥
-                sum_body = "本體" in s_clean
-                # ⚡️ [擴充] 加入 "軸位"
-                sum_journal = any(k in s_clean for k in ["軸頸", "軸頭", "軸位", "內孔", "JOURNAL"])
-                item_body = "本體" in title_clean
-                item_journal = any(k in title_clean for k in ["軸頸", "軸頭", "軸位", "內孔", "JOURNAL"])
-                
-                if sum_body and not sum_journal and item_journal: match = False
-                if sum_journal and not sum_body and item_body: match = False
+                if match:
+                    data["actual"] += qty_agg
+                    c_msg = "計入" if agg_multiplier == 1.0 else f"計入 (x{agg_multiplier})"
+                    data["details"].append({"id": f"{raw_title} (P.{page})", "val": qty_agg, "calc": c_msg})
 
-                # 3. TOP / BOTTOM 互斥鎖
-                s_upper = s_clean.upper()
-                t_upper = title_clean.upper()
-                sum_top = "TOP" in s_upper
-                sum_bottom = "BOTTOM" in s_upper
-                item_top = "TOP" in t_upper
-                item_bottom = "BOTTOM" in t_upper
-                if sum_top and item_bottom: match = False
-                if sum_bottom and item_top: match = False
-
-            if match:
-                data["actual"] += qty_agg
-                c_msg = "計入總量" if batch_qty > 0 else (f"計入 (x{agg_multiplier})" if agg_multiplier != 1.0 else "計入")
-                data["details"].append({"id": f"{raw_title} (P.{page})", "val": qty_agg, "calc": c_msg})
-
-    # 3. 異常結算 (總表比對: 左 vs 右)
+    # =================================================
+    # 🕵️‍♂️ 第三關：明細總結算 (含運費)
+    # =================================================
     for s_title, data in global_sum_tracker.items():
-        # [v30 修改] 明確的警示邏輯：申請 vs 實交，只要不相等就報警
+        # 這裡會結算到：1.一般項目 2.運費項目
         if abs(data["actual"] - data["target"]) > 0.01: 
             accounting_issues.append({
                 "page": data["page"], "item": s_title, 
-                "issue_type": "⚠️ 總量不符", 
-                "common_reason": f"申請({data['target']}) != 實交({data['actual']})", 
-                "failures": [{"id": "📝 申請", "val": data["target"]}, {"id": "🚛 實交", "val": data["actual"]}], 
+                "issue_type": "⚠️ 明細匯總不符", 
+                "common_reason": f"實交({data['target']}) != 明細加總({data['actual']})", 
+                "failures": [{"id": "🚛 實交", "val": data["target"]}, {"id": "∑ 明細", "val": data["actual"]}], 
                 "source": "🐍 會計引擎"
             })
             
