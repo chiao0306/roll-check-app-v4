@@ -1937,7 +1937,7 @@ if st.session_state.photo_gallery:
                     # 5. 顯示表格
                     st.dataframe(styler, use_container_width=True, hide_index=True)
 
-        st.divider()
+            st.divider()
         
         # 下載按鈕邏輯
         current_job_no = cache.get('job_no', 'Unknown')
