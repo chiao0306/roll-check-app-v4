@@ -350,18 +350,18 @@ def python_engineering_audit(dimension_data):
 
 def assign_category_by_python(item_title):
     """
-    Python 分類官 (v13: 完美順序版)
+    Python 分類官 (v14: 精簡完美版)
     修正重點：
-    1. [車修]: 視為雜訊，完全不參與判斷 (只看 再生/未再生/焊補)。
+    1. [車修]: 視為雜訊，不參與判斷。
     2. [內孔]: 強制歸類為 range (公差區間)。
-    3. [順序]: 焊補(Min) > 未再生 > 再生(Range) > 軸頸(Max)。
-    4. [Excel]: 保留 token_sort_ratio 全域鎖，防止特規劫持。
+    3. [順序]: 焊補(Min) > 未再生(軸頸Max/本體Un_regen) > 再生(Range)。
+    4. [精簡]: 移除純軸頸的強制分類，避免誤判。
     """
     import pandas as pd
     from thefuzz import fuzz
     import re
 
-    # 1. 讀取全域門檻 (安全鎖)
+    # 1. 讀取全域門檻
     CURRENT_THRESHOLD = globals().get('GLOBAL_FUZZ_THRESHOLD', 90)
 
     def clean_text(text):
@@ -380,7 +380,6 @@ def assign_category_by_python(item_title):
     # ⚡️ Phase 2: Excel 特規 (帶反向鎖)
     # ==========================================
     try:
-        # 建議：實務上 df 應在函式外載入一次即可，這裡為了獨立性保留讀取
         df = pd.read_excel("rules.xlsx")
         df.columns = [c.strip() for c in df.columns]
         
@@ -395,7 +394,7 @@ def assign_category_by_python(item_title):
             
             clean_rule_name = clean_text(iname)
             
-            # 🔥 使用 token_sort_ratio 防止 "驅動輥" 劫持 "驅動輥輪軸心"
+            # 🔥 全域反向鎖 (Token Sort Ratio)
             score = fuzz.token_sort_ratio(clean_rule_name, title_clean)
             
             if score > CURRENT_THRESHOLD: 
@@ -420,35 +419,29 @@ def assign_category_by_python(item_title):
     # ⚡️ Phase 3: 關鍵字補底 (黃金順序)
     # ==========================================
 
-    # 1. [內孔] 特例：內孔通常有公差，優先權最高 -> range
+    # 1. [內孔] 特例：優先權最高 -> range
     if "內孔" in t_upper:
         return "range"
 
-    # 2. [焊補]：只要有焊，就是看有沒有補到尺寸 -> min_limit
-    # (即便它是軸頸，焊補屬性也優先於軸頸屬性)
+    # 2. [焊補]：優先於軸頸 -> min_limit
     has_weld = any(k in t_upper for k in ["銲補", "銲接", "焊", "WELD", "鉀"])
     if has_weld:
         return "min_limit"
 
-    # 3. [未再生]：優先權高於一般再生
+    # 3. [未再生]：區分本體與軸頸
     has_unregen = any(k in t_upper for k in ["未再生", "UN_REGEN", "粗車"])
     if has_unregen:
-        # 如果是「軸頸+未再生」，通常是檢查上限 (磨損不可變大? 或檢查是否變形)
-        # 但通常未再生就是檢查素材尺寸 -> un_regen 邏輯 (大於多少)
-        # 您原本 v11 這裡是: if 軸頸 -> max_limit, else -> un_regen
+        # 繼承 v11 邏輯：軸頸未再生通常檢查上限
         if any(k in t_upper for k in ["軸頸", "軸頭", "軸位", "JOURNAL"]): 
             return "max_limit"
         return "un_regen"
 
-    # 4. [再生/精加工]：這些詞暗示精密公差 -> range
-    # 🔥 關鍵修正：移除了 "車修"，避免干擾
+    # 4. [再生/精加工]：(移除了 "車修") -> range
     has_regen = any(k in t_upper for k in ["再生", "研磨", "精加工", "KEYWAY", "GRIND", "MACHIN", "精車", "組裝", "拆裝", "裝配", "ASSY", "配磨"])
     if has_regen:
         return "range"
 
-    # 5. [軸頸/軸頭] (最後防線)：如果沒焊、沒再生、沒未再生，只說是軸頸 -> max_limit
-    if any(k in t_upper for k in ["軸頸", "軸頭", "軸位", "JOURNAL"]):
-        return "max_limit"
+    # (原本這裡有一個 "5. 純軸頸 -> max_limit" 的防線，已經移除了)
 
     return "unknown"
 
