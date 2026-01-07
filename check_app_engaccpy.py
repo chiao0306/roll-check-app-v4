@@ -1105,7 +1105,6 @@ def python_accounting_audit(dimension_data, res_main):
                     s_is_heat = "熱處理" in s_clean
                     t_is_heat = "熱處理" in title_clean
                     
-                    
                     if s_is_regen and t_is_unregen: match = False
                     if s_is_unregen and t_is_regen: match = False
                     if s_is_journal and not s_is_body and t_is_body: match = False
