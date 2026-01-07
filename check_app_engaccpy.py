@@ -13,7 +13,7 @@ from thefuzz import fuzz
 from collections import Counter
 import re
 
-GLOBAL_FUZZ_THRESHOLD = 70
+GLOBAL_FUZZ_THRESHOLD = 80
 
 
 # --- 1. 頁面設定 ---
