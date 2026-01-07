@@ -1763,7 +1763,6 @@ if st.session_state.photo_gallery:
                             st.dataframe(hit_df[final_cols].style.format({"分數": "{:.0f}"}), use_container_width=True, hide_index=True)
                         else:
                             st.dataframe(hit_df, use_container_width=True, hide_index=True)
-                        st.divider()
                 else:
                     if target_list:
                         st.info(f"本次工令未觸發任何特規項目 (門檻: {current_fuzz})。")
