@@ -628,11 +628,11 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
 
 def python_numerical_audit(dimension_data):
     """
-    Python 工程引擎 (v32: 智能去尾匹配版)
+    Python 工程引擎 (v34: 寬容橋樑版)
     升級內容：
-    1. [匹配升級]: 引入 remove_tail_info，在特規配對(Fuzz)前先去除標題末端括號。
-       - 確保工程引擎能正確抓到 Excel 設定的「豁免」或「特殊公差」規則。
-    2. [邏輯保留]: Phase 0 (±分割) 與 Phase 1 (mm隔離) 邏輯完全保留。
+    1. [Range優化]: 升級波浪號(~)解析邏輯，允許數字與波浪號之間存在 "_" (由mm轉換而來) 或空白。
+       - 解決 "135mm~129mm" 因去空白後變成 "135_~129_" 導致 Regex 抓不到區間的問題。
+    2. [結構維持]: 智能去尾、Phase 0 (±分割)、Phase 1 (mm隔離) 邏輯完全保留。
     """
     grouped_errors = {}
     import re
@@ -716,7 +716,7 @@ def python_numerical_audit(dimension_data):
             if "SKIP" in u_local or "EXEMPT" in u_local or "豁免" in u_local:
                 continue
 
-        # --- 以下為數值提取與檢查邏輯 (保持 v31 不變) ---
+        # --- 以下為數值提取與檢查邏輯 (v34 更新區) ---
         
         mm_nums = [float(n) for n in re.findall(r"(\d+\.?\d*)\s*mm", raw_spec)]
         all_nums = [float(n) for n in re.findall(r"(\d+\.?\d*)", raw_spec)]
@@ -751,19 +751,30 @@ def python_numerical_audit(dimension_data):
                     continue # 這一行處理完畢，直接跳過後面的邏輯
             
             # =================================================
-            # [Phase 1] 處理非 ± 的其他情況 (v30 邏輯)
+            # [Phase 1] 處理非 ± 的其他情況 (mm 隔離)
             # =================================================
             clean_part = part.replace("mm", "_").replace("MM", "_").replace(" ", "").replace("\n", "").strip()
             
             if not clean_part: continue
             
-            # 2. 處理 ~ (Range)
-            tilde_matches = list(re.finditer(r"(\d+\.?\d*)[~～-](\d+\.?\d*)", clean_part))
+            # =================================================
+            # 🔥 [Phase 2] 處理 ~ (Range) - v34: 寬容橋樑版
+            # =================================================
+            # 升級重點：允許波浪號左右出現 "_" (由mm變來) 或空白
+            # 這樣 "135_~129_" 就能被識別為一個區間，而不是兩個單值
+            
+            # Regex 解析：(\d+\.?\d*) \s*[_]* \s*[~～-] \s*[_]* \s* (\d+\.?\d*)
+            tilde_matches = list(re.finditer(r"(\d+\.?\d*)\s*[_]*\s*[~～-]\s*[_]*\s*(\d+\.?\d*)", clean_part))
             has_valid_tilde = False
+            
             if tilde_matches:
                 for match in tilde_matches:
-                    n1, n2 = float(match.group(1)), float(match.group(2))
-                    if abs(n1 - n2) < n1 * 0.5:
+                    n1 = float(match.group(1))
+                    n2 = float(match.group(2))
+                    
+                    # 防呆：避免把日期 (2025-10) 當成區間
+                    if abs(n1 - n2) < max(n1, n2) * 0.6:
+                        # 自動排序：確保區間是 [min, max]
                         s_ranges.append([round(min(n1, n2), 4), round(max(n1, n2), 4)])
                         has_valid_tilde = True
             
