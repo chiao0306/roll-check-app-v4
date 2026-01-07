@@ -1055,7 +1055,7 @@ def python_accounting_audit(dimension_data, res_main):
                 # =========================================================
                 # 🧺 步驟 1: 籃子撈人 (v59: "NAN"修復版)
                 # =========================================================
-                match_A = (fuzz.partial_ratio(s_clean, title_clean) > 85)
+                match_A = (fuzz.partial_ratio(s_clean, title_clean) > 90)
                 match_B = False
                 b_debug_msg = ""
                 
@@ -1101,13 +1101,19 @@ def python_accounting_audit(dimension_data, res_main):
                     s_is_journal = any(k in s_clean for k in journal_family)
                     s_is_body = "本體" in s_clean
                     t_is_body = "本體" in title_clean
-
+                    # 在攔截者區塊加入這段，強制分開熱處理與其他動作
+                    s_is_heat = "熱處理" in s_clean
+                    t_is_heat = "熱處理" in title_clean
+                    
+                    
                     if s_is_regen and t_is_unregen: match = False
                     if s_is_unregen and t_is_regen: match = False
                     if s_is_journal and not s_is_body and t_is_body: match = False
+                    # 如果籃子要熱處理，但明細不是；或是籃子不要熱處理，但明細是 -> 擋掉
+                    if s_is_heat != t_is_heat: match = False
                     if "TOP" in s_upper_check and "BOTTOM" in t_upper: match = False
                     if "BOTTOM" in s_upper_check and "TOP" in t_upper: match = False
-
+                    
                 if match:
                     if match_B and not match_A:
                         data["used_mode"] = "B"
