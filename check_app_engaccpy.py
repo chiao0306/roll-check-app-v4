@@ -1099,27 +1099,46 @@ def python_accounting_audit(dimension_data, res_main):
                 elif agg_mode == "AB": match = match_A or match_B
                 else: match = match_B if match_B else match_A
 
+                # =========================================================
+                # 🛑 步驟 2: 攔截者 (v63: 指定鎖定版)
+                # =========================================================
                 if match:
                     t_upper = title_clean.upper()
                     
+                    # 1. 再生 vs 未再生
                     s_is_unregen = "未再生" in s_clean or "粗車" in s_clean
                     t_is_unregen = "未再生" in title_clean or "粗車" in title_clean
                     s_is_regen = ("再生" in s_clean or "精車" in s_clean) and not s_is_unregen
                     t_is_regen = ("再生" in title_clean or "精車" in title_clean or "車修" in title_clean) and not t_is_unregen
+                    
+                    if s_is_regen and t_is_unregen: match = False
+                    if s_is_unregen and t_is_regen: match = False
+                    
+                    # 2. 部位互斥鎖 (Body vs Journal)
                     s_is_journal = any(k in s_clean for k in journal_family)
+                    # 補上這行，不然下面沒辦法擋軸頸
+                    t_is_journal = any(k in title_clean for k in journal_family) 
+                    
                     s_is_body = "本體" in s_clean
                     t_is_body = "本體" in title_clean
-                    # 在攔截者區塊加入這段，強制分開熱處理與其他動作
+
+                    # [您的要求] 本體籃子：絕對不收軸頸 (防止 A 模式混淆)
+                    if s_is_body and not s_is_journal and t_is_journal: match = False
+                    
+                    # [您的要求] 軸頸籃子：絕對不收本體
+                    if s_is_journal and not s_is_body and t_is_body: match = False
+
+                    # 3. 熱處理反向鎖 (您指定的)
                     s_is_heat = "熱處理" in s_clean
                     t_is_heat = "熱處理" in title_clean
                     
                     # 如果籃子要熱處理，但明細不是；或是籃子不要熱處理，但明細是 -> 擋掉！
                     if s_is_heat != t_is_heat: match = False
-                    if s_is_regen and t_is_unregen: match = False
-                    if s_is_unregen and t_is_regen: match = False
-                    if s_is_journal and not s_is_body and t_is_body: match = False
+
+                    # 4. 位置衝突鎖
                     if "TOP" in s_upper_check and "BOTTOM" in t_upper: match = False
                     if "BOTTOM" in s_upper_check and "TOP" in t_upper: match = False
+
 
                 if match:
                     if match_B and not match_A:
