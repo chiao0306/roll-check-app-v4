@@ -179,18 +179,22 @@ def get_dynamic_rules(ocr_text, debug_mode=False):
     except Exception as e:
         return f"讀取錯誤: {e}"
 
-# --- 4. 核心函數：Azure 神之眼 ---
+# --- 4. 核心函數：Azure 神之眼 (v2: 多頁 PDF 支援版) ---
 def extract_layout_with_azure(file_obj, endpoint, key):
     client = DocumentIntelligenceClient(endpoint=endpoint, credential=AzureKeyCredential(key))
     file_content = file_obj.getvalue()
     
-    poller = client.begin_analyze_document("prebuilt-layout", file_content, content_type="application/octet-stream")
+    # 判斷是 PDF 還是圖片 (MIME type guessing)
+    content_type = "application/pdf" if file_content[:4] == b'%PDF' else "application/octet-stream"
+
+    poller = client.begin_analyze_document("prebuilt-layout", file_content, content_type=content_type)
     result: AnalyzeResult = poller.result()
     
     markdown_output = ""
-    full_content_text = ""
+    full_content_list = [] # 改用 List 存每一頁
     real_page_num = "Unknown"
     
+    # 定義雜訊關鍵字 (保留原邏輯)
     bottom_stop_keywords = ["注意事項", "中機品檢單位", "保存期限", "表單編號", "FORM NO", "簽章"]
     top_right_noise_keywords = [
         "檢驗類別", "尺寸檢驗", "依圖面標記", "材料檢驗", "成份分析", 
@@ -199,23 +203,16 @@ def extract_layout_with_azure(file_obj, endpoint, key):
         "抗拉", "硬度試驗", "UT", "PT", "MT"
     ]
     
+    # 1. 表格處理 (Tables) - Azure 會自動抓出所有頁面的表格
     if result.tables:
         for idx, table in enumerate(result.tables):
-            # 1. 取得頁碼 (保留原邏輯)
-            page_num = "Unknown"
-            if table.bounding_regions: page_num = table.bounding_regions[0].page_number
+            page_num = table.bounding_regions[0].page_number if table.bounding_regions else "Unknown"
             
-            # =========================================================
-            # 🔍 [新增] 智慧標籤偵測：在處理表格前，先判斷它是誰
-            # =========================================================
+            # 智慧標籤偵測
             table_tag = "未知表格"
-            
-            # 技巧：抓取表格「第一列 (row_index=0)」的所有文字來判斷
-            # 這樣不用讀完整張表，只要看表頭就知道它是總表還是明細
             first_cells = [c.content for c in table.cells if c.row_index == 0]
             first_row_text = "".join(first_cells)
             
-            # 定義關鍵字 (您可以根據實際表格微調)
             summary_keywords = ["實交", "申請", "名稱及規範", "完成交貨日期", "存放位置"]
             detail_keywords = ["規範標準", "檢驗紀錄", "實測", "編號", "尺寸", "W3 #", "公差"]
 
@@ -224,24 +221,12 @@ def extract_layout_with_azure(file_obj, endpoint, key):
             elif any(k in first_row_text for k in detail_keywords):
                 table_tag = "DETAIL_TABLE (明細表)"
             
-            # 📝 [修改] 輸出標頭：這裡不再只寫 Table X，而是加上我們判斷的標籤
-            # 加上 "===" 是為了讓 Prompt 裡的「注意範圍」指令能精準鎖定
             markdown_output += f"\n\n=== [{table_tag} | Page {page_num}] ===\n"
-            # =========================================================
 
             rows = {}
-            stop_processing_table = False 
-            
-            # --- 以下保留您原本的 Cell 處理邏輯，完全不用動 ---
             for cell in table.cells:
-                if stop_processing_table: break
                 content = cell.content.replace("\n", " ").strip()
-                
-                for kw in bottom_stop_keywords:
-                    if kw in content:
-                        stop_processing_table = True
-                        break
-                if stop_processing_table: break
+                # 這裡不刪除 stop keywords，因為表格通常不會包含頁尾
                 
                 is_noise = False
                 for kw in top_right_noise_keywords:
@@ -262,28 +247,41 @@ def extract_layout_with_azure(file_obj, endpoint, key):
                         row_cells.append(rows[r].get(c, ""))
                     markdown_output += "| " + " | ".join(row_cells) + " |\n"
 
-    if result.content:
-        match = re.search(r"(?:項次|Page|頁次|NO\.)[:\s]*(\d+)\s*[/／]\s*\d+", result.content, re.IGNORECASE)
-        if match:
-            real_page_num = match.group(1)
-
-        cut_index = len(result.content)
-        for keyword in bottom_stop_keywords:
-            idx = result.content.find(keyword)
-            if idx != -1 and idx < cut_index:
-                cut_index = idx
-        
-        temp_text = result.content[:cut_index]
-        for noise in top_right_noise_keywords:
-            temp_text = temp_text.replace(noise, "")
+    # 2. 全文處理 (Content) - 🔥 關鍵修改：依頁面切割處理 🔥
+    if result.pages:
+        for page in result.pages:
+            # 透過 spans 抓取該頁的文字範圍
+            page_text = ""
+            for span in page.spans:
+                page_text += result.content[span.offset : span.offset + span.length]
             
-        full_content_text = temp_text
-        header_snippet = full_content_text[:800]
-    else:
-        full_content_text = ""
-        header_snippet = ""
+            # --- 針對「單頁」進行去雜訊處理 ---
+            
+            # A. 頁碼提取 (只抓第一頁或每一頁都抓)
+            if real_page_num == "Unknown":
+                match = re.search(r"(?:項次|Page|頁次|NO\.)[:\s]*(\d+)\s*[/／]\s*\d+", page_text, re.IGNORECASE)
+                if match: real_page_num = match.group(1)
 
-    return markdown_output, header_snippet, full_content_text, None, real_page_num
+            # B. 頁尾切除 (Bottom Stop) - 只切除「該頁」的尾巴
+            cut_index = len(page_text)
+            for keyword in bottom_stop_keywords:
+                idx = page_text.find(keyword)
+                if idx != -1 and idx < cut_index:
+                    cut_index = idx
+            
+            clean_page_text = page_text[:cut_index]
+            
+            # C. 右上角雜訊去除
+            for noise in top_right_noise_keywords:
+                clean_page_text = clean_page_text.replace(noise, "")
+            
+            # D. 加入該頁文字到總表，並加上明顯的分頁標記
+            full_content_list.append(f"\n--- [PDF Page {page.page_number}] ---\n{clean_page_text}")
+
+    final_full_text = "\n".join(full_content_list)
+    header_snippet = final_full_text[:800] if final_full_text else ""
+
+    return markdown_output, header_snippet, final_full_text, None, real_page_num
     
 def python_engineering_audit(dimension_data):
     """
