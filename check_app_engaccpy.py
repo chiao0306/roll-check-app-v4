@@ -615,11 +615,12 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
 
 def python_numerical_audit(dimension_data):
     """
-    Python 工程引擎 (v30: mm隔離保護版)
+    Python 工程引擎 (v31: ±分割優先版)
     升級內容：
-    1. [防沾黏修復]: 解析規格時，將 "mm" 替換為 "_" 而非直接刪除。
-       - 解決 "460mm 0" 因去除空白變成 "4600" 的嚴重 Bug。
-       - 確保基準值與公差值即使在 OCR 去除空白後仍能正確分離。
+    1. [Phase 0 優先處理]: 遇到 "±" 時，直接採用「左右分割法」。
+       - 左邊抓「最後一個數字」做基準 (Base)，右邊抓「第一個數字」做公差 (Tol)。
+       - 徹底解決 "380mm ±0.8" 因為 mm 或 _ 導致 Regex 抓不到基準的問題。
+    2. [Phase 1 既有邏輯]: 若無 ±，才執行 v30 的 mm隔離與數值分離邏輯。
     """
     grouped_errors = {}
     import re
@@ -689,7 +690,7 @@ def python_numerical_audit(dimension_data):
             if "SKIP" in u_local or "EXEMPT" in u_local or "豁免" in u_local:
                 continue
 
-        # --- 以下為數值提取與檢查邏輯 (v30 修正區) ---
+        # --- 以下為數值提取與檢查邏輯 (v31 修正區) ---
         
         mm_nums = [float(n) for n in re.findall(r"(\d+\.?\d*)\s*mm", raw_spec)]
         all_nums = [float(n) for n in re.findall(r"(\d+\.?\d*)", raw_spec)]
@@ -700,23 +701,36 @@ def python_numerical_audit(dimension_data):
         spec_parts = re.split(r"[\n\r]|[一二三四五六]|[（(]\d+[)）]|[;；]", raw_spec)
         
         for part in spec_parts:
-            # 🔥 [關鍵修正]：先把 mm 換成 _ (底線)，再去除空白
-            # 這樣 "460mm 0" -> "460_0" -> 去空白後還是 "460_0"
-            # Regex 抓數字時就會把它們分成 [460, 0]，不會變成 4600
+            # 預處理：統一正負號
+            part = part.replace("+-", "±").replace("＋－", "±")
+            
+            # =================================================
+            # 🔥 [Phase 0] 優先處理 ± (Split Strategy)
+            # =================================================
+            if "±" in part:
+                # 1. 以 ± 為界，切成左右兩半
+                left_str, right_str = part.split("±", 1)
+                
+                # 2. 抓出所有數字
+                left_nums = re.findall(r"(\d+\.?\d*)", left_str)
+                right_nums = re.findall(r"(\d+\.?\d*)", right_str)
+                
+                if left_nums and right_nums:
+                    # 💡 關鍵邏輯：
+                    # Base (左邊) 抓「最後一個數字」 -> 避開前面的 "直徑"、"No.1" 等雜訊
+                    # Tol (右邊) 抓「第一個數字」 -> 避開後面的單位
+                    b = float(left_nums[-1]) 
+                    o = float(right_nums[0])
+                    s_ranges.append([round(b - o, 4), round(b + o, 4)])
+                    continue # 這一行處理完畢，直接跳過後面的邏輯
+            
+            # =================================================
+            # [Phase 1] 處理非 ± 的其他情況 (v30 邏輯)
+            # =================================================
             clean_part = part.replace("mm", "_").replace("MM", "_").replace(" ", "").replace("\n", "").strip()
             
             if not clean_part: continue
             
-            # 1. 處理 ± (Plus-Minus)
-            pm_matches = list(re.finditer(r"(\d+\.?\d*)?±(\d+\.?\d*)", clean_part))
-            if pm_matches:
-                for match in pm_matches:
-                    base_str, offset_str = match.group(1), match.group(2)
-                    b = float(base_str) if base_str else 0.0
-                    o = float(offset_str)
-                    s_ranges.append([round(b - o, 4), round(b + o, 4)])
-                continue 
-
             # 2. 處理 ~ (Range)
             tilde_matches = list(re.finditer(r"(\d+\.?\d*)[~～-](\d+\.?\d*)", clean_part))
             has_valid_tilde = False
@@ -729,7 +743,7 @@ def python_numerical_audit(dimension_data):
             
             if has_valid_tilde: continue
 
-            # 3. 處理 Base + Offsets (包含 0, -0.155 這種)
+            # 3. 處理 Base + Offsets (如 0, -0.155)
             all_numbers = re.findall(r"[-+]?\d+\.?\d*", clean_part)
             if not all_numbers: continue
 
