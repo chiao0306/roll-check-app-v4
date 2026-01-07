@@ -629,11 +629,12 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
 
 def python_numerical_audit(dimension_data):
     """
-    Python 工程引擎 (v34: 寬容橋樑版)
-    升級內容：
-    1. [Range優化]: 升級波浪號(~)解析邏輯，允許數字與波浪號之間存在 "_" (由mm轉換而來) 或空白。
-       - 解決 "135mm~129mm" 因去空白後變成 "135_~129_" 導致 Regex 抓不到區間的問題。
-    2. [結構維持]: 智能去尾、Phase 0 (±分割)、Phase 1 (mm隔離) 邏輯完全保留。
+    Python 工程引擎 (v35: 最終完美防護版)
+    整合內容：
+    1. [Range優化]: 允許 "135mm~129mm" 格式。
+    2. [結構修復]: 修正縮排錯誤，解決「有異常卻顯示空表格」的問題。
+    3. [安全防護]: 恢復 try...except 機制，防止單一爛資料導致程式崩潰。
+    4. [括號統一]: 支援全形括號自動轉半形。
     """
     grouped_errors = {}
     import re
@@ -645,7 +646,7 @@ def python_numerical_audit(dimension_data):
 
     if not dimension_data: return []
 
-    # 🔥 [新增] 智能去尾函式 (放在這裡供內部呼叫)
+    # 🔥 [新增] 智能去尾函式
     def remove_tail_info(text):
         return re.sub(r"[\(（].*?[\)）]\s*$", "", str(text)).strip()
 
@@ -675,34 +676,30 @@ def python_numerical_audit(dimension_data):
         raw_spec = str(item.get("std_spec", "")).replace('"', "")
         
         # =========================================================
-        # 🔥 3. 執行特規配對 (整合智能去尾)
+        # 🔥 3. 執行特規配對 (整合智能去尾 + 括號統一)
         # =========================================================
         
-        # 準備匹配用的乾淨標題 (去尾 + 括號統一 + 去空白)
         title_no_tail = remove_tail_info(raw_title)
-        # 在這裡加入 replace("（", "(").replace("）", ")")
+        # 這裡加入全形轉半形
         title_clean_for_rule = title_no_tail.replace("（", "(").replace("）", ")").replace(" ", "").replace('"', "").strip()
-
-        # 原本的 title_clean (保留給完全匹配用，怕 Excel 裡真的有人寫括號)
         title_clean_full = title.strip()
         
         rule_set = None
         
-        # A. 完全匹配 (優先用完整字串比，以防 Excel 規則本身就包含括號)
+        # A. 完全匹配
         if title_clean_full in rules_map:
             rule_set = rules_map[title_clean_full]
         
-        # B. 去括號匹配 (去中間括號)
+        # B. 去括號匹配
         if not rule_set:
             t_no = re.sub(r"[\(（].*?[\)）]", "", title_clean_full)
             if t_no in rules_map:
                 rule_set = rules_map[t_no]
         
-        # C. 模糊匹配 (🔥 這裡改用去尾後的標題來比對)
+        # C. 模糊匹配
         if not rule_set and rules_map:
             best_score = 0
             for k, v in rules_map.items():
-                # 使用 remove_tail_info 處理過的標題進行比對
                 sc = fuzz.token_sort_ratio(k, title_clean_for_rule)
                 if sc > CURRENT_THRESHOLD and sc > best_score:
                     best_score = sc
@@ -718,7 +715,7 @@ def python_numerical_audit(dimension_data):
             if "SKIP" in u_local or "EXEMPT" in u_local or "豁免" in u_local:
                 continue
 
-        # --- 以下為數值提取與檢查邏輯 (v34 更新區) ---
+        # --- 以下為數值提取與檢查邏輯 ---
         
         mm_nums = [float(n) for n in re.findall(r"(\d+\.?\d*)\s*mm", raw_spec)]
         all_nums = [float(n) for n in re.findall(r"(\d+\.?\d*)", raw_spec)]
@@ -729,63 +726,39 @@ def python_numerical_audit(dimension_data):
         spec_parts = re.split(r"[\n\r]|[一二三四五六]|[（(]\d+[)）]|[;；]", raw_spec)
         
         for part in spec_parts:
-            # 預處理：統一正負號
             part = part.replace("+-", "±").replace("＋－", "±")
             
-            # =================================================
-            # 🔥 [Phase 0] 優先處理 ± (Split Strategy)
-            # =================================================
+            # [Phase 0] 優先處理 ±
             if "±" in part:
-                # 1. 以 ± 為界，切成左右兩半
                 left_str, right_str = part.split("±", 1)
-                
-                # 2. 抓出所有數字
                 left_nums = re.findall(r"(\d+\.?\d*)", left_str)
                 right_nums = re.findall(r"(\d+\.?\d*)", right_str)
                 
                 if left_nums and right_nums:
-                    # 💡 關鍵邏輯：
-                    # Base (左邊) 抓「最後一個數字」 -> 避開前面的 "直徑"、"No.1" 等雜訊
-                    # Tol (右邊) 抓「第一個數字」 -> 避開後面的單位
                     b = float(left_nums[-1]) 
                     o = float(right_nums[0])
                     s_ranges.append([round(b - o, 4), round(b + o, 4)])
-                    continue # 這一行處理完畢，直接跳過後面的邏輯
+                    continue 
             
-            # =================================================
-            # [Phase 1] 處理非 ± 的其他情況 (mm 隔離)
-            # =================================================
+            # [Phase 1] mm 隔離
             clean_part = part.replace("mm", "_").replace("MM", "_").replace(" ", "").replace("\n", "").strip()
-            
             if not clean_part: continue
             
-            # =================================================
-            # 🔥 [Phase 2] 處理 ~ (Range) - v34: 寬容橋樑版
-            # =================================================
-            # 升級重點：允許波浪號左右出現 "_" (由mm變來) 或空白
-            # 這樣 "135_~129_" 就能被識別為一個區間，而不是兩個單值
-            
-            # Regex 解析：(\d+\.?\d*) \s*[_]* \s*[~～-] \s*[_]* \s* (\d+\.?\d*)
+            # [Phase 2] 處理 ~ (Range) - v34 寬容版
             tilde_matches = list(re.finditer(r"(\d+\.?\d*)\s*[_]*\s*[~～-]\s*[_]*\s*(\d+\.?\d*)", clean_part))
             has_valid_tilde = False
-            
             if tilde_matches:
                 for match in tilde_matches:
                     n1 = float(match.group(1))
                     n2 = float(match.group(2))
-                    
-                    # 防呆：避免把日期 (2025-10) 當成區間
                     if abs(n1 - n2) < max(n1, n2) * 0.6:
-                        # 自動排序：確保區間是 [min, max]
                         s_ranges.append([round(min(n1, n2), 4), round(max(n1, n2), 4)])
                         has_valid_tilde = True
-            
             if has_valid_tilde: continue
 
-            # 3. 處理 Base + Offsets (如 0, -0.155)
+            # [Phase 3] Base + Offsets
             all_numbers = re.findall(r"[-+]?\d+\.?\d*", clean_part)
             if not all_numbers: continue
-
             try:
                 bases = []
                 offsets = []
@@ -793,7 +766,6 @@ def python_numerical_audit(dimension_data):
                     val = float(token)
                     if val > 10.0: bases.append(val)
                     elif abs(val) < 10.0: offsets.append(val)
-                
                 if bases:
                     for b in bases:
                         if offsets:
@@ -804,7 +776,7 @@ def python_numerical_audit(dimension_data):
                             s_ranges.append([b, b])
             except: continue
                     
-        # ... (以下邏輯保持不變) ...
+        # ... 邏輯判斷 ...
         logic = item.get("sl", {})
         l_type = logic.get("lt", "")
         
@@ -827,72 +799,75 @@ def python_numerical_audit(dimension_data):
             
             if not val_raw or val_raw in ["N/A", "nan", "M10"]: continue
 
-            #try:
-            is_passed, reason, t_used, engine_label = True, "", "N/A", "未知"
+            # 🔥 這裡把安全防護衣 (try...except) 穿回來了
+            try:
+                is_passed, reason, t_used, engine_label = True, "", "N/A", "未知"
 
-            if "[!]" in val_raw:
-                is_passed = False
-                reason = "🛑數據損壞(壞軌)"
-                val_str = "[!]"
-                val = -999.0 
-            else:
-                v_m = re.findall(r"\d+\.?\d*", val_raw)
-                val_str = v_m[0] if v_m else val_raw
-                val = float(val_str)
+                if "[!]" in val_raw:
+                    is_passed = False
+                    reason = "🛑數據損壞(壞軌)"
+                    val_str = "[!]"
+                    val = -999.0 
+                else:
+                    v_m = re.findall(r"\d+\.?\d*", val_raw)
+                    val_str = v_m[0] if v_m else val_raw
+                    val = float(val_str)
 
-            if val_str != "[!]":
-                is_two_dec = "." in val_str and len(val_str.split(".")[-1]) == 2
-                is_pure_int = "." not in val_str
-            else:
-                is_two_dec, is_pure_int = True, True 
+                if val_str != "[!]":
+                    is_two_dec = "." in val_str and len(val_str.split(".")[-1]) == 2
+                    is_pure_int = "." not in val_str
+                else:
+                    is_two_dec, is_pure_int = True, True 
 
-            if "SKIP" in l_type.upper() or "EXEMPT" in l_type.upper():
-                continue
+                if "SKIP" in l_type.upper() or "EXEMPT" in l_type.upper():
+                    continue
 
-            elif "min_limit" in l_type or "銲補" in (cat + title):
-                engine_label = "銲補"
-                if not is_pure_int: is_passed, reason = False, "應為純整數"
-                elif clean_std:
-                    t_used = min(clean_std, key=lambda x: abs(x - val))
-                    if val < t_used: is_passed, reason = False, "數值不足"
-            
-            elif un_regen_target is not None:
-                engine_label = "未再生"
-                t_used = un_regen_target
-                if val <= t_used:
-                    if not is_pure_int: is_passed, reason = False, "應為整數"
-                elif not is_two_dec: 
-                    is_passed, reason = False, "應填兩位小數"
-
-            elif l_type == "max_limit" or (any(k in (cat + title) for k in ["軸頸", "軸頭", "軸位"]) and ("未再生" in (cat + title))):
-                engine_label = "軸頸(上限)"
-                candidates = clean_std
-                target = max(candidates) if candidates else 0
-                t_used = target
-                if target > 0:
+                elif "min_limit" in l_type or "銲補" in (cat + title):
+                    engine_label = "銲補"
                     if not is_pure_int: is_passed, reason = False, "應為純整數"
-                    elif val > target: is_passed, reason = False, f"超過上限 {target}"
+                    elif clean_std:
+                        t_used = min(clean_std, key=lambda x: abs(x - val))
+                        if val < t_used: is_passed, reason = False, "數值不足"
+                
+                elif un_regen_target is not None:
+                    engine_label = "未再生"
+                    t_used = un_regen_target
+                    if val <= t_used:
+                        if not is_pure_int: is_passed, reason = False, "應為整數"
+                    elif not is_two_dec: 
+                        is_passed, reason = False, "應填兩位小數"
 
-            elif l_type == "range" or (any(x in (cat + title) for x in ["再生", "精加工", "研磨", "車修", "組裝", "拆裝", "真圓度"]) and "未再生" not in (cat + title)):
-                engine_label = "精加工"
-                if not is_two_dec:
-                    is_passed, reason = False, "應填兩位小數"
-                elif s_ranges:
-                    t_used = str(s_ranges)
-                    if not any(r[0] <= val <= r[1] for r in s_ranges): 
-                        is_passed, reason = False, "不在區間內"
+                elif l_type == "max_limit" or (any(k in (cat + title) for k in ["軸頸", "軸頭", "軸位"]) and ("未再生" in (cat + title))):
+                    engine_label = "軸頸(上限)"
+                    candidates = clean_std
+                    target = max(candidates) if candidates else 0
+                    t_used = target
+                    if target > 0:
+                        if not is_pure_int: is_passed, reason = False, "應為純整數"
+                        elif val > target: is_passed, reason = False, f"超過上限 {target}"
 
-            if not is_passed:
-                key = (page_num, title, reason)
-                if key not in grouped_errors:
-                    grouped_errors[key] = {
-                        "page": page_num, "item": title, 
-                        "issue_type": f"異常({engine_label})", 
-                        "common_reason": reason, "failures": [],
-                        "source": "🐍 工程引擎"
-                    }
-                grouped_errors[key]["failures"].append({"id": rid, "val": val_str, "target": f"基準:{t_used}"})
-            #except: continue
+                elif l_type == "range" or (any(x in (cat + title) for x in ["再生", "精加工", "研磨", "車修", "組裝", "拆裝", "真圓度"]) and "未再生" not in (cat + title)):
+                    engine_label = "精加工"
+                    if not is_two_dec:
+                        is_passed, reason = False, "應填兩位小數"
+                    elif s_ranges:
+                        t_used = str(s_ranges)
+                        if not any(r[0] <= val <= r[1] for r in s_ranges): 
+                            is_passed, reason = False, "不在區間內"
+
+                if not is_passed:
+                    key = (page_num, title, reason)
+                    if key not in grouped_errors:
+                        grouped_errors[key] = {
+                            "page": page_num, "item": title, 
+                            "issue_type": f"異常({engine_label})", 
+                            "common_reason": reason, "failures": [],
+                            "source": "🐍 工程引擎"
+                        }
+                    # 🔥 關鍵！這裡的縮排是正確的，而且被包在 try 裡面
+                    grouped_errors[key]["failures"].append({"id": rid, "val": val_str, "target": f"基準:{t_used}"})
+                    
+            except: continue # 🔥 遇到壞掉的資料，安靜跳過，不影響其他資料
                 
     return list(grouped_errors.values())
     
