@@ -827,7 +827,7 @@ def python_numerical_audit(dimension_data):
             
             if not val_raw or val_raw in ["N/A", "nan", "M10"]: continue
 
-            try:
+            #try:
                 is_passed, reason, t_used, engine_label = True, "", "N/A", "未知"
 
                 if "[!]" in val_raw:
@@ -892,7 +892,7 @@ def python_numerical_audit(dimension_data):
                             "source": "🐍 工程引擎"
                         }
                     grouped_errors[key]["failures"].append({"id": rid, "val": val_str, "target": f"基準:{t_used}"})
-            except: continue
+            #except: continue
                 
     return list(grouped_errors.values())
     
