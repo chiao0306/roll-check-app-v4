@@ -348,12 +348,13 @@ def python_engineering_audit(dimension_data):
 
 def assign_category_by_python(item_title):
     """
-    Python 分類官 (v14: 精簡完美版)
+    Python 分類官 (v68: 智能去尾增強版)
     修正重點：
     1. [車修]: 視為雜訊，不參與判斷。
     2. [內孔]: 強制歸類為 range (公差區間)。
     3. [順序]: 焊補(Min) > 未再生(軸頸Max/本體Un_regen) > 再生(Range)。
     4. [精簡]: 移除純軸頸的強制分類，避免誤判。
+    5. [新增]: 引入 remove_tail_info，在比對 Excel 特規前，先切除標題末端的括號。
     """
     import pandas as pd
     from thefuzz import fuzz
@@ -362,10 +363,21 @@ def assign_category_by_python(item_title):
     # 1. 讀取全域門檻
     CURRENT_THRESHOLD = globals().get('GLOBAL_FUZZ_THRESHOLD', 90)
 
+    # 🔥 [新增] 智能去尾函式
+    def remove_tail_info(text):
+        # 只刪除位於字串「最後面」的括號內容 (包含半形/全形)
+        return re.sub(r"[\(（].*?[\)）]\s*$", "", str(text)).strip()
+
     def clean_text(text):
         return str(text).replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
 
-    title_clean = clean_text(item_title)
+    # 🔥 [關鍵修改] 先做去尾手術，再做清理
+    title_no_tail = remove_tail_info(item_title)
+    
+    # 用「去尾後」的乾淨字串來做比對鍵值 (給 Phase 2 用)
+    title_clean = clean_text(title_no_tail)
+    
+    # 原始大寫檢查用 (給 Phase 1 & 3 關鍵字補底用，保留全貌以免誤刪關鍵字)
     t_upper = str(item_title).upper().replace(" ", "").replace("\n", "").replace('"', "")
 
     # ==========================================
@@ -393,6 +405,7 @@ def assign_category_by_python(item_title):
             clean_rule_name = clean_text(iname)
             
             # 🔥 全域反向鎖 (Token Sort Ratio)
+            # 因為 title_clean 已經去掉了 (2PC)，這裡的分數會更準確
             score = fuzz.token_sort_ratio(clean_rule_name, title_clean)
             
             if score > CURRENT_THRESHOLD: 
@@ -442,29 +455,6 @@ def assign_category_by_python(item_title):
     # (原本這裡有一個 "5. 純軸頸 -> max_limit" 的防線，已經移除了)
 
     return "unknown"
-
-def consolidate_issues(issues):
-    """
-    🗂️ 異常合併器：將「項目」、「錯誤類型」、「原因」完全相同的異常合併成一張卡片
-    """
-    grouped = {}
-    for i in issues:
-        key = (i.get('item', ''), i.get('issue_type', ''), i.get('common_reason', ''))
-        if key not in grouped:
-            grouped[key] = i.copy()
-            grouped[key]['pages_set'] = {str(i.get('page', '?'))}
-            grouped[key]['failures'] = i.get('failures', []).copy()
-        else:
-            grouped[key]['pages_set'].add(str(i.get('page', '?')))
-            grouped[key]['failures'].extend(i.get('failures', []))
-            
-    result = []
-    for key, val in grouped.items():
-        sorted_pages = sorted(list(val['pages_set']), key=lambda x: int(x) if x.isdigit() else 999)
-        val['page'] = ", ".join(sorted_pages)
-        del val['pages_set']
-        result.append(val)
-    return result
 
 # --- 5. 總稽核 Agent (雙核心引擎版：Gemini + OpenAI) ---
 def agent_unified_check(combined_input, full_text_for_search, api_key, model_name):
