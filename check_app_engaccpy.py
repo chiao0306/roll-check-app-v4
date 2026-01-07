@@ -1883,6 +1883,100 @@ if st.session_state.photo_gallery:
             # 真的有需要修正的紅字異常
             st.error(f"發現 {len(real_errors)} 類異常")
 
+        # ========================================================
+        # ✅ [新增功能]：Python 判定合格/異常總覽清單
+        # ========================================================
+        with st.expander("🧐 檢視 Python 全項目判定 (合格/異常清單)", expanded=False):
+            
+            # 1. 準備比對用的黑名單 (用來判斷誰是紅燈)
+            # 格式：(頁碼字串, 項目名稱)
+            failed_set = set()
+            for issue in visible_issues: # 使用已經濾掉 HIDDEN_DATA 的清單
+                p_str = str(issue.get('page', '?')).strip()
+                i_str = str(item.get('item', '')).strip()
+                # 針對總表異常，issue 的 page 通常是 "總表" 或來源頁碼
+                failed_set.add((p_str, issue.get('item', '')))
+
+            # 建立分頁
+            tab_sum, tab_det = st.tabs(["📊 總表項目 (Summary)", "📝 明細項目 (Detail)"])
+
+            # --- Tab 1: 總表檢查 ---
+            with tab_sum:
+                raw_sum = cache.get("summary_rows", [])
+                if raw_sum:
+                    sum_data = []
+                    for row in raw_sum:
+                        # 判斷狀態
+                        r_title = row.get('title', '')
+                        # 寬鬆比對：只要異常清單裡有這個標題，就當作它異常
+                        is_failed = any(issue['item'] == r_title for issue in visible_issues if "總表" in issue['issue_type'])
+                        
+                        status = "🔴 異常" if is_failed else "🟢 合格"
+                        
+                        sum_data.append({
+                            "狀態": status,
+                            "頁碼": row.get('page', '?'),
+                            "項目名稱": r_title,
+                            "申請數量": row.get('apply_qty', 0),
+                            "實交數量": row.get('delivery_qty', row.get('target', 0))
+                        })
+                    
+                    st.dataframe(
+                        pd.DataFrame(sum_data), 
+                        use_container_width=True, 
+                        hide_index=True,
+                        column_config={
+                            "狀態": st.column_config.TextColumn("判定", help="Python 總表稽核結果"),
+                        }
+                    )
+                else:
+                    st.info("本次無總表數據。")
+
+            # --- Tab 2: 明細檢查 ---
+            with tab_det:
+                raw_det = cache.get("ai_extracted_data", [])
+                if raw_det:
+                    det_data = []
+                    for row in raw_det:
+                        r_page = str(row.get('page', '?')).strip()
+                        r_title = row.get('item_title', '').strip()
+                        r_cat = row.get('category', 'unknown')
+                        
+                        # 判斷狀態：比對頁碼與名稱
+                        # 這裡做一個簡單的 lookup
+                        is_failed = False
+                        for issue in visible_issues:
+                            # 如果頁碼跟名稱都對上，就是這筆
+                            if str(issue.get('page','')) == r_page and issue.get('item','') == r_title:
+                                is_failed = True
+                                break
+                        
+                        status = "🔴 異常" if is_failed else "🟢 合格"
+                        
+                        det_data.append({
+                            "狀態": status,
+                            "頁碼": r_page,
+                            "項目名稱": r_title,
+                            "分類判定": r_cat,
+                            "目標數量": row.get('item_pc_target', 0),
+                            "規格摘要": (row.get('std_spec', '')[:20] + '...') if row.get('std_spec') else ''
+                        })
+                    
+                    df_det = pd.DataFrame(det_data)
+                    
+                    # 讓使用者可以篩選只看合格或異常
+                    st.dataframe(
+                        df_det, 
+                        use_container_width=True, 
+                        hide_index=True,
+                        column_config={
+                            "狀態": st.column_config.TextColumn("判定", help="Python 數值/規則稽核結果"),
+                            "分類判定": st.column_config.TextColumn("Python分類", help="自動歸類的檢查邏輯"),
+                        }
+                    )
+                else:
+                    st.info("本次無明細數據。")
+                    
         # 5. 卡片循環顯示 (使用過濾後的 visible_issues)
         for item in visible_issues:
             # 這裡因為 visible_issues 已經濾掉 HIDDEN_DATA 了，所以不需要再寫 if continue
