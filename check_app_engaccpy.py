@@ -1990,26 +1990,26 @@ if st.session_state.photo_gallery:
                 else:
                     st.info("本次無總表數據。")
 
-             # --- Tab 2: 明細檢查 (v3: 模糊寬容版) ---
+            # --- Tab 2: 明細檢查 (v4: 全域通緝版) ---
             with tab_det:
                 raw_det = cache.get("ai_extracted_data", [])
                 
-                # if 和 else 必須對齊
                 if raw_det:
-                    from thefuzz import fuzz # 引入模糊比對套件
+                    from thefuzz import fuzz
 
                     det_data = []
                     
-                    # 🔥 [新增] 翻譯蒟蒻：標準化 Key 生成函式
+                    # 標準化函式
                     def get_norm_key(page, title):
                         p_str = str(page).upper().replace("P.", "").replace(" ", "").strip()
                         t_str = str(title).upper().replace(" ", "").replace("\n", "").strip()
                         return p_str, t_str
 
-                    # 1. 建立異常註冊表 (改用 List 儲存，支援模糊搜尋)
+                    # 定義什麼是「總表頁」的代號
+                    SUMMARY_PAGES = ["總表", "SUMMARY", "TOTAL", "0", "ALL", "彙總"]
+
+                    # 1. 建立異常註冊表
                     issue_registry = []
-                    
-                    # 確保 visible_issues 來源
                     current_issues = locals().get('visible_issues', [])
                     
                     for issue in current_issues:
@@ -2025,40 +2025,48 @@ if st.session_state.photo_gallery:
                             flags["會計"] = True
                         else:
                             flags["工程"] = True
-                            
-                        issue_registry.append({"p": ip, "t": it, "flags": flags})
+                        
+                        # 標記這是否為一個「總表級」的異常
+                        is_global_issue = (ip in SUMMARY_PAGES)
+                        
+                        issue_registry.append({
+                            "p": ip, 
+                            "t": it, 
+                            "flags": flags, 
+                            "is_global": is_global_issue
+                        })
 
-                    # 2. 遍歷所有明細項目產生報表
+                    # 2. 遍歷所有明細項目
                     for row in raw_det:
                         rp, rt = get_norm_key(row.get('page', '?'), row.get('item_title', ''))
                         
-                        # 預設無異常
+                        # 標記這行是否看起來像總表標題 (如果頁碼是總表，或是標題包含特定字眼)
+                        # 這裡放寬一點，如果頁碼是數字但標題很像總表，也算
+                        row_is_summary_page = (rp in SUMMARY_PAGES)
+                        
                         current_status = {"會計": False, "工程": False, "流程": False}
                         
-                        # 🔥 [核心邏輯] 模糊搜尋匹配
                         for iss in issue_registry:
-                            # A. 頁碼檢查 (寬容模式: 總表=0=1)
-                            # 如果兩邊都是 "總表" 類關鍵字，視為匹配
-                            is_summary_page = (rp in ["總表", "0", "1", "SUMMARY"]) and (iss['p'] in ["總表", "0", "1", "SUMMARY"])
-                            page_match = (rp == iss['p']) or is_summary_page
+                            # 🔥 [核心修改] 匹配邏輯
+                            # 情況 A: 頁碼完全一樣 (P.3 對 P.3)
+                            match_page = (rp == iss['p'])
                             
-                            if page_match:
-                                # B. 標題檢查 (先看完全一樣，不一樣再看長得像不像)
-                                is_title_match = False
-                                if rp == "總表": 
-                                    # 總表項目通常字比較少，用 90 分模糊比對比較保險
-                                    if fuzz.ratio(rt, iss['t']) > 90: is_title_match = True
-                                else:
-                                    # 一般頁面維持精準 (或極高分) 以免誤判
-                                    if rt == iss['t'] or fuzz.ratio(rt, iss['t']) > 95: is_title_match = True
+                            # 情況 B: 跨頁通緝 (其中一方是總表級，就忽略頁碼差異)
+                            # 例如: Issue說"總表"有錯，Row在"P.3" -> 允許匹配
+                            cross_page_match = (iss['is_global'] or row_is_summary_page)
+                            
+                            if match_page or cross_page_match:
+                                # 標題比對
+                                # 如果是跨頁匹配，要求標題相似度高一點 (避免誤殺)
+                                # 如果是同頁匹配，標準稍微寬鬆
+                                threshold = 90 if cross_page_match else 85
                                 
-                                if is_title_match:
-                                    # 命中！合併燈號狀態
+                                if fuzz.ratio(rt, iss['t']) > threshold:
                                     if iss['flags']['會計']: current_status['會計'] = True
                                     if iss['flags']['工程']: current_status['工程'] = True
                                     if iss['flags']['流程']: current_status['流程'] = True
 
-                        # 轉換成燈號
+                        # 燈號轉換
                         light_eng = "🔴" if current_status["工程"] else "🟢"
                         light_acc = "🔴" if current_status["會計"] else "🟢"
                         light_proc = "🔴" if current_status["流程"] else "🟢"
@@ -2076,7 +2084,6 @@ if st.session_state.photo_gallery:
                     
                     df_det = pd.DataFrame(det_data)
                     
-                    # 3. 顯示表格
                     st.dataframe(
                         df_det, 
                         use_container_width=True, 
