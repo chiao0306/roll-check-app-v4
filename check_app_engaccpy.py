@@ -369,7 +369,8 @@ def assign_category_by_python(item_title):
         return re.sub(r"[\(（].*?[\)）]\s*$", "", str(text)).strip()
 
     def clean_text(text):
-        return str(text).replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
+        # 原本邏輯 + 全形轉半形
+        return str(text).replace("（", "(").replace("）", ")").replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
 
     # 🔥 [關鍵修改] 先做去尾手術，再做清理
     title_no_tail = remove_tail_info(item_title)
@@ -677,10 +678,11 @@ def python_numerical_audit(dimension_data):
         # 🔥 3. 執行特規配對 (整合智能去尾)
         # =========================================================
         
-        # 準備匹配用的乾淨標題 (去尾 + 去空白)
+        # 準備匹配用的乾淨標題 (去尾 + 括號統一 + 去空白)
         title_no_tail = remove_tail_info(raw_title)
-        title_clean_for_rule = title_no_tail.replace(" ", "").replace('"', "").strip()
-        
+        # 在這裡加入 replace("（", "(").replace("）", ")")
+        title_clean_for_rule = title_no_tail.replace("（", "(").replace("）", ")").replace(" ", "").replace('"', "").strip()
+
         # 原本的 title_clean (保留給完全匹配用，怕 Excel 裡真的有人寫括號)
         title_clean_full = title.strip()
         
@@ -919,7 +921,8 @@ def python_accounting_audit(dimension_data, res_main):
         return re.sub(r"[\(（].*?[\)）]\s*$", "", str(text)).strip()
 
     def clean_text(text):
-        return str(text).replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
+        # 原本邏輯 + 全形轉半形
+        return str(text).replace("（", "(").replace("）", ")").replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
 
     def safe_float(value):
         if value is None or str(value).upper() == 'NULL': return 0.0
@@ -1304,9 +1307,9 @@ def python_process_audit(dimension_data):
     def remove_tail_info(text):
         return re.sub(r"[\(（].*?[\)）]\s*$", "", str(text)).strip()
 
-    # 🔥 [關鍵修改] 源頭強制轉大寫 (Upper)
     def clean_text(text):
-        return str(text).upper().replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
+        # 原本邏輯(含upper) + 全形轉半形
+        return str(text).upper().replace("（", "(").replace("）", ")").replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
 
     # 2. 載入規則 (Key 與 Value 都會被轉大寫)
     rules_map = {}
