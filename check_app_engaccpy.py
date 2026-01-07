@@ -1990,25 +1990,29 @@ if st.session_state.photo_gallery:
                 else:
                     st.info("本次無總表數據。")
 
-                        # --- Tab 2: 明細檢查 (三燈號版) ---
+            # --- Tab 2: 明細檢查 (三燈號精準比對版) ---
             with tab_det:
                 raw_det = cache.get("ai_extracted_data", [])
                 if raw_det:
                     det_data = []
                     
+                    # 🔥 [新增] 翻譯蒟蒻：標準化 Key 生成函式
+                    # 目的：讓 "P.3" == "3", "W3 ROLL" == "W3ROLL"
+                    def get_norm_key(page, title):
+                        p_str = str(page).upper().replace("P.", "").replace(" ", "").strip()
+                        t_str = str(title).upper().replace(" ", "").replace("\n", "").strip()
+                        return (p_str, t_str)
+
                     # 1. 建立錯誤索引 (Mapping)
-                    # 格式: Key=(頁碼, 標題) -> Value={'Acc': False, 'Eng': False, 'Proc': False}
                     error_map = {}
                     
                     for issue in visible_issues:
-                        p = str(issue.get('page', '?')).strip()
-                        t = str(issue.get('item', '')).strip()
-                        k = (p, t)
+                        # 使用標準化 Key
+                        k = get_norm_key(issue.get('page', '?'), issue.get('item', ''))
                         
                         if k not in error_map: 
                             error_map[k] = {"會計": False, "工程": False, "流程": False}
                         
-                        # 判定是哪個引擎報錯
                         src = str(issue.get('source', ''))
                         itype = str(issue.get('issue_type', ''))
                         
@@ -2017,19 +2021,15 @@ if st.session_state.photo_gallery:
                         elif "會計" in src or "數量" in itype or "統計" in itype or "總表" in itype:
                             error_map[k]["會計"] = True
                         else:
-                            # 剩下的通常是規格不符、分類錯誤等，歸類為工程
                             error_map[k]["工程"] = True
 
                     # 2. 遍歷所有明細項目產生報表
                     for row in raw_det:
-                        r_page = str(row.get('page', '?')).strip()
-                        r_title = row.get('item_title', '').strip()
-                        r_cat = row.get('category', 'unknown')
+                        # 原始資料也要標準化，才能對得上
+                        k = get_norm_key(row.get('page', '?'), row.get('item_title', ''))
                         
-                        key = (r_page, r_title)
-                        
-                        # 取得該項目的錯誤狀態 (預設都沒錯)
-                        err_status = error_map.get(key, {"會計": False, "工程": False, "流程": False})
+                        # 取得該項目的錯誤狀態
+                        err_status = error_map.get(k, {"會計": False, "工程": False, "流程": False})
                         
                         # 轉換成燈號
                         light_eng = "🔴" if err_status["工程"] else "🟢"
@@ -2040,14 +2040,29 @@ if st.session_state.photo_gallery:
                             "工程": light_eng,
                             "會計": light_acc,
                             "流程": light_proc,
-                            "頁碼": r_page,
-                            "項目名稱": r_title,
-                            "分類判定": r_cat,
+                            "頁碼": row.get('page', '?'),
+                            "項目名稱": row.get('item_title', ''),
+                            "分類判定": row.get('category', ''),
                             "目標": row.get('item_pc_target', 0),
                             "規格": (str(row.get('std_spec', ''))[:15] + '...') if row.get('std_spec') else ''
                         })
                     
                     df_det = pd.DataFrame(det_data)
+                    
+                    # 3. 顯示表格
+                    st.dataframe(
+                        df_det, 
+                        use_container_width=True, 
+                        hide_index=True,
+                        column_config={
+                            "工程": st.column_config.TextColumn("工程", width="small", help="規格/分類檢查"),
+                            "會計": st.column_config.TextColumn("會計", width="small", help="數量/總表檢查"),
+                            "流程": st.column_config.TextColumn("流程", width="small", help="工序/溯源檢查"),
+                            "分類判定": st.column_config.TextColumn("Python分類"),
+                        }
+                    )
+                else:
+                    st.info("本次無明細數據。")
                     
                     # 3. 顯示表格 (設定欄位寬度與說明)
                     st.dataframe(
