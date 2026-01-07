@@ -1063,16 +1063,32 @@ def python_accounting_audit(dimension_data, res_main):
 
                 is_dis = fuzz.partial_ratio("ROLL拆裝", s_upper_check) > 80
                 is_mac = fuzz.partial_ratio("ROLL車修", s_upper_check) > 80
-                is_weld = (fuzz.partial_ratio("ROLL銲補", s_upper_check) > 80) or \
-                          ("焊" in s_upper_check) or \
-                          ("鉀" in s_upper_check)
+                # =========================================================
+                # 🛡️ v56 安全鎖：只有真正的 ROLL 銲補才能進 B 模式
+                # =========================================================
                 
+                # 1. 檢查是否有 ROLL 關鍵字 (中英文)
+                has_roll_kw = ("ROLL" in s_upper_check) or \
+                              ("ROLLER" in s_upper_check) or \
+                              ("輥" in s_upper_check) or \
+                              ("輪" in s_upper_check)
+
+                # 2. 檢查是否有 銲補 關鍵字
+                has_weld_kw = ("焊" in s_upper_check) or \
+                              ("鉀" in s_upper_check) or \
+                              ("銲" in s_upper_check)
+                
+                # 3. 判定邏輯：
+                #    A. 長得很像 "ROLL銲補" (模糊比對 > 85)
+                #    B. 或者：同時擁有 "ROLL類詞彙" AND "銲補類詞彙" (黃金交叉)
+                is_weld = (fuzz.partial_ratio("ROLL銲補", s_upper_check) > 85) or \
+                          (has_roll_kw and has_weld_kw)
+
                 has_part_body = "本體" in title_clean
                 has_part_journal = any(k in title_clean for k in journal_family)
                 
                 # 白名單還原: 只保留嚴格動作
                 has_act_mac = any(k in title_clean for k in ["再生", "精車", "未再生", "粗車"])
-                
                 has_act_weld = ("銲補" in title_clean or "焊" in title_clean or "鉀" in title_clean)
                 is_assy = ("組裝" in title_clean or "拆裝" in title_clean)
                 
