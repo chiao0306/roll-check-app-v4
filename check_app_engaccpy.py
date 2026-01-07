@@ -828,70 +828,70 @@ def python_numerical_audit(dimension_data):
             if not val_raw or val_raw in ["N/A", "nan", "M10"]: continue
 
             #try:
-                is_passed, reason, t_used, engine_label = True, "", "N/A", "未知"
+            is_passed, reason, t_used, engine_label = True, "", "N/A", "未知"
 
-                if "[!]" in val_raw:
-                    is_passed = False
-                    reason = "🛑數據損壞(壞軌)"
-                    val_str = "[!]"
-                    val = -999.0 
-                else:
-                    v_m = re.findall(r"\d+\.?\d*", val_raw)
-                    val_str = v_m[0] if v_m else val_raw
-                    val = float(val_str)
+            if "[!]" in val_raw:
+                is_passed = False
+                reason = "🛑數據損壞(壞軌)"
+                val_str = "[!]"
+                val = -999.0 
+            else:
+                v_m = re.findall(r"\d+\.?\d*", val_raw)
+                val_str = v_m[0] if v_m else val_raw
+                val = float(val_str)
 
-                if val_str != "[!]":
-                    is_two_dec = "." in val_str and len(val_str.split(".")[-1]) == 2
-                    is_pure_int = "." not in val_str
-                else:
-                    is_two_dec, is_pure_int = True, True 
+            if val_str != "[!]":
+                is_two_dec = "." in val_str and len(val_str.split(".")[-1]) == 2
+                is_pure_int = "." not in val_str
+            else:
+                is_two_dec, is_pure_int = True, True 
 
-                if "SKIP" in l_type.upper() or "EXEMPT" in l_type.upper():
-                    continue
+            if "SKIP" in l_type.upper() or "EXEMPT" in l_type.upper():
+                continue
 
-                elif "min_limit" in l_type or "銲補" in (cat + title):
-                    engine_label = "銲補"
+            elif "min_limit" in l_type or "銲補" in (cat + title):
+                engine_label = "銲補"
+                if not is_pure_int: is_passed, reason = False, "應為純整數"
+                elif clean_std:
+                    t_used = min(clean_std, key=lambda x: abs(x - val))
+                    if val < t_used: is_passed, reason = False, "數值不足"
+            
+            elif un_regen_target is not None:
+                engine_label = "未再生"
+                t_used = un_regen_target
+                if val <= t_used:
+                    if not is_pure_int: is_passed, reason = False, "應為整數"
+                elif not is_two_dec: 
+                    is_passed, reason = False, "應填兩位小數"
+
+            elif l_type == "max_limit" or (any(k in (cat + title) for k in ["軸頸", "軸頭", "軸位"]) and ("未再生" in (cat + title))):
+                engine_label = "軸頸(上限)"
+                candidates = clean_std
+                target = max(candidates) if candidates else 0
+                t_used = target
+                if target > 0:
                     if not is_pure_int: is_passed, reason = False, "應為純整數"
-                    elif clean_std:
-                        t_used = min(clean_std, key=lambda x: abs(x - val))
-                        if val < t_used: is_passed, reason = False, "數值不足"
-                
-                elif un_regen_target is not None:
-                    engine_label = "未再生"
-                    t_used = un_regen_target
-                    if val <= t_used:
-                        if not is_pure_int: is_passed, reason = False, "應為整數"
-                    elif not is_two_dec: 
-                        is_passed, reason = False, "應填兩位小數"
+                    elif val > target: is_passed, reason = False, f"超過上限 {target}"
 
-                elif l_type == "max_limit" or (any(k in (cat + title) for k in ["軸頸", "軸頭", "軸位"]) and ("未再生" in (cat + title))):
-                    engine_label = "軸頸(上限)"
-                    candidates = clean_std
-                    target = max(candidates) if candidates else 0
-                    t_used = target
-                    if target > 0:
-                        if not is_pure_int: is_passed, reason = False, "應為純整數"
-                        elif val > target: is_passed, reason = False, f"超過上限 {target}"
+            elif l_type == "range" or (any(x in (cat + title) for x in ["再生", "精加工", "研磨", "車修", "組裝", "拆裝", "真圓度"]) and "未再生" not in (cat + title)):
+                engine_label = "精加工"
+                if not is_two_dec:
+                    is_passed, reason = False, "應填兩位小數"
+                elif s_ranges:
+                    t_used = str(s_ranges)
+                    if not any(r[0] <= val <= r[1] for r in s_ranges): 
+                        is_passed, reason = False, "不在區間內"
 
-                elif l_type == "range" or (any(x in (cat + title) for x in ["再生", "精加工", "研磨", "車修", "組裝", "拆裝", "真圓度"]) and "未再生" not in (cat + title)):
-                    engine_label = "精加工"
-                    if not is_two_dec:
-                        is_passed, reason = False, "應填兩位小數"
-                    elif s_ranges:
-                        t_used = str(s_ranges)
-                        if not any(r[0] <= val <= r[1] for r in s_ranges): 
-                            is_passed, reason = False, "不在區間內"
-
-                if not is_passed:
-                    key = (page_num, title, reason)
-                    if key not in grouped_errors:
-                        grouped_errors[key] = {
-                            "page": page_num, "item": title, 
-                            "issue_type": f"異常({engine_label})", 
-                            "common_reason": reason, "failures": [],
-                            "source": "🐍 工程引擎"
-                        }
-                    grouped_errors[key]["failures"].append({"id": rid, "val": val_str, "target": f"基準:{t_used}"})
+            if not is_passed:
+                key = (page_num, title, reason)
+                if key not in grouped_errors:
+                    grouped_errors[key] = {
+                        "page": page_num, "item": title, 
+                        "issue_type": f"異常({engine_label})", 
+                        "common_reason": reason, "failures": [],
+                        "source": "🐍 工程引擎"
+                    }
+                grouped_errors[key]["failures"].append({"id": rid, "val": val_str, "target": f"基準:{t_used}"})
             #except: continue
                 
     return list(grouped_errors.values())
