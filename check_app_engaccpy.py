@@ -1052,10 +1052,19 @@ def python_accounting_audit(dimension_data, res_main):
                     continue
 
                 # =========================================================
-                # 🧺 步驟 1: 籃子撈人 (v60: 緊密連詞鎖定版)
+                # 🧺 步驟 1: 籃子撈人 (v65: A模式嚴格化)
                 # =========================================================
-                # 基本模糊比對 (Mode A)
-                match_A = (fuzz.partial_ratio(s_clean, title_clean) > 85) # 建議設為 90
+                
+                # 推薦使用 token_sort_ratio
+                # 特性：無視順序 (W3 ROLL == ROLL W3)，但嚴格要求字數長度相當
+                # 門檻建議：因為您說廠商會寫一樣，建議設高一點 (90~95)
+                
+                score_A = fuzz.token_sort_ratio(s_clean, title_clean)
+                match_A = (score_A >= 90) 
+
+                # 如果您擔心括號 (7PC) 這種小雜訊會拉低分數，可以用 90 分當門檻
+                # 如果要超級嚴格，可以設 95
+
                 match_B = False
                 b_debug_msg = ""
                 
