@@ -1055,7 +1055,7 @@ def python_accounting_audit(dimension_data, res_main):
                 # 🧺 步驟 1: 籃子撈人 (v60: 緊密連詞鎖定版)
                 # =========================================================
                 # 基本模糊比對 (Mode A)
-                match_A = (fuzz.partial_ratio(s_clean, title_clean) > 95) # 建議設為 90
+                match_A = (fuzz.partial_ratio(s_clean, title_clean) > 90) # 建議設為 90
                 match_B = False
                 b_debug_msg = ""
                 
