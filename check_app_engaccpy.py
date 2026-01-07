@@ -1192,25 +1192,26 @@ def python_accounting_audit(dimension_data, res_main):
 
 def python_process_audit(dimension_data):
     """
-    Python 流程引擎 (v24: 全域統一特規版)
+    Python 流程引擎 (v25: 全域大寫強制版)
     升級內容：
-    1. [統一配對]: 引入與會計/工程同級的配對邏輯 (GLOBAL_FUZZ_THRESHOLD + fuzz.ratio)。
-       - 徹底解決 "規則劫持" 導致的錯誤工序判定。
-    2. [規則優先]: 若 Excel 特規配對成功且設定為 SKIP/EXEMPT，直接跳過檢查。
-    3. [既有功能]: 保留熱處理/動平衡關鍵字排除、工序溯源、尺寸邏輯。
+    1. [強制大寫]: clean_text 加入 .upper()，確保所有標題、規則、ID 比對皆忽略大小寫。
+       - 解決 "31x83" vs "31X83" 視為不同編號的問題。
+       - 解決 規則寫 "roll" 但標題寫 "ROLL" 導致匹配失敗的問題。
+    2. [核心邏輯]: 繼承 v24 的全域統一配對與規則優先邏輯。
     """
     process_issues = []
     import re
     import pandas as pd
     from thefuzz import fuzz
 
-    # 🔥 1. 讀取全域門檻 (與會計/工程同步)
+    # 🔥 1. 讀取全域門檻
     CURRENT_THRESHOLD = globals().get('GLOBAL_FUZZ_THRESHOLD', 95)
 
+    # 🔥 [關鍵修改] 源頭強制轉大寫 (Upper)
     def clean_text(text):
-        return str(text).replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
+        return str(text).upper().replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
 
-    # 2. 載入規則
+    # 2. 載入規則 (Key 與 Value 都會被轉大寫)
     rules_map = {}
     try:
         df = pd.read_excel("rules.xlsx")
@@ -1218,9 +1219,11 @@ def python_process_audit(dimension_data):
         for _, row in df.iterrows():
             iname = str(row.get('Item_Name', '')).strip()
             p_rule = str(row.get('Process_Rule', '')).strip()
-            # 流程引擎主要看 Process_Rule
+            
+            # 排除空值與 nan
             if iname and p_rule and p_rule.lower() != 'nan':
-                rules_map[clean_text(iname)] = p_rule
+                # Key 經過 clean_text 變大寫，Value 也轉大寫
+                rules_map[clean_text(iname)] = p_rule.upper()
     except: pass
 
     STAGE_MAP = { 1: "未再生/粗車", 2: "銲補/焊補", 3: "再生/精車", 4: "研磨" }
@@ -1231,12 +1234,13 @@ def python_process_audit(dimension_data):
     for item in dimension_data:
         p_num = item.get("page", "?")
         title = str(item.get("item_title", "")).strip()
+        
+        # 這裡出來的 title_clean 已經是全大寫了
         title_clean = clean_text(title)
         ds = str(item.get("ds", ""))
         
-        # ⚡️ [既有豁免] 動平衡、熱處理直接跳過流程檢查 (關鍵字優先)
-        t_upper = title_clean.upper()
-        if any(k in t_upper for k in ["動平衡", "BALANCING", "熱處理", "HEAT"]):
+        # ⚡️ [既有豁免] 動平衡、熱處理直接跳過 (關鍵字已是大寫，比對安全)
+        if any(k in title_clean for k in ["動平衡", "BALANCING", "熱處理", "HEAT"]):
             continue
 
         # =========================================================
@@ -1244,7 +1248,7 @@ def python_process_audit(dimension_data):
         # =========================================================
         forced_rule = None
         
-        # A. 完全匹配
+        # A. 完全匹配 (雙方都是大寫)
         if title_clean in rules_map:
             forced_rule = rules_map[title_clean]
         
@@ -1258,7 +1262,8 @@ def python_process_audit(dimension_data):
         if not forced_rule and rules_map:
             best_score = 0
             for k, v in rules_map.items():
-                sc = fuzz.token_sort_ratio(k, title_clean) # 嚴格比對 (原為 partial_ratio)
+                # token_sort_ratio 對大小寫不敏感，但我們已經全轉大寫了，更保險
+                sc = fuzz.token_sort_ratio(k, title_clean) 
                 if sc > CURRENT_THRESHOLD and sc > best_score:
                     best_score = sc
                     forced_rule = v
@@ -1269,8 +1274,8 @@ def python_process_audit(dimension_data):
         
         # 如果配對到規則，解析規則內容
         if forced_rule:
-            fr = forced_rule.upper()
-            # ⚡️ [規則豁免] 如果規則說 SKIP，跳過
+            fr = forced_rule # 已經是大寫了
+            # ⚡️ [規則豁免]
             if "豁免" in fr or "EXEMPT" in fr or "SKIP" in fr: 
                 continue 
             
@@ -1283,25 +1288,29 @@ def python_process_audit(dimension_data):
             elif "研磨" in fr: stage = 4
 
         # 如果規則沒指定(或沒配到)，使用預設關鍵字判斷
+        # 這裡 title_clean 是大寫，所以關鍵字要確保大寫或中文
         if stage == 0:
-            if "研磨" in title: stage = 4
-            elif any(k in title for k in ["銲補", "銲接", "焊", "鉀"]): stage = 2
-            elif "未再生" in title or "粗車" in title: stage = 1
-            elif "再生" in title or "精車" in title: stage = 3
+            if "研磨" in title_clean: stage = 4
+            elif any(k in title_clean for k in ["銲補", "銲接", "焊", "鉀"]): stage = 2
+            elif "未再生" in title_clean or "粗車" in title_clean: stage = 1
+            elif "再生" in title_clean or "精車" in title_clean: stage = 3
 
         if track == "Unknown":
-            if "本體" in title: track = "本體"
-            elif any(k in title for k in ["軸頸", "軸頭", "軸位", "內孔", "JOURNAL"]): track = "軸頸"
+            if "本體" in title_clean: track = "本體"
+            elif any(k in title_clean for k in ["軸頸", "軸頭", "軸位", "內孔", "JOURNAL"]): track = "軸頸"
         
         if track == "Unknown" or stage == 0: continue 
 
-        # --- 以下為數值收集邏輯 (保持不變) ---
+        # --- 以下為數值收集邏輯 ---
         segments = ds.split("|")
         for seg in segments:
             parts = seg.split(":")
             if len(parts) < 2: continue
+            
+            # 🔥 [重點防呆] 這裡再次強制轉大寫，確保 ID 一致性
             rid = parts[0].strip().upper()
             val_str = parts[1].strip()
+            
             nums = re.findall(r"\d+\.?\d*", val_str)
             if not nums: continue
             val = float(nums[0])
@@ -1312,7 +1321,7 @@ def python_process_audit(dimension_data):
                 "val": val, "page": p_num, "title": title
             }
 
-    # --- 以下為檢查邏輯 (缺漏工序 + 尺寸倒置) 保持不變 ---
+    # --- 以下為檢查邏輯 (保持不變) ---
     for (rid, track), stages_data in history.items():
         present_stages = sorted(stages_data.keys())
         if not present_stages: continue
