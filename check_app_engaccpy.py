@@ -1858,31 +1858,35 @@ if st.session_state.photo_gallery:
             st.markdown("**3. 全卷詳細抄錄數據 (JSON)**")
             st.json(cache.get("ai_extracted_data", []), expanded=True)
 
-        # ========================================================
-        # ⚡️ [修正重點]：現在 all_issues 已經定義了，這裡就不會報錯了
+                # ========================================================
+        # ⚡️ [最終統計與顯示區塊]：徹底排除隱藏資料對數量的影響
         # ========================================================
         
-        # 1. 執行合併
+        # 1. 執行合併 (將所有引擎的結果匯整)
         consolidated_list = consolidate_issues(all_issues)
 
-        # 2. 過濾出「真正的錯誤」
-        real_errors_consolidated = [i for i in consolidated_list if "未匹配" not in i.get('issue_type', '')]
+        # 2. 🔥 [核心修正] 建立「可見異常清單」：排除 HIDDEN_DATA
+        # 這樣之後的數量統計 (len) 才會是正確的
+        visible_issues = [i for i in consolidated_list if i.get('issue_type') != 'HIDDEN_DATA']
 
-        # 3. 顯示結論
-        if not all_issues:
+        # 3. 過濾出「真正的錯誤」(排除僅是提示性的 "未匹配")
+        real_errors = [i for i in visible_issues if "未匹配" not in i.get('issue_type', '')]
+
+        # 4. 顯示結論 (改用 visible_issues 與 real_errors 判斷)
+        if not visible_issues:
+            # 如果扣除隱藏資料後沒東西，就是真的全數合格
             st.balloons()
             st.success("✅ 全數合格！")
-        elif not real_errors_consolidated:
-            st.success(f"✅ 數值合格！ (但有 {len(consolidated_list)} 類項目未匹配規則)")
+        elif not real_errors:
+            # 有顯示項目，但都不是嚴重紅字異常
+            st.success(f"✅ 數值合格！ (但有 {len(visible_issues)} 類項目未匹配規則)")
         else:
-            st.error(f"發現 {len(real_errors_consolidated)} 類異常")
+            # 真的有需要修正的紅字異常
+            st.error(f"發現 {len(real_errors)} 類異常")
 
-        # 4. 卡片循環顯示 (v39: 數值精修版)
-        for item in consolidated_list:
-            #  [就在這裡！插入這兩行] 
-            if item.get('issue_type') == 'HIDDEN_DATA':
-                continue
-                
+        # 5. 卡片循環顯示 (使用過濾後的 visible_issues)
+        for item in visible_issues:
+            # 這裡因為 visible_issues 已經濾掉 HIDDEN_DATA 了，所以不需要再寫 if continue
             with st.container(border=True):
                 c1, c2 = st.columns([3, 1])
                 source_label = item.get('source', '')
@@ -1890,10 +1894,7 @@ if st.session_state.photo_gallery:
                 
                 # 頁碼處理
                 page_str = item.get('page', '?')
-                if "," in str(page_str):
-                    page_display = f"Pages: {page_str}"
-                else:
-                    page_display = f"P.{page_str}"
+                page_display = f"Pages: {page_str}" if "," in str(page_str) else f"P.{page_str}"
 
                 c1.markdown(f"**{page_display} | {item.get('item')}** `{source_label}`")
                 
@@ -1907,52 +1908,29 @@ if st.session_state.photo_gallery:
                 
                 failures = item.get('failures', [])
                 if failures:
-                    # 1. 轉成 DataFrame
                     df = pd.DataFrame(failures)
-                    
-                    # 2. 欄位中文化
-                    rename_map = {
-                        "id": "編號",
-                        "val": "實測",
-                        "target": "目標",
-                        "calc": "狀態",
-                        "note": "備註"
-                    }
+                    rename_map = {"id": "編號", "val": "實測", "target": "目標", "calc": "狀態", "note": "備註"}
                     df.rename(columns=rename_map, inplace=True)
                     
-                    # 3. 樣式調整 (置中與靠左)
-                    styler = df.style.set_properties(**{
-                        'text-align': 'center', 
-                        'white-space': 'nowrap'
-                    })
-                    
-                    styler.set_table_styles([
-                        dict(selector='th', props=[('text-align', 'center')])
-                    ])
+                    styler = df.style.set_properties(**{'text-align': 'center', 'white-space': 'nowrap'})
+                    styler.set_table_styles([dict(selector='th', props=[('text-align', 'center')])])
 
                     # 針對文字較長的欄位靠左
-                    left_align_cols = [c for c in ["項目名稱", "編號", "Item"] if c in df.columns]
-                    if left_align_cols:
-                        styler.set_properties(subset=left_align_cols, **{'text-align': 'left'})
+                    left_cols = [c for c in ["項目名稱", "編號", "Item"] if c in df.columns]
+                    if left_cols:
+                        styler.set_properties(subset=left_cols, **{'text-align': 'left'})
 
-                    # 🔥 [新增] 4. 智能數值格式化 (Smart Formatting)
-                    # 邏輯：整數顯示整數 (10)，小數顯示兩位 (10.53)
+                    # 數值格式化
                     def smart_fmt(x):
                         try:
                             f = float(x)
-                            # 如果跟四捨五入後的自己差很小，就當作整數
-                            if abs(f - round(f)) < 0.000001: 
-                                return f"{int(f)}"
-                            return f"{f:.2f}"
-                        except:
-                            return str(x)
+                            return f"{int(f)}" if abs(f - round(f)) < 1e-6 else f"{f:.2f}"
+                        except: return str(x)
 
-                    # 鎖定可能出現數字的欄位
-                    target_cols = [c for c in ["實測", "目標", "數量"] if c in df.columns]
-                    if target_cols:
-                        styler.format(smart_fmt, subset=target_cols)
+                    target_num_cols = [c for c in ["實測", "目標", "數量"] if c in df.columns]
+                    if target_num_cols:
+                        styler.format(smart_fmt, subset=target_num_cols)
 
-                    # 5. 顯示表格
                     st.dataframe(styler, use_container_width=True, hide_index=True)
 
             st.divider()
