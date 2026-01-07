@@ -13,8 +13,8 @@ from thefuzz import fuzz
 from collections import Counter
 import re
 
+#全域特規配對使用
 GLOBAL_FUZZ_THRESHOLD = 80
-
 
 # --- 1. 頁面設定 ---
 st.set_page_config(page_title="交貨單稽核", page_icon="🏭", layout="centered")
