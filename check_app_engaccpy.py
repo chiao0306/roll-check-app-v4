@@ -455,6 +455,29 @@ def assign_category_by_python(item_title):
     # (原本這裡有一個 "5. 純軸頸 -> max_limit" 的防線，已經移除了)
 
     return "unknown"
+    
+def consolidate_issues(issues):
+    """
+    🗂️ 異常合併器：將「項目」、「錯誤類型」、「原因」完全相同的異常合併成一張卡片
+    """
+    grouped = {}
+    for i in issues:
+        key = (i.get('item', ''), i.get('issue_type', ''), i.get('common_reason', ''))
+        if key not in grouped:
+            grouped[key] = i.copy()
+            grouped[key]['pages_set'] = {str(i.get('page', '?'))}
+            grouped[key]['failures'] = i.get('failures', []).copy()
+        else:
+            grouped[key]['pages_set'].add(str(i.get('page', '?')))
+            grouped[key]['failures'].extend(i.get('failures', []))
+            
+    result = []
+    for key, val in grouped.items():
+        sorted_pages = sorted(list(val['pages_set']), key=lambda x: int(x) if x.isdigit() else 999)
+        val['page'] = ", ".join(sorted_pages)
+        del val['pages_set']
+        result.append(val)
+    return result
 
 # --- 5. 總稽核 Agent (雙核心引擎版：Gemini + OpenAI) ---
 def agent_unified_check(combined_input, full_text_for_search, api_key, model_name):
