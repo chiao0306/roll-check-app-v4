@@ -1052,18 +1052,32 @@ def python_accounting_audit(dimension_data, res_main):
                     continue
 
                 # =========================================================
-                # 🧺 步驟 1: 籃子撈人 (v65: A模式嚴格化)
+                # 🧺 步驟 1: 籃子撈人 (v67: 智能去尾 + 嚴格比對版)
                 # =========================================================
                 
-                # 推薦使用 token_sort_ratio
-                # 特性：無視順序 (W3 ROLL == ROLL W3)，但嚴格要求字數長度相當
-                # 門檻建議：因為您說廠商會寫一樣，建議設高一點 (90~95)
-                
-                score_A = fuzz.token_sort_ratio(s_clean, title_clean)
-                match_A = (score_A >= 90) 
+                # 1. 定義智能去尾函式 (只刪除位於字串「最後面」的括號內容)
+                import re
+                def remove_tail_info(text):
+                    # 邏輯解析：
+                    # [\(（]   : 匹配左括號 (半形或全形)
+                    # .*?      : 匹配括號內任意內容 (非貪婪模式)
+                    # [\)）]   : 匹配右括號 (半形或全形)
+                    # \s* : 允許括號後面有空白
+                    # $        : 🔥關鍵！一定要在「字串結尾」才算數
+                    return re.sub(r"[\(（].*?[\)）]\s*$", "", str(text)).strip()
 
-                # 如果您擔心括號 (7PC) 這種小雜訊會拉低分數，可以用 90 分當門檻
-                # 如果要超級嚴格，可以設 95
+                # 2. 進行手術
+                # 假設: "輥輪(特殊) 本體銲補(2PC)"
+                # 結果: "輥輪(特殊) 本體銲補"  <-- (2PC) 被殺了，(特殊) 被保留！
+                s_core = remove_tail_info(s_clean)
+                t_core = remove_tail_info(title_clean)
+                
+                # 3. 使用 token_sort_ratio (嚴格全字匹配，無視順序)
+                # 因為已經去除了數量干擾，這裡可以用高分門檻
+                score_A = fuzz.token_sort_ratio(s_core, t_core)
+                
+                # 4. 門檻設定 (建議 95，容許一點點 OCR 雜訊，但不容許字數差異)
+                match_A = (score_A >= 90)
 
                 match_B = False
                 b_debug_msg = ""
