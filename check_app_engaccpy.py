@@ -1478,8 +1478,8 @@ with st.container(border=True):
             st.session_state.source_mode = 'image'
 
         uploaded_files = st.file_uploader(
-            "請選擇 JPG/PNG 照片...", 
-            type=['jpg', 'png', 'jpeg'], 
+            "請選擇 JPG/PNG/PDF 照片...", 
+            type=['jpg', 'png', 'jpeg', 'pdf'], 
             accept_multiple_files=True, 
             key=f"uploader_{st.session_state.uploader_key}"
         )
@@ -2206,7 +2206,15 @@ if st.session_state.photo_gallery:
         for idx, item in enumerate(st.session_state.photo_gallery):
             with cols[idx % 4]:
                 if item.get('file'):
-                    st.image(item['file'], caption=f"P.{idx+1}", use_container_width=True)
+                    
+                    # 🔥 修改這段：判斷是 PDF 還是圖片
+                    if item['file'].type == "application/pdf":
+                        # 如果是 PDF，顯示一個文件圖示，不要用 st.image
+                        st.markdown(f"📄 **PDF 文件**\n\n{item['file'].name}")
+                    else:
+                        # 如果是圖片，照常顯示
+                        st.image(item['file'], caption=f"P.{idx+1}", use_container_width=True)
+                
                 if st.button("❌", key=f"del_{idx}"):
                     st.session_state.photo_gallery.pop(idx)
                     st.session_state.analysis_result_cache = None
