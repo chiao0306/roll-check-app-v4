@@ -605,12 +605,11 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
 
 def python_numerical_audit(dimension_data):
     """
-    Python 工程引擎 (v31: ±分割優先版)
+    Python 工程引擎 (v32: 智能去尾匹配版)
     升級內容：
-    1. [Phase 0 優先處理]: 遇到 "±" 時，直接採用「左右分割法」。
-       - 左邊抓「最後一個數字」做基準 (Base)，右邊抓「第一個數字」做公差 (Tol)。
-       - 徹底解決 "380mm ±0.8" 因為 mm 或 _ 導致 Regex 抓不到基準的問題。
-    2. [Phase 1 既有邏輯]: 若無 ±，才執行 v30 的 mm隔離與數值分離邏輯。
+    1. [匹配升級]: 引入 remove_tail_info，在特規配對(Fuzz)前先去除標題末端括號。
+       - 確保工程引擎能正確抓到 Excel 設定的「豁免」或「特殊公差」規則。
+    2. [邏輯保留]: Phase 0 (±分割) 與 Phase 1 (mm隔離) 邏輯完全保留。
     """
     grouped_errors = {}
     import re
@@ -621,6 +620,10 @@ def python_numerical_audit(dimension_data):
     CURRENT_THRESHOLD = globals().get('GLOBAL_FUZZ_THRESHOLD', 95)
 
     if not dimension_data: return []
+
+    # 🔥 [新增] 智能去尾函式 (放在這裡供內部呼叫)
+    def remove_tail_info(text):
+        return re.sub(r"[\(（].*?[\)）]\s*$", "", str(text)).strip()
 
     # 🔥 2. 預先載入規則
     rules_map = {}
@@ -640,32 +643,42 @@ def python_numerical_audit(dimension_data):
         if not ds: continue
         raw_entries = [p.split(":") for p in ds.split("|") if ":" in p]
         
-        title = str(item.get("item_title", "")).replace(" ", "").replace('"', "")
+        # 原始標題處理
+        raw_title = str(item.get("item_title", ""))
+        title = raw_title.replace(" ", "").replace('"', "")
         cat = str(item.get("category", "")).strip()
         page_num = item.get("page", "?")
         raw_spec = str(item.get("std_spec", "")).replace('"', "")
         
         # =========================================================
-        # 🔥 3. 執行特規配對
+        # 🔥 3. 執行特規配對 (整合智能去尾)
         # =========================================================
-        title_clean = title.strip()
+        
+        # 準備匹配用的乾淨標題 (去尾 + 去空白)
+        title_no_tail = remove_tail_info(raw_title)
+        title_clean_for_rule = title_no_tail.replace(" ", "").replace('"', "").strip()
+        
+        # 原本的 title_clean (保留給完全匹配用，怕 Excel 裡真的有人寫括號)
+        title_clean_full = title.strip()
+        
         rule_set = None
         
-        # A. 完全匹配
-        if title_clean in rules_map:
-            rule_set = rules_map[title_clean]
+        # A. 完全匹配 (優先用完整字串比，以防 Excel 規則本身就包含括號)
+        if title_clean_full in rules_map:
+            rule_set = rules_map[title_clean_full]
         
-        # B. 去括號匹配
+        # B. 去括號匹配 (去中間括號)
         if not rule_set:
-            t_no = re.sub(r"[\(（].*?[\)）]", "", title_clean)
+            t_no = re.sub(r"[\(（].*?[\)）]", "", title_clean_full)
             if t_no in rules_map:
                 rule_set = rules_map[t_no]
         
-        # C. 模糊匹配
+        # C. 模糊匹配 (🔥 這裡改用去尾後的標題來比對)
         if not rule_set and rules_map:
             best_score = 0
             for k, v in rules_map.items():
-                sc = fuzz.token_sort_ratio(k, title_clean)
+                # 使用 remove_tail_info 處理過的標題進行比對
+                sc = fuzz.token_sort_ratio(k, title_clean_for_rule)
                 if sc > CURRENT_THRESHOLD and sc > best_score:
                     best_score = sc
                     rule_set = v
@@ -680,7 +693,7 @@ def python_numerical_audit(dimension_data):
             if "SKIP" in u_local or "EXEMPT" in u_local or "豁免" in u_local:
                 continue
 
-        # --- 以下為數值提取與檢查邏輯 (v31 修正區) ---
+        # --- 以下為數值提取與檢查邏輯 (保持 v31 不變) ---
         
         mm_nums = [float(n) for n in re.findall(r"(\d+\.?\d*)\s*mm", raw_spec)]
         all_nums = [float(n) for n in re.findall(r"(\d+\.?\d*)", raw_spec)]
@@ -849,12 +862,13 @@ def python_numerical_audit(dimension_data):
     
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官 (v60: ROLL緊密連詞鎖定版)
+    Python 會計官 (v68: 智能去尾匹配版)
     修正重點：
-    1. [籃子識別]: B模式開啟條件改為「ROLL+動作」必須緊密相連 (如 "ROLL銲補")。
-       中間若有夾雜其他文字 (如 "ROLL輥輪本體銲補") 則不開啟 B 模式。
-    2. [NAN修復]: 保留 v59 的 NAN 免疫功能。
-    3. [視覺化]: 保留 Mode B 🚀 顯示。
+    1. [匹配升級]: 引入 remove_tail_info，在A模式匹配前先去除總表與明細標題的末端括號。
+    2. [嚴格核對]: A模式改用 token_sort_ratio (無視順序但全字匹配)，門檻提升至 90。
+       - 解決 (2PC) 導致分數下降的問題。
+       - 解決 W3 ROLL 誤抓 W3 ROLL(誤歸) 的問題。
+    3. [邏輯保留]: B模式 (ROLL連詞鎖定) 與 互斥鎖 (Tri-Lock) 邏輯完全保留。
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -864,6 +878,11 @@ def python_accounting_audit(dimension_data, res_main):
 
     # --- 0. 設定 ---
     CURRENT_THRESHOLD = globals().get('GLOBAL_FUZZ_THRESHOLD', 90)
+
+    # 🔥 [新增] 智能去尾函式
+    def remove_tail_info(text):
+        # 只刪除位於字串「最後面」的括號內容 (如 (2PC), (1 SET))
+        return re.sub(r"[\(（].*?[\)）]\s*$", "", str(text)).strip()
 
     def clean_text(text):
         return str(text).replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
@@ -939,22 +958,29 @@ def python_accounting_audit(dimension_data, res_main):
     for item in dimension_data:
         raw_title = item.get("item_title", "")
         title_clean = clean_text(raw_title) 
+        
+        # 準備給規則比對用的去尾標題
+        title_no_tail = remove_tail_info(raw_title)
+        title_clean_rule = clean_text(title_no_tail)
+
         page = item.get("page", "?")
         target_pc = safe_float(item.get("item_pc_target", 0)) 
         batch_qty = safe_float(item.get("batch_total_qty", 0))
         
-        # 2.1 規則匹配
+        # 2.1 規則匹配 (整合去尾邏輯)
         rule_set = None
         matched_rule_name = None
         match_type = ""
         match_score = 0
 
+        # A. 完全匹配 (優先用完整字串)
         if title_clean in rules_map:
             rule_set = rules_map[title_clean]
             matched_rule_name = title_clean
             match_type = "完全匹配"
             match_score = 100
         
+        # B. 去括號匹配
         if not rule_set:
             t_no = re.sub(r"[\(（].*?[\)）]", "", title_clean)
             if t_no in rules_map:
@@ -963,11 +989,12 @@ def python_accounting_audit(dimension_data, res_main):
                 match_type = "去括號匹配"
                 match_score = 100
 
+        # C. 模糊匹配 (🔥 改用去尾後的 title_clean_rule)
         if not rule_set and rules_map:
             best_score = 0
             best_rule = None
             for k, v in rules_map.items():
-                sc = fuzz.token_sort_ratio(k, title_clean) 
+                sc = fuzz.token_sort_ratio(k, title_clean_rule) 
                 if sc > CURRENT_THRESHOLD and sc > best_score:
                     best_score = sc
                     rule_set = v
@@ -1059,29 +1086,14 @@ def python_accounting_audit(dimension_data, res_main):
                 # 🧺 步驟 1: 籃子撈人 (v67: 智能去尾 + 嚴格比對版)
                 # =========================================================
                 
-                # 1. 定義智能去尾函式 (只刪除位於字串「最後面」的括號內容)
-                import re
-                def remove_tail_info(text):
-                    # 邏輯解析：
-                    # [\(（]   : 匹配左括號 (半形或全形)
-                    # .*?      : 匹配括號內任意內容 (非貪婪模式)
-                    # [\)）]   : 匹配右括號 (半形或全形)
-                    # \s* : 允許括號後面有空白
-                    # $        : 🔥關鍵！一定要在「字串結尾」才算數
-                    return re.sub(r"[\(（].*?[\)）]\s*$", "", str(text)).strip()
-
-                # 2. 進行手術
-                # 假設: "輥輪(特殊) 本體銲補(2PC)"
-                # 結果: "輥輪(特殊) 本體銲補"  <-- (2PC) 被殺了，(特殊) 被保留！
+                # 1. 進行去尾手術 (產生比對專用字串)
                 s_core = remove_tail_info(s_clean)
                 t_core = remove_tail_info(title_clean)
                 
-                # 3. 使用 token_sort_ratio (嚴格全字匹配，無視順序)
-                # 因為已經去除了數量干擾，這裡可以用高分門檻
+                # 2. 使用 token_sort_ratio (嚴格全字匹配)
+                # 因為 (2PC) 被拿掉了，我們可以要求高分，防止誤吸
                 score_A = fuzz.token_sort_ratio(s_core, t_core)
-                
-                # 4. 門檻設定 (建議 95，容許一點點 OCR 雜訊，但不容許字數差異)
-                match_A = (score_A >= 90)
+                match_A = (score_A >= 90) # 建議值: 90~95
 
                 match_B = False
                 b_debug_msg = ""
@@ -1239,12 +1251,11 @@ def python_accounting_audit(dimension_data, res_main):
 
 def python_process_audit(dimension_data):
     """
-    Python 流程引擎 (v25: 全域大寫強制版)
+    Python 流程引擎 (v33: 智能去尾配對版)
     升級內容：
-    1. [強制大寫]: clean_text 加入 .upper()，確保所有標題、規則、ID 比對皆忽略大小寫。
-       - 解決 "31x83" vs "31X83" 視為不同編號的問題。
-       - 解決 規則寫 "roll" 但標題寫 "ROLL" 導致匹配失敗的問題。
-    2. [核心邏輯]: 繼承 v24 的全域統一配對與規則優先邏輯。
+    1. [匹配升級]: 引入 remove_tail_info，在流程規則配對時去除標題末端括號。
+       - 確保流程引擎能正確抓到 Excel 指定的製程屬性 (track) 與工序 (stage)。
+    2. [核心邏輯]: 繼承 v25 的全域大寫強制與規則優先邏輯。
     """
     process_issues = []
     import re
@@ -1253,6 +1264,10 @@ def python_process_audit(dimension_data):
 
     # 🔥 1. 讀取全域門檻
     CURRENT_THRESHOLD = globals().get('GLOBAL_FUZZ_THRESHOLD', 95)
+
+    # 🔥 [新增] 智能去尾函式
+    def remove_tail_info(text):
+        return re.sub(r"[\(（].*?[\)）]\s*$", "", str(text)).strip()
 
     # 🔥 [關鍵修改] 源頭強制轉大寫 (Upper)
     def clean_text(text):
@@ -1284,6 +1299,14 @@ def python_process_audit(dimension_data):
         
         # 這裡出來的 title_clean 已經是全大寫了
         title_clean = clean_text(title)
+        
+        # 準備匹配用的去尾標題
+        title_no_tail = remove_tail_info(title) # 先去尾 (這裡傳入原始 title 比較保險，雖然 title_clean 是大寫去空)
+        # 修正：因為 remove_tail_info 處理的是原始字串，我們再對處理結果做 clean_text
+        # 但要注意 remove_tail_info 內部邏輯可能依賴括號，而 clean_text 尚未去除括號
+        # 最佳順序：先去尾 -> 再轉大寫去空
+        title_clean_rule = clean_text(title_no_tail)
+        
         ds = str(item.get("ds", ""))
         
         # ⚡️ [既有豁免] 動平衡、熱處理直接跳過 (關鍵字已是大寫，比對安全)
@@ -1291,26 +1314,26 @@ def python_process_audit(dimension_data):
             continue
 
         # =========================================================
-        # 🔥 3. 執行特規配對 (統一邏輯)
+        # 🔥 3. 執行特規配對 (整合智能去尾)
         # =========================================================
         forced_rule = None
         
-        # A. 完全匹配 (雙方都是大寫)
+        # A. 完全匹配 (優先用完整字串)
         if title_clean in rules_map:
             forced_rule = rules_map[title_clean]
         
-        # B. 去括號匹配
+        # B. 去括號匹配 (去中間括號)
         if not forced_rule:
             t_no = re.sub(r"[\(（].*?[\)）]", "", title_clean)
             if t_no in rules_map:
                 forced_rule = rules_map[t_no]
 
-        # C. 模糊匹配 (使用全域門檻 + 嚴格比對)
+        # C. 模糊匹配 (🔥 改用去尾後的 title_clean_rule)
         if not forced_rule and rules_map:
             best_score = 0
             for k, v in rules_map.items():
                 # token_sort_ratio 對大小寫不敏感，但我們已經全轉大寫了，更保險
-                sc = fuzz.token_sort_ratio(k, title_clean) 
+                sc = fuzz.token_sort_ratio(k, title_clean_rule) 
                 if sc > CURRENT_THRESHOLD and sc > best_score:
                     best_score = sc
                     forced_rule = v
