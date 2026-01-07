@@ -880,13 +880,13 @@ def python_numerical_audit(dimension_data):
     
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官 (v68: 智能去尾匹配版)
-    修正重點：
-    1. [匹配升級]: 引入 remove_tail_info，在A模式匹配前先去除總表與明細標題的末端括號。
-    2. [嚴格核對]: A模式改用 token_sort_ratio (無視順序但全字匹配)，門檻提升至 90。
-       - 解決 (2PC) 導致分數下降的問題。
-       - 解決 W3 ROLL 誤抓 W3 ROLL(誤歸) 的問題。
-    3. [邏輯保留]: B模式 (ROLL連詞鎖定) 與 互斥鎖 (Tri-Lock) 邏輯完全保留。
+    Python 會計官 (v71: 冷酷正宮版)
+    修正內容：
+    1. [匹配邏輯]: 強制「完全匹配優先」。
+       - 如果找到完全匹配的名稱 (即使規則欄位是空的)，直接鎖定該規則(或空規則)，
+       - 絕對禁止滑落到模糊匹配去「亂認親戚」。
+       - 這解決了 "正宮規則空白，卻誤用相似特規的單位設定" 導致的會計災難。
+    2. [基礎功能]: 保留 v70 的防暴食去尾、括號統一、車修中立化。
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -897,17 +897,15 @@ def python_accounting_audit(dimension_data, res_main):
     # --- 0. 設定 ---
     CURRENT_THRESHOLD = globals().get('GLOBAL_FUZZ_THRESHOLD', 90)
 
-    # 🔥 [修正] 智能去尾函式 (v2: 防暴食版)
+    # 智能去尾 (v2 防暴食)
     def remove_tail_info(text):
-        # 舊版 regex: r"[\(（].*?[\)）]\s*$"  <-- 會誤吃中間的字
-        # 新版 regex: r"[\(（][^\(（]*?[\)）]\s*$" 
-        # 解析: [^\(（]*? 代表「括號內容不能包含其他的左括號」
-        # 這樣就能確保只刪除「最後一組」獨立的括號，不會跨越吃掉中間的特規
         return re.sub(r"[\(（][^\(（]*?[\)）]\s*$", "", str(text)).strip()
 
+    # 強力清洗 (v36 包含符號轉半形)
     def clean_text(text):
-        # 原本邏輯 + 全形轉半形
-        return str(text).replace("（", "(").replace("）", ")").replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
+        t = str(text).replace("（", "(").replace("）", ")")
+        t = t.replace("＝", "=").replace("＋", "+").replace("－", "-") # 順便加上符號支援
+        return t.replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
 
     def safe_float(value):
         if value is None or str(value).upper() == 'NULL': return 0.0
@@ -917,12 +915,13 @@ def python_accounting_audit(dimension_data, res_main):
         except: return 0.0
 
     def parse_ratio(rule_str):
-        if not rule_str: return 1.0
+        if not rule_str or pd.isna(rule_str) or str(rule_str).strip() == "": return 1.0
         match = re.search(r"(\d+)\s*/\s*(\d+)", str(rule_str))
         if match:
             n, d = float(match.group(1)), float(match.group(2))
             if d != 0: return n / d
-        return 1.0
+        try: return float(rule_str)
+        except: return 1.0
 
     # --- 1. 載入規則 ---
     rules_map = {}
@@ -932,10 +931,23 @@ def python_accounting_audit(dimension_data, res_main):
         for _, row in df.iterrows():
             iname = str(row.get('Item_Name', '')).strip()
             if iname: 
-                rules_map[clean_text(iname)] = {
-                    "u_local": str(row.get('Unit_Rule_Local', '')).strip(),
-                    "u_fr": str(row.get('Unit_Rule_Freight', '')).strip(),
-                    "u_agg": str(row.get('Unit_Rule_Agg', '')).strip()
+                # Key 值做清洗
+                key = clean_text(iname)
+                # 🔥 [修正] 即使欄位是空值，也要把 Key 存進去，並給予空字典
+                # 這樣才能在匹配時知道「有這個人」，只是「沒規則」
+                u_loc = str(row.get('Unit_Rule_Local', ''))
+                if u_loc == 'nan': u_loc = ""
+                
+                u_fr = str(row.get('Unit_Rule_Freight', ''))
+                if u_fr == 'nan': u_fr = ""
+
+                u_agg = str(row.get('Unit_Rule_Agg', ''))
+                if u_agg == 'nan': u_agg = ""
+
+                rules_map[key] = {
+                    "u_local": u_loc,
+                    "u_fr": u_fr,
+                    "u_agg": u_agg
                 }
     except: pass 
 
@@ -979,40 +991,41 @@ def python_accounting_audit(dimension_data, res_main):
     # =================================================
     for item in dimension_data:
         raw_title = item.get("item_title", "")
-        title_clean = clean_text(raw_title) 
         
-        # 準備給規則比對用的去尾標題
+        # 準備匹配用的標題
         title_no_tail = remove_tail_info(raw_title)
-        title_clean_rule = clean_text(title_no_tail)
+        title_clean_rule = clean_text(title_no_tail) # 去尾+清洗
+        title_clean_full = clean_text(raw_title)     # 完整+清洗
 
         page = item.get("page", "?")
         target_pc = safe_float(item.get("item_pc_target", 0)) 
         batch_qty = safe_float(item.get("batch_total_qty", 0))
         
-        # 2.1 規則匹配 (整合去尾邏輯)
+        # 2.1 規則匹配 (🔥 v71 邏輯修正)
         rule_set = None
         matched_rule_name = None
         match_type = ""
         match_score = 0
+        found_exact = False
 
-        # A. 完全匹配 (優先用完整字串)
-        if title_clean in rules_map:
-            rule_set = rules_map[title_clean]
-            matched_rule_name = title_clean
-            match_type = "完全匹配"
+        # A. 完全匹配 (優先用去尾後的乾淨字串)
+        if title_clean_rule in rules_map:
+            rule_set = rules_map[title_clean_rule]
+            matched_rule_name = title_clean_rule
+            match_type = "去尾完全匹配"
             match_score = 100
+            found_exact = True # 🔥 標記：找到了正宮
         
-        # B. 去括號匹配
-        if not rule_set:
-            t_no = re.sub(r"[\(（].*?[\)）]", "", title_clean)
-            if t_no in rules_map:
-                rule_set = rules_map[t_no]
-                matched_rule_name = t_no
-                match_type = "去括號匹配"
-                match_score = 100
+        # B. 完整匹配 (如果去尾失敗，試試看沒去尾的)
+        if not found_exact and title_clean_full in rules_map:
+            rule_set = rules_map[title_clean_full]
+            matched_rule_name = title_clean_full
+            match_type = "完整完全匹配"
+            match_score = 100
+            found_exact = True # 🔥 標記：找到了正宮
 
-        # C. 模糊匹配 (🔥 改用去尾後的 title_clean_rule)
-        if not rule_set and rules_map:
+        # C. 模糊匹配 (🔥 只有在「沒找到正宮」時才執行)
+        if not found_exact and rules_map:
             best_score = 0
             best_rule = None
             for k, v in rules_map.items():
@@ -1034,6 +1047,7 @@ def python_accounting_audit(dimension_data, res_main):
             })
 
         # --- 以下為既有邏輯 ---
+        # 如果 rule_set 是空字典 (代表有正宮但沒規則)，這裡就會拿到空字串 -> 預設為 1
         u_local = rule_set.get("u_local", "") if rule_set else ""
         u_fr = rule_set.get("u_fr", "") if rule_set else ""
         u_agg = rule_set.get("u_agg", "") if rule_set else ""
@@ -1045,31 +1059,35 @@ def python_accounting_audit(dimension_data, res_main):
 
         # A. 單項檢查
         is_local_exempt = "豁免" in str(u_local) or "SKIP" in str(u_local).upper() or "EXEMPT" in str(u_local).upper()
-        actual_item_qty = raw_count if batch_qty > 0 else raw_count * parse_ratio(u_local)
+        
+        # 🔥 單位換算：如果 rule_set 為空或 u_local 為空，parse_ratio 會回傳 1.0
+        ratio = parse_ratio(u_local)
+        actual_item_qty = raw_count if batch_qty > 0 else raw_count * ratio
+        
         if not is_local_exempt and abs(actual_item_qty - target_pc) > 0.01 and target_pc > 0:
              accounting_issues.append({
                  "page": page, "item": raw_title, "issue_type": "🛑 統計不符(單項)", 
-                 "common_reason": f"標題 {target_pc} != 內文 {actual_item_qty}", 
+                 "common_reason": f"標題 {target_pc} != 內文 {actual_item_qty} (倍率:{ratio})", 
                  "failures": [], "source": "🐍 會計引擎"
              })
 
-        # B. 重複檢查
+        # B. 重複檢查 (省略...)
         journal_family = ["軸頸", "軸頭", "軸位", "內孔", "JOURNAL"]
-        if "本體" in title_clean:
+        if "本體" in title_clean_full:
              for rid, count in id_counts.items():
                 if count > 1: accounting_issues.append({"page": page, "item": raw_title, "issue_type": "⚠️編號重複(本體)", "common_reason": f"{rid} 重複 {count}次", "failures": []})
-        elif any(k in title_clean for k in journal_family):
+        elif any(k in title_clean_full for k in journal_family):
              for rid, count in id_counts.items():
                 if count > 2: accounting_issues.append({"page": page, "item": raw_title, "issue_type": "⚠️編號重複(軸頸)", "common_reason": f"{rid} 重複 {count}次", "failures": []})
 
-        # C. 運費 & 歸戶
+        # C. 運費 & 歸戶 (省略...)
         fr_multiplier = parse_ratio(u_fr)
         freight_val = 0.0
         f_note = ""
         u_fr_upper = str(u_fr).upper()
         is_fr_exempt = "豁免" in u_fr_upper or "SKIP" in u_fr_upper
         is_forced_include = "計入" in str(u_fr) or "INCLUDED" in u_fr_upper
-        is_default_target = ("本體" in title_clean and "未再生" in title_clean) or ("新品組裝" in title_clean)
+        is_default_target = ("本體" in title_clean_full and "未再生" in title_clean_full) or ("新品組裝" in title_clean_full)
         
         if not is_fr_exempt and (is_default_target or is_forced_include or fr_multiplier != 1.0):
             freight_val = actual_item_qty * fr_multiplier
@@ -1081,14 +1099,10 @@ def python_accounting_audit(dimension_data, res_main):
         agg_mode = "B" 
         if u_agg:
             p_clean = str(u_agg).upper().replace(" ", "")
-            if p_clean == "NAN":
-                agg_mode = "B"
-            elif "EXEMPT" in p_clean or "SKIP" in p_clean: 
-                agg_mode = "EXEMPT"
-            elif "AB" in p_clean: 
-                agg_mode = "AB"
-            elif "A" in p_clean: 
-                agg_mode = "A"
+            if p_clean == "NAN": agg_mode = "B"
+            elif "EXEMPT" in p_clean or "SKIP" in p_clean: agg_mode = "EXEMPT"
+            elif "AB" in p_clean: agg_mode = "AB"
+            elif "A" in p_clean: agg_mode = "A"
 
         agg_multiplier = parse_ratio(u_agg)
         qty_agg = batch_qty if batch_qty > 0 else actual_item_qty * agg_multiplier
@@ -1097,7 +1111,6 @@ def python_accounting_audit(dimension_data, res_main):
             for s_title, data in global_sum_tracker.items():
                 s_clean = clean_text(s_title)
                 
-                # 運費特殊處理
                 if (fuzz.partial_ratio("輥輪拆裝.車修或銲補運費", s_clean) > 70) or ("運費" in s_clean):
                     if freight_val > 0:
                         data["actual"] += freight_val
@@ -1105,47 +1118,31 @@ def python_accounting_audit(dimension_data, res_main):
                     continue
 
                 # =========================================================
-                # 🧺 步驟 1: 籃子撈人 (v67: 智能去尾 + 嚴格比對版)
+                # 🧺 步驟 1: 籃子撈人 (v70 邏輯)
                 # =========================================================
+                s_core = remove_tail_info(s_title) 
+                t_core = remove_tail_info(raw_title)
                 
-                # 1. 進行去尾手術 (產生比對專用字串)
-                s_core = remove_tail_info(s_clean)
-                t_core = remove_tail_info(title_clean)
+                s_core_clean = clean_text(s_core)
+                t_core_clean = clean_text(t_core)
                 
-                # 2. 使用 token_sort_ratio (嚴格全字匹配)
-                # 因為 (2PC) 被拿掉了，我們可以要求高分，防止誤吸
-                score_A = fuzz.token_sort_ratio(s_core, t_core)
-                match_A = (score_A >= 90) # 建議值: 90~95
+                score_A = fuzz.token_sort_ratio(s_core_clean, t_core_clean)
+                match_A = (score_A >= 90)
 
                 match_B = False
                 b_debug_msg = ""
-                
                 s_upper_check = s_clean.upper() 
 
-                # 🔥 [關鍵修正] 嚴格連詞檢查
-                # 必須是 "ROLL" 直接接 "動作"，中間不能有字 (空白已在 clean_text 去除)
-                # 例如: "ROLL車修" (O), "ROLL 車修" (O), "ROLL輥輪車修" (X)
-                
-                # 1. 拆裝籃子
                 is_dis = ("ROLL拆裝" in s_upper_check) or ("ROLL組裝" in s_upper_check)
-                
-                # 2. 車修籃子
                 is_mac = ("ROLL車修" in s_upper_check)
-                
-                # 3. 銲補籃子
-                is_weld = ("ROLL焊" in s_upper_check) or \
-                          ("ROLL鉀" in s_upper_check) or \
-                          ("ROLL銲" in s_upper_check)
+                is_weld = ("ROLL焊" in s_upper_check) or ("ROLL鉀" in s_upper_check) or ("ROLL銲" in s_upper_check)
 
-                # --- 項目屬性 ---
-                has_part_body = "本體" in title_clean
-                has_part_journal = any(k in title_clean for k in journal_family)
+                has_part_body = "本體" in title_clean_full
+                has_part_journal = any(k in title_clean_full for k in journal_family)
+                has_act_mac = any(k in title_clean_full for k in ["再生", "精車", "未再生", "粗車"])
+                has_act_weld = ("銲補" in title_clean_full or "焊" in title_clean_full or "鉀" in title_clean_full)
+                is_assy = ("組裝" in title_clean_full or "拆裝" in title_clean_full or "更換" in title_clean_full)
                 
-                has_act_mac = any(k in title_clean for k in ["再生", "精車", "未再生", "粗車"])
-                has_act_weld = ("銲補" in title_clean or "焊" in title_clean or "鉀" in title_clean)
-                is_assy = ("組裝" in title_clean or "拆裝" in title_clean)
-                
-                # --- B模式判斷 (必須符合籃子類型 + 項目屬性) ---
                 if is_dis and is_assy: 
                     match_B = True
                     b_debug_msg = "拆裝模式"
@@ -1161,64 +1158,37 @@ def python_accounting_audit(dimension_data, res_main):
                 else: match = match_B if match_B else match_A
 
                 # =========================================================
-                # 🛑 步驟 2: 攔截者 (v69: 車修中立化版)
+                # 🛑 步驟 2: 攔截者 (v69 邏輯)
                 # =========================================================
                 if match:
-                    t_upper = title_clean.upper()
+                    t_upper = title_clean_full.upper()
                     
-                    # --- A. 定義三大勢力 ---
-                    
-                    # 1. 粗車勢力 (Unregen / Rough)
                     s_is_unregen = "未再生" in s_clean or "粗車" in s_clean
-                    t_is_unregen = "未再生" in title_clean or "粗車" in title_clean
+                    t_is_unregen = "未再生" in title_clean_full or "粗車" in title_clean_full
                     
-                    # 2. 精車勢力 (Regen / Finish) 
-                    # 🔥 [v69修正]: 移除 "車修"。讓 "車修" 變為中立，這樣它就可以同時接收 "未再生" 和 "再生"。
+                    # 🔥 v69: 車修已移除，變中立
                     s_is_regen = ("再生" in s_clean or "精車" in s_clean) and not s_is_unregen
-                    t_is_regen = ("再生" in title_clean or "精車" in title_clean) and not t_is_unregen
+                    t_is_regen = ("再生" in title_clean_full or "精車" in title_clean_full) and not t_is_unregen
                     
-                    # 3. 銲補勢力 (Weld)
                     s_is_weld = ("銲" in s_clean or "焊" in s_clean or "鉀" in s_clean)
-                    t_is_weld = ("銲" in title_clean or "焊" in title_clean or "鉀" in title_clean)
+                    t_is_weld = ("銲" in title_clean_full or "焊" in title_clean_full or "鉀" in title_clean_full)
 
-                    # --- B. 執行三方互鎖 (Tri-Lock) ---
-                    
-                    # 🔒 鎖定 1: 如果籃子是 [粗車]，拒絕 [精車] 與 [銲補]
-                    if s_is_unregen:
-                        if t_is_regen or t_is_weld: match = False
-                        
-                    # 🔒 鎖定 2: 如果籃子是 [精車]，拒絕 [粗車] 與 [銲補]
-                    # (註：總表寫 "ROLL車修" 因為不再屬於 s_is_regen，所以不會啟動此鎖)
-                    if s_is_regen:
-                        if t_is_unregen or t_is_weld: match = False
-                        
-                    # 🔒 鎖定 3: 如果籃子是 [銲補]，拒絕 [粗車] 與 [精車]
-                    if s_is_weld:
-                        if t_is_unregen or t_is_regen: match = False
+                    if s_is_unregen and (t_is_regen or t_is_weld): match = False
+                    if s_is_regen and (t_is_unregen or t_is_weld): match = False
+                    if s_is_weld and (t_is_unregen or t_is_regen): match = False
 
-
-                    # --- C. 其他既有鎖定 ---
-
-                    # 4. 部位互斥鎖 (Body vs Journal)
                     s_is_journal = any(k in s_clean for k in journal_family)
-                    t_is_journal = any(k in title_clean for k in journal_family) 
-                    
+                    t_is_journal = any(k in title_clean_full for k in journal_family) 
                     s_is_body = "本體" in s_clean
-                    t_is_body = "本體" in title_clean
+                    t_is_body = "本體" in title_clean_full
 
-                    # [您的要求] 本體籃子：絕對不收軸頸
                     if s_is_body and not s_is_journal and t_is_journal: match = False
-                    
-                    # [您的要求] 軸頸籃子：絕對不收本體
                     if s_is_journal and not s_is_body and t_is_body: match = False
 
-                    # 5. 熱處理反向鎖
                     s_is_heat = "熱處理" in s_clean
-                    t_is_heat = "熱處理" in title_clean
-                    
+                    t_is_heat = "熱處理" in title_clean_full
                     if s_is_heat != t_is_heat: match = False
 
-                    # 6. 位置衝突鎖
                     if "TOP" in s_upper_check and "BOTTOM" in t_upper: match = False
                     if "BOTTOM" in s_upper_check and "TOP" in t_upper: match = False
 
@@ -1252,8 +1222,7 @@ def python_accounting_audit(dimension_data, res_main):
             fail_table.append({"頁碼": "∑", "項目名稱": "加總結果", "數量": data["actual"], "備註": "總計"})
 
             reason_str = f"實交({data['target']}) != 加總({data['actual']})"
-            if data['b_reason']:
-                reason_str += f" | {data['b_reason']}"
+            if data['b_reason']: reason_str += f" | {data['b_reason']}"
 
             accounting_issues.append({
                 "page": data["page"], "item": s_title, 
