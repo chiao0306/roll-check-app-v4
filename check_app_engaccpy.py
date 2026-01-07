@@ -1990,46 +1990,75 @@ if st.session_state.photo_gallery:
                 else:
                     st.info("本次無總表數據。")
 
-            # --- Tab 2: 明細檢查 ---
+                        # --- Tab 2: 明細檢查 (三燈號版) ---
             with tab_det:
                 raw_det = cache.get("ai_extracted_data", [])
                 if raw_det:
                     det_data = []
+                    
+                    # 1. 建立錯誤索引 (Mapping)
+                    # 格式: Key=(頁碼, 標題) -> Value={'Acc': False, 'Eng': False, 'Proc': False}
+                    error_map = {}
+                    
+                    for issue in visible_issues:
+                        p = str(issue.get('page', '?')).strip()
+                        t = str(issue.get('item', '')).strip()
+                        k = (p, t)
+                        
+                        if k not in error_map: 
+                            error_map[k] = {"會計": False, "工程": False, "流程": False}
+                        
+                        # 判定是哪個引擎報錯
+                        src = str(issue.get('source', ''))
+                        itype = str(issue.get('issue_type', ''))
+                        
+                        if "流程" in src or "溯源" in itype or "工序" in itype:
+                            error_map[k]["流程"] = True
+                        elif "會計" in src or "數量" in itype or "統計" in itype or "總表" in itype:
+                            error_map[k]["會計"] = True
+                        else:
+                            # 剩下的通常是規格不符、分類錯誤等，歸類為工程
+                            error_map[k]["工程"] = True
+
+                    # 2. 遍歷所有明細項目產生報表
                     for row in raw_det:
                         r_page = str(row.get('page', '?')).strip()
                         r_title = row.get('item_title', '').strip()
                         r_cat = row.get('category', 'unknown')
                         
-                        # 判斷狀態：比對頁碼與名稱
-                        # 這裡做一個簡單的 lookup
-                        is_failed = False
-                        for issue in visible_issues:
-                            # 如果頁碼跟名稱都對上，就是這筆
-                            if str(issue.get('page','')) == r_page and issue.get('item','') == r_title:
-                                is_failed = True
-                                break
+                        key = (r_page, r_title)
                         
-                        status = "🔴 異常" if is_failed else "🟢 合格"
+                        # 取得該項目的錯誤狀態 (預設都沒錯)
+                        err_status = error_map.get(key, {"會計": False, "工程": False, "流程": False})
+                        
+                        # 轉換成燈號
+                        light_eng = "🔴" if err_status["工程"] else "🟢"
+                        light_acc = "🔴" if err_status["會計"] else "🟢"
+                        light_proc = "🔴" if err_status["流程"] else "🟢"
                         
                         det_data.append({
-                            "狀態": status,
+                            "工程": light_eng,
+                            "會計": light_acc,
+                            "流程": light_proc,
                             "頁碼": r_page,
                             "項目名稱": r_title,
                             "分類判定": r_cat,
-                            "目標數量": row.get('item_pc_target', 0),
-                            "規格摘要": (row.get('std_spec', '')[:20] + '...') if row.get('std_spec') else ''
+                            "目標": row.get('item_pc_target', 0),
+                            "規格": (str(row.get('std_spec', ''))[:15] + '...') if row.get('std_spec') else ''
                         })
                     
                     df_det = pd.DataFrame(det_data)
                     
-                    # 讓使用者可以篩選只看合格或異常
+                    # 3. 顯示表格 (設定欄位寬度與說明)
                     st.dataframe(
                         df_det, 
                         use_container_width=True, 
                         hide_index=True,
                         column_config={
-                            "狀態": st.column_config.TextColumn("判定", help="Python 數值/規則稽核結果"),
-                            "分類判定": st.column_config.TextColumn("Python分類", help="自動歸類的檢查邏輯"),
+                            "工程": st.column_config.TextColumn("工程", width="small", help="規格/分類檢查"),
+                            "會計": st.column_config.TextColumn("會計", width="small", help="數量/總表檢查"),
+                            "流程": st.column_config.TextColumn("流程", width="small", help="工序/溯源檢查"),
+                            "分類判定": st.column_config.TextColumn("Python分類"),
                         }
                     )
                 else:
