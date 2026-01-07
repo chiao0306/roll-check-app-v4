@@ -845,11 +845,12 @@ def python_numerical_audit(dimension_data):
     
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官 (v59: "NAN"陷阱修復版)
+    Python 會計官 (v60: ROLL緊密連詞鎖定版)
     修正重點：
-    1. [Bug修復]: 修正 Excel 空值 "nan" 被誤判為 Mode A 的嚴重 Bug。
-    2. [視覺化]: 保持 Mode B 🚀 的顯示功能。
-    3. [邏輯]: 保持 v58 的嚴格 ROLL+銲補 邏輯。
+    1. [籃子識別]: B模式開啟條件改為「ROLL+動作」必須緊密相連 (如 "ROLL銲補")。
+       中間若有夾雜其他文字 (如 "ROLL輥輪本體銲補") 則不開啟 B 模式。
+    2. [NAN修復]: 保留 v59 的 NAN 免疫功能。
+    3. [視覺化]: 保留 Mode B 🚀 顯示。
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -1022,13 +1023,11 @@ def python_accounting_audit(dimension_data, res_main):
             f_note = f"x{fr_multiplier}" if fr_multiplier != 1.0 else ""
 
         # =================================================
-        # 🔥 [Bug修復] 決定 Agg Mode
+        # Agg Mode (v60: NAN 免疫)
         # =================================================
         agg_mode = "B" 
         if u_agg:
             p_clean = str(u_agg).upper().replace(" ", "")
-            
-            # 🚑 安全檢查：如果是 "NAN"，直接忽略，當作沒設定 (回歸 B 模式)
             if p_clean == "NAN":
                 agg_mode = "B"
             elif "EXEMPT" in p_clean or "SKIP" in p_clean: 
@@ -1053,23 +1052,31 @@ def python_accounting_audit(dimension_data, res_main):
                     continue
 
                 # =========================================================
-                # 🧺 步驟 1: 籃子撈人 (v59: "NAN"修復版)
+                # 🧺 步驟 1: 籃子撈人 (v60: 緊密連詞鎖定版)
                 # =========================================================
-                match_A = (fuzz.partial_ratio(s_clean, title_clean) > 90)
+                # 基本模糊比對 (Mode A)
+                match_A = (fuzz.partial_ratio(s_clean, title_clean) > 90) # 建議設為 90
                 match_B = False
                 b_debug_msg = ""
                 
                 s_upper_check = s_clean.upper() 
 
-                is_dis = fuzz.partial_ratio("ROLL拆裝", s_upper_check) > 80
-                is_mac = fuzz.partial_ratio("ROLL車修", s_upper_check) > 80
+                # 🔥 [關鍵修正] 嚴格連詞檢查
+                # 必須是 "ROLL" 直接接 "動作"，中間不能有字 (空白已在 clean_text 去除)
+                # 例如: "ROLL車修" (O), "ROLL 車修" (O), "ROLL輥輪車修" (X)
                 
-                has_roll_kw = "ROLL" in s_upper_check
-                has_weld_kw = ("焊" in s_upper_check) or ("鉀" in s_upper_check) or ("銲" in s_upper_check)
+                # 1. 拆裝籃子
+                is_dis = ("ROLL拆裝" in s_upper_check) or ("ROLL組裝" in s_upper_check)
                 
-                is_weld = (fuzz.partial_ratio("ROLL銲補", s_upper_check) > 85) or \
-                          (has_roll_kw and has_weld_kw)
+                # 2. 車修籃子
+                is_mac = ("ROLL車修" in s_upper_check)
+                
+                # 3. 銲補籃子
+                is_weld = ("ROLL焊" in s_upper_check) or \
+                          ("ROLL鉀" in s_upper_check) or \
+                          ("ROLL銲" in s_upper_check)
 
+                # --- 項目屬性 ---
                 has_part_body = "本體" in title_clean
                 has_part_journal = any(k in title_clean for k in journal_family)
                 
@@ -1077,6 +1084,7 @@ def python_accounting_audit(dimension_data, res_main):
                 has_act_weld = ("銲補" in title_clean or "焊" in title_clean or "鉀" in title_clean)
                 is_assy = ("組裝" in title_clean or "拆裝" in title_clean)
                 
+                # --- B模式判斷 (必須符合籃子類型 + 項目屬性) ---
                 if is_dis and is_assy: 
                     match_B = True
                     b_debug_msg = "拆裝模式"
@@ -1105,14 +1113,14 @@ def python_accounting_audit(dimension_data, res_main):
                     s_is_heat = "熱處理" in s_clean
                     t_is_heat = "熱處理" in title_clean
                     
+                    # 如果籃子要熱處理，但明細不是；或是籃子不要熱處理，但明細是 -> 擋掉！
+                    if s_is_heat != t_is_heat: match = False
                     if s_is_regen and t_is_unregen: match = False
                     if s_is_unregen and t_is_regen: match = False
                     if s_is_journal and not s_is_body and t_is_body: match = False
-                    # 如果籃子要熱處理，但明細不是；或是籃子不要熱處理，但明細是 -> 擋掉
-                    if s_is_heat != t_is_heat: match = False
                     if "TOP" in s_upper_check and "BOTTOM" in t_upper: match = False
                     if "BOTTOM" in s_upper_check and "TOP" in t_upper: match = False
-                    
+
                 if match:
                     if match_B and not match_A:
                         data["used_mode"] = "B"
