@@ -1100,45 +1100,65 @@ def python_accounting_audit(dimension_data, res_main):
                 else: match = match_B if match_B else match_A
 
                 # =========================================================
-                # 🛑 步驟 2: 攔截者 (v63: 指定鎖定版)
+                # 🛑 步驟 2: 攔截者 (v64: 銲補/粗車/精車 三方互鎖版)
                 # =========================================================
                 if match:
                     t_upper = title_clean.upper()
                     
-                    # 1. 再生 vs 未再生
+                    # --- A. 定義三大勢力 ---
+                    
+                    # 1. 粗車勢力 (Unregen / Rough)
                     s_is_unregen = "未再生" in s_clean or "粗車" in s_clean
                     t_is_unregen = "未再生" in title_clean or "粗車" in title_clean
-                    s_is_regen = ("再生" in s_clean or "精車" in s_clean) and not s_is_unregen
+                    
+                    # 2. 精車勢力 (Regen / Finish) 
+                    # 註: "車修" 歸類在精車，但必須排除粗車關鍵字
+                    s_is_regen = ("再生" in s_clean or "精車" in s_clean or "車修" in s_clean) and not s_is_unregen
                     t_is_regen = ("再生" in title_clean or "精車" in title_clean or "車修" in title_clean) and not t_is_unregen
                     
-                    if s_is_regen and t_is_unregen: match = False
-                    if s_is_unregen and t_is_regen: match = False
+                    # 3. 銲補勢力 (Weld)
+                    s_is_weld = ("銲" in s_clean or "焊" in s_clean or "鉀" in s_clean)
+                    t_is_weld = ("銲" in title_clean or "焊" in title_clean or "鉀" in title_clean)
+
+                    # --- B. 執行三方互鎖 (Tri-Lock) ---
                     
-                    # 2. 部位互斥鎖 (Body vs Journal)
+                    # 🔒 鎖定 1: 如果籃子是 [粗車]，拒絕 [精車] 與 [銲補]
+                    if s_is_unregen:
+                        if t_is_regen or t_is_weld: match = False
+                        
+                    # 🔒 鎖定 2: 如果籃子是 [精車]，拒絕 [粗車] 與 [銲補]
+                    if s_is_regen:
+                        if t_is_unregen or t_is_weld: match = False
+                        
+                    # 🔒 鎖定 3: 如果籃子是 [銲補]，拒絕 [粗車] 與 [精車]
+                    if s_is_weld:
+                        if t_is_unregen or t_is_regen: match = False
+
+
+                    # --- C. 其他既有鎖定 ---
+
+                    # 4. 部位互斥鎖 (Body vs Journal)
                     s_is_journal = any(k in s_clean for k in journal_family)
-                    # 補上這行，不然下面沒辦法擋軸頸
                     t_is_journal = any(k in title_clean for k in journal_family) 
                     
                     s_is_body = "本體" in s_clean
                     t_is_body = "本體" in title_clean
 
-                    # [您的要求] 本體籃子：絕對不收軸頸 (防止 A 模式混淆)
+                    # [您的要求] 本體籃子：絕對不收軸頸
                     if s_is_body and not s_is_journal and t_is_journal: match = False
                     
                     # [您的要求] 軸頸籃子：絕對不收本體
                     if s_is_journal and not s_is_body and t_is_body: match = False
 
-                    # 3. 熱處理反向鎖 (您指定的)
+                    # 5. 熱處理反向鎖
                     s_is_heat = "熱處理" in s_clean
                     t_is_heat = "熱處理" in title_clean
                     
-                    # 如果籃子要熱處理，但明細不是；或是籃子不要熱處理，但明細是 -> 擋掉！
                     if s_is_heat != t_is_heat: match = False
 
-                    # 4. 位置衝突鎖
+                    # 6. 位置衝突鎖
                     if "TOP" in s_upper_check and "BOTTOM" in t_upper: match = False
                     if "BOTTOM" in s_upper_check and "TOP" in t_upper: match = False
-
 
                 if match:
                     if match_B and not match_A:
