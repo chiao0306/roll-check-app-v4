@@ -1990,9 +1990,11 @@ if st.session_state.photo_gallery:
                 else:
                     st.info("本次無總表數據。")
 
-            # --- Tab 2: 明細檢查 (三燈號精準比對版) ---
+             # --- Tab 2: 明細檢查 (三燈號精準比對版) ---
             with tab_det:
                 raw_det = cache.get("ai_extracted_data", [])
+                
+                # if 和 else 必須對齊
                 if raw_det:
                     det_data = []
                     
@@ -2005,6 +2007,11 @@ if st.session_state.photo_gallery:
 
                     # 1. 建立錯誤索引 (Mapping)
                     error_map = {}
+                    
+                    # 確保 visible_issues 有被正確傳入，如果是在函式內請確認變數來源
+                    current_issues = locals().get('visible_issues', []) 
+                    # 如果 visible_issues 是全域變數或上層變數，通常可以直接用，
+                    # 為了保險起見，若您是在該區塊上方定義的，請確保變數名稱一致。
                     
                     for issue in visible_issues:
                         # 使用標準化 Key
@@ -2062,21 +2069,7 @@ if st.session_state.photo_gallery:
                         }
                     )
                 else:
-                    st.info("本次無明細數據。")
-                    
-                    # 3. 顯示表格 (設定欄位寬度與說明)
-                    st.dataframe(
-                        df_det, 
-                        use_container_width=True, 
-                        hide_index=True,
-                        column_config={
-                            "工程": st.column_config.TextColumn("工程", width="small", help="規格/分類檢查"),
-                            "會計": st.column_config.TextColumn("會計", width="small", help="數量/總表檢查"),
-                            "流程": st.column_config.TextColumn("流程", width="small", help="工序/溯源檢查"),
-                            "分類判定": st.column_config.TextColumn("Python分類"),
-                        }
-                    )
-                else:
+                    # 這裡的 else 必須跟上面的 if raw_det 對齊
                     st.info("本次無明細數據。")
                     
         # 5. 卡片循環顯示 (使用過濾後的 visible_issues)
