@@ -615,23 +615,23 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
 
 def python_numerical_audit(dimension_data):
     """
-    Python 工程引擎 (v29: 全域統一特規版)
+    Python 工程引擎 (v30: mm隔離保護版)
     升級內容：
-    1. [統一配對]: 引入與會計同級的配對邏輯 (GLOBAL_FUZZ_THRESHOLD + fuzz.ratio)。
-    2. [規則優先]: 若 Excel 特規配對成功且設定為 SKIP/EXEMPT，直接豁免。
-    3. [原有邏輯]: 保留熱處理/動平衡豁免，以及各種數值檢查邏輯。
+    1. [防沾黏修復]: 解析規格時，將 "mm" 替換為 "_" 而非直接刪除。
+       - 解決 "460mm 0" 因去除空白變成 "4600" 的嚴重 Bug。
+       - 確保基準值與公差值即使在 OCR 去除空白後仍能正確分離。
     """
     grouped_errors = {}
     import re
     import pandas as pd
     from thefuzz import fuzz
 
-    # 🔥 1. 讀取全域門檻 (與會計同步)
+    # 🔥 1. 讀取全域門檻
     CURRENT_THRESHOLD = globals().get('GLOBAL_FUZZ_THRESHOLD', 95)
 
     if not dimension_data: return []
 
-    # 🔥 2. 預先載入規則 (只載入一次)
+    # 🔥 2. 預先載入規則
     rules_map = {}
     try:
         df = pd.read_excel("rules.xlsx")
@@ -639,7 +639,6 @@ def python_numerical_audit(dimension_data):
         for _, row in df.iterrows():
             iname = str(row.get('Item_Name', '')).strip()
             if iname: 
-                # 工程主要看 Local 規則 (是否豁免)
                 rules_map[str(iname).replace(" ", "").replace("\n", "").strip()] = {
                     "u_local": str(row.get('Unit_Rule_Local', '')).strip()
                 }
@@ -656,7 +655,7 @@ def python_numerical_audit(dimension_data):
         raw_spec = str(item.get("std_spec", "")).replace('"', "")
         
         # =========================================================
-        # 🔥 3. 執行特規配對 (統一邏輯)
+        # 🔥 3. 執行特規配對
         # =========================================================
         title_clean = title.strip()
         rule_set = None
@@ -671,28 +670,26 @@ def python_numerical_audit(dimension_data):
             if t_no in rules_map:
                 rule_set = rules_map[t_no]
         
-        # C. 模糊匹配 (使用全域門檻 + 嚴格比對)
+        # C. 模糊匹配
         if not rule_set and rules_map:
             best_score = 0
             for k, v in rules_map.items():
-                sc = fuzz.token_sort_ratio(k, title_clean) # 嚴格比對
+                sc = fuzz.token_sort_ratio(k, title_clean)
                 if sc > CURRENT_THRESHOLD and sc > best_score:
                     best_score = sc
                     rule_set = v
-        # =========================================================
-
-        # ⚡️ [既有豁免] 動平衡、熱處理直接跳過 (關鍵字優先)
+        
+        # ⚡️ [豁免檢查]
         t_upper = title.upper()
         if any(k in t_upper for k in ["動平衡", "BALANCING", "熱處理", "HEAT"]):
             continue
             
-        # ⚡️ [規則豁免] 如果 Excel 規則說要 SKIP，就跳過
         if rule_set:
             u_local = rule_set.get("u_local", "").upper()
             if "SKIP" in u_local or "EXEMPT" in u_local or "豁免" in u_local:
                 continue
 
-        # --- 以下為數值提取與檢查邏輯 (保持 v28 原貌) ---
+        # --- 以下為數值提取與檢查邏輯 (v30 修正區) ---
         
         mm_nums = [float(n) for n in re.findall(r"(\d+\.?\d*)\s*mm", raw_spec)]
         all_nums = [float(n) for n in re.findall(r"(\d+\.?\d*)", raw_spec)]
@@ -703,9 +700,14 @@ def python_numerical_audit(dimension_data):
         spec_parts = re.split(r"[\n\r]|[一二三四五六]|[（(]\d+[)）]|[;；]", raw_spec)
         
         for part in spec_parts:
-            clean_part = part.replace(" ", "").replace("\n", "").replace("mm", "").replace("MM", "").strip()
+            # 🔥 [關鍵修正]：先把 mm 換成 _ (底線)，再去除空白
+            # 這樣 "460mm 0" -> "460_0" -> 去空白後還是 "460_0"
+            # Regex 抓數字時就會把它們分成 [460, 0]，不會變成 4600
+            clean_part = part.replace("mm", "_").replace("MM", "_").replace(" ", "").replace("\n", "").strip()
+            
             if not clean_part: continue
             
+            # 1. 處理 ± (Plus-Minus)
             pm_matches = list(re.finditer(r"(\d+\.?\d*)?±(\d+\.?\d*)", clean_part))
             if pm_matches:
                 for match in pm_matches:
@@ -715,6 +717,7 @@ def python_numerical_audit(dimension_data):
                     s_ranges.append([round(b - o, 4), round(b + o, 4)])
                 continue 
 
+            # 2. 處理 ~ (Range)
             tilde_matches = list(re.finditer(r"(\d+\.?\d*)[~～-](\d+\.?\d*)", clean_part))
             has_valid_tilde = False
             if tilde_matches:
@@ -726,6 +729,7 @@ def python_numerical_audit(dimension_data):
             
             if has_valid_tilde: continue
 
+            # 3. 處理 Base + Offsets (包含 0, -0.155 這種)
             all_numbers = re.findall(r"[-+]?\d+\.?\d*", clean_part)
             if not all_numbers: continue
 
@@ -747,16 +751,14 @@ def python_numerical_audit(dimension_data):
                             s_ranges.append([b, b])
             except: continue
                     
+        # ... (以下邏輯保持不變) ...
         logic = item.get("sl", {})
         l_type = logic.get("lt", "")
         
-        # 4. 預算基準
         if "SKIP" in l_type.upper() or "EXEMPT" in l_type.upper() or "豁免" in l_type:
             un_regen_target = None
-            
         elif l_type in ["range", "max_limit", "min_limit"]:
             un_regen_target = None
-            
         else:
             s_threshold = logic.get("t", 0)
             un_regen_target = None
