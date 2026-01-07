@@ -1990,58 +1990,78 @@ if st.session_state.photo_gallery:
                 else:
                     st.info("本次無總表數據。")
 
-             # --- Tab 2: 明細檢查 (三燈號精準比對版) ---
+             # --- Tab 2: 明細檢查 (v3: 模糊寬容版) ---
             with tab_det:
                 raw_det = cache.get("ai_extracted_data", [])
                 
                 # if 和 else 必須對齊
                 if raw_det:
+                    from thefuzz import fuzz # 引入模糊比對套件
+
                     det_data = []
                     
                     # 🔥 [新增] 翻譯蒟蒻：標準化 Key 生成函式
-                    # 目的：讓 "P.3" == "3", "W3 ROLL" == "W3ROLL"
                     def get_norm_key(page, title):
                         p_str = str(page).upper().replace("P.", "").replace(" ", "").strip()
                         t_str = str(title).upper().replace(" ", "").replace("\n", "").strip()
-                        return (p_str, t_str)
+                        return p_str, t_str
 
-                    # 1. 建立錯誤索引 (Mapping)
-                    error_map = {}
+                    # 1. 建立異常註冊表 (改用 List 儲存，支援模糊搜尋)
+                    issue_registry = []
                     
-                    # 確保 visible_issues 有被正確傳入，如果是在函式內請確認變數來源
-                    current_issues = locals().get('visible_issues', []) 
-                    # 如果 visible_issues 是全域變數或上層變數，通常可以直接用，
-                    # 為了保險起見，若您是在該區塊上方定義的，請確保變數名稱一致。
+                    # 確保 visible_issues 來源
+                    current_issues = locals().get('visible_issues', [])
                     
-                    for issue in visible_issues:
-                        # 使用標準化 Key
-                        k = get_norm_key(issue.get('page', '?'), issue.get('item', ''))
-                        
-                        if k not in error_map: 
-                            error_map[k] = {"會計": False, "工程": False, "流程": False}
+                    for issue in current_issues:
+                        ip, it = get_norm_key(issue.get('page', '?'), issue.get('item', ''))
                         
                         src = str(issue.get('source', ''))
                         itype = str(issue.get('issue_type', ''))
                         
+                        flags = {"會計": False, "工程": False, "流程": False}
                         if "流程" in src or "溯源" in itype or "工序" in itype:
-                            error_map[k]["流程"] = True
+                            flags["流程"] = True
                         elif "會計" in src or "數量" in itype or "統計" in itype or "總表" in itype:
-                            error_map[k]["會計"] = True
+                            flags["會計"] = True
                         else:
-                            error_map[k]["工程"] = True
+                            flags["工程"] = True
+                            
+                        issue_registry.append({"p": ip, "t": it, "flags": flags})
 
                     # 2. 遍歷所有明細項目產生報表
                     for row in raw_det:
-                        # 原始資料也要標準化，才能對得上
-                        k = get_norm_key(row.get('page', '?'), row.get('item_title', ''))
+                        rp, rt = get_norm_key(row.get('page', '?'), row.get('item_title', ''))
                         
-                        # 取得該項目的錯誤狀態
-                        err_status = error_map.get(k, {"會計": False, "工程": False, "流程": False})
+                        # 預設無異常
+                        current_status = {"會計": False, "工程": False, "流程": False}
                         
+                        # 🔥 [核心邏輯] 模糊搜尋匹配
+                        for iss in issue_registry:
+                            # A. 頁碼檢查 (寬容模式: 總表=0=1)
+                            # 如果兩邊都是 "總表" 類關鍵字，視為匹配
+                            is_summary_page = (rp in ["總表", "0", "1", "SUMMARY"]) and (iss['p'] in ["總表", "0", "1", "SUMMARY"])
+                            page_match = (rp == iss['p']) or is_summary_page
+                            
+                            if page_match:
+                                # B. 標題檢查 (先看完全一樣，不一樣再看長得像不像)
+                                is_title_match = False
+                                if rp == "總表": 
+                                    # 總表項目通常字比較少，用 90 分模糊比對比較保險
+                                    if fuzz.ratio(rt, iss['t']) > 90: is_title_match = True
+                                else:
+                                    # 一般頁面維持精準 (或極高分) 以免誤判
+                                    if rt == iss['t'] or fuzz.ratio(rt, iss['t']) > 95: is_title_match = True
+                                
+                                if is_title_match:
+                                    # 命中！合併燈號狀態
+                                    if iss['flags']['會計']: current_status['會計'] = True
+                                    if iss['flags']['工程']: current_status['工程'] = True
+                                    if iss['flags']['流程']: current_status['流程'] = True
+
                         # 轉換成燈號
-                        light_eng = "🔴" if err_status["工程"] else "🟢"
-                        light_acc = "🔴" if err_status["會計"] else "🟢"
-                        light_proc = "🔴" if err_status["流程"] else "🟢"
+                        light_eng = "🔴" if current_status["工程"] else "🟢"
+                        light_acc = "🔴" if current_status["會計"] else "🟢"
+                        light_proc = "🔴" if current_status["流程"] else "🟢"
                         
                         det_data.append({
                             "工程": light_eng,
@@ -2069,7 +2089,6 @@ if st.session_state.photo_gallery:
                         }
                     )
                 else:
-                    # 這裡的 else 必須跟上面的 if raw_det 對齊
                     st.info("本次無明細數據。")
                     
         # 5. 卡片循環顯示 (使用過濾後的 visible_issues)
