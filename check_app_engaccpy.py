@@ -1409,10 +1409,11 @@ def python_process_audit(dimension_data):
             parts = seg.split(":")
             if len(parts) < 2: continue
             
-            # 🔥 [重點防呆] 這裡再次強制轉大寫，確保 ID 一致性
-            rid = parts[0].strip().upper()
-            val_str = parts[1].strip()
+            # 👇 改這一行就好！
+            rid = parts[0].strip().upper().replace("×", "X").replace("*", "X")
             
+            val_str = parts[1].strip()
+
             nums = re.findall(r"\d+\.?\d*", val_str)
             if not nums: continue
             val = float(nums[0])
