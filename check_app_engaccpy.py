@@ -1297,8 +1297,13 @@ def python_process_audit(dimension_data):
         return re.sub(r"[\(（][^\(（]*?[\)）]\s*$", "", str(text)).strip()
 
     def clean_text(text):
-        # 原本邏輯(含upper) + 全形轉半形
-        return str(text).upper().replace("（", "(").replace("）", ")").replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
+        t = str(text).upper() # 1. 轉大寫
+        # 2. 符號統一 (全形轉半形)
+        t = t.replace("（", "(").replace("）", ")")
+        t = t.replace("＝", "=").replace("＋", "+").replace("－", "-")
+        t = t.replace("＃", "#").replace("：", ":")
+        # 3. 清雜訊
+        return t.replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
 
     # 2. 載入規則 (Key 與 Value 都會被轉大寫)
     rules_map = {}
