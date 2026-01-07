@@ -845,15 +845,11 @@ def python_numerical_audit(dimension_data):
     
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官 (v53: 全域特規模糊比對版)
-    修改重點：
-    1. [全域連動]: 不再使用寫死的 FUZZ_THRESHOLD。
-       - 改為讀取 globals().get('GLOBAL_FUZZ_THRESHOLD', 90)。
-       - 讓會計、工程、流程能統一使用外部設定的門檻。
-    2. [功能保留]: 
-       - 執行高門檻比對 (預設使用全域設定)。
-       - 將命中紀錄打包回傳 (HIDDEN_DATA)。
-       - 核心籃子邏輯維持不變。
+    Python 會計官 (v58: 視覺偵錯版)
+    修正重點：
+    1. [視覺化]: 在 Source 標籤顯示 (Mode A) 或 (Mode B 🚀)。
+    2. [Debug]: 若開啟 B 模式，顯示觸發原因，方便除錯。
+    3. [邏輯]: 維持 v57 的嚴格 ROLL+銲補 邏輯。
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -861,8 +857,7 @@ def python_accounting_audit(dimension_data, res_main):
     import re
     import pandas as pd 
 
-    # --- 0. 設定 (改為讀取全域變數) ---
-    # 嘗試讀取全域設定，如果沒設定則預設為 90 (依您提供的代碼預設值)
+    # --- 0. 設定 ---
     CURRENT_THRESHOLD = globals().get('GLOBAL_FUZZ_THRESHOLD', 90)
 
     def clean_text(text):
@@ -899,8 +894,6 @@ def python_accounting_audit(dimension_data, res_main):
     except: pass 
 
     summary_rows = res_main.get("summary_rows", [])
-    
-    # 🔥 特規命中紀錄器
     rule_hits_log = {} 
 
     # =================================================
@@ -925,8 +918,15 @@ def python_accounting_audit(dimension_data, res_main):
                 ], 
                 "source": "🐍 會計引擎"
             })
+        
+        # 初始化追蹤器 (新增 debug_mode 欄位)
         global_sum_tracker[s_title] = {
-            "target": q_deliver, "actual": 0, "details": [], "page": s.get('page', "總表")
+            "target": q_deliver, 
+            "actual": 0, 
+            "details": [], 
+            "page": s.get('page', "總表"),
+            "used_mode": "A", # 預設 Mode A
+            "b_reason": ""    # B模式觸發原因
         }
 
     # =================================================
@@ -939,20 +939,18 @@ def python_accounting_audit(dimension_data, res_main):
         target_pc = safe_float(item.get("item_pc_target", 0)) 
         batch_qty = safe_float(item.get("batch_total_qty", 0))
         
-        # 2.1 規則匹配 (紀錄邏輯)
+        # 2.1 規則匹配 (改用 token_sort_ratio)
         rule_set = None
         matched_rule_name = None
         match_type = ""
         match_score = 0
 
-        # A. 完全匹配
         if title_clean in rules_map:
             rule_set = rules_map[title_clean]
             matched_rule_name = title_clean
             match_type = "完全匹配"
             match_score = 100
         
-        # B. 去括號匹配
         if not rule_set:
             t_no = re.sub(r"[\(（].*?[\)）]", "", title_clean)
             if t_no in rules_map:
@@ -961,13 +959,11 @@ def python_accounting_audit(dimension_data, res_main):
                 match_type = "去括號匹配"
                 match_score = 100
 
-        # C. 模糊匹配 (使用全域變數 CURRENT_THRESHOLD)
         if not rule_set and rules_map:
             best_score = 0
             best_rule = None
             for k, v in rules_map.items():
                 sc = fuzz.token_sort_ratio(k, title_clean) 
-                # 🔥 改用 CURRENT_THRESHOLD
                 if sc > CURRENT_THRESHOLD and sc > best_score:
                     best_score = sc
                     rule_set = v
@@ -978,16 +974,10 @@ def python_accounting_audit(dimension_data, res_main):
                 match_type = "模糊匹配"
                 match_score = best_score
         
-        # 記錄命中
         if matched_rule_name:
-            if matched_rule_name not in rule_hits_log:
-                rule_hits_log[matched_rule_name] = []
-            
+            if matched_rule_name not in rule_hits_log: rule_hits_log[matched_rule_name] = []
             rule_hits_log[matched_rule_name].append({
-                "明細名稱": raw_title,
-                "匹配類型": match_type,
-                "分數": match_score,
-                "頁碼": page
+                "明細名稱": raw_title, "匹配類型": match_type, "分數": match_score, "頁碼": page
             })
 
         # --- 以下為既有邏輯 ---
@@ -1047,6 +1037,7 @@ def python_accounting_audit(dimension_data, res_main):
             for s_title, data in global_sum_tracker.items():
                 s_clean = clean_text(s_title)
                 
+                # 運費特殊處理
                 if (fuzz.partial_ratio("輥輪拆裝.車修或銲補運費", s_clean) > 70) or ("運費" in s_clean):
                     if freight_val > 0:
                         data["actual"] += freight_val
@@ -1054,77 +1045,77 @@ def python_accounting_audit(dimension_data, res_main):
                     continue
 
                 # =========================================================
-                # 🧺 步驟 1: 籃子撈人 (v52)
+                # 🧺 步驟 1: 籃子撈人 (v58: 視覺偵錯版)
                 # =========================================================
-                match_A = (fuzz.partial_ratio(s_clean, title_clean) > 90)
+                # 基本比對
+                match_A = (fuzz.partial_ratio(s_clean, title_clean) > 85)
                 match_B = False
+                b_debug_msg = ""
                 
                 s_upper_check = s_clean.upper() 
 
                 is_dis = fuzz.partial_ratio("ROLL拆裝", s_upper_check) > 80
                 is_mac = fuzz.partial_ratio("ROLL車修", s_upper_check) > 80
-                # =========================================================
-                # 🛡️ v56 安全鎖：只有真正的 ROLL 銲補才能進 B 模式
-                # =========================================================
                 
-                # 1. 檢查是否有 ROLL 關鍵字 (中英文)
-                has_roll_kw = ("ROLL" in s_upper_check) or \
-                              ("ROLLER" in s_upper_check) or \
-                              ("輥" in s_upper_check) or \
-                              ("輪" in s_upper_check)
-
-                # 2. 檢查是否有 銲補 關鍵字
-                has_weld_kw = ("焊" in s_upper_check) or \
-                              ("鉀" in s_upper_check) or \
-                              ("銲" in s_upper_check)
+                # --- v58 ROLL銲補判斷 ---
+                has_roll_kw = "ROLL" in s_upper_check
+                has_weld_kw = ("焊" in s_upper_check) or ("鉀" in s_upper_check) or ("銲" in s_upper_check)
                 
-                # 3. 判定邏輯：
-                #    A. 長得很像 "ROLL銲補" (模糊比對 > 85)
-                #    B. 或者：同時擁有 "ROLL類詞彙" AND "銲補類詞彙" (黃金交叉)
+                # 只要是 ROLL 且有 銲/焊/鉀 -> 開啟 B 模式
                 is_weld = (fuzz.partial_ratio("ROLL銲補", s_upper_check) > 85) or \
                           (has_roll_kw and has_weld_kw)
 
+                # --- 項目屬性 ---
                 has_part_body = "本體" in title_clean
                 has_part_journal = any(k in title_clean for k in journal_family)
                 
-                # 白名單還原: 只保留嚴格動作
                 has_act_mac = any(k in title_clean for k in ["再生", "精車", "未再生", "粗車"])
                 has_act_weld = ("銲補" in title_clean or "焊" in title_clean or "鉀" in title_clean)
                 is_assy = ("組裝" in title_clean or "拆裝" in title_clean)
                 
-                if is_dis and is_assy: match_B = True
-                elif is_mac and (has_part_body or has_part_journal) and has_act_mac: match_B = True
-                elif is_weld and (has_part_body or has_part_journal) and has_act_weld: match_B = True
+                # --- B模式判斷 ---
+                if is_dis and is_assy: 
+                    match_B = True
+                    b_debug_msg = "拆裝模式"
+                elif is_mac and (has_part_body or has_part_journal) and has_act_mac: 
+                    match_B = True
+                    b_debug_msg = "車修模式"
+                elif is_weld and (has_part_body or has_part_journal) and has_act_weld: 
+                    match_B = True
+                    b_debug_msg = "銲補模式"
                 
                 if agg_mode == "A": match = match_A
                 elif agg_mode == "AB": match = match_A or match_B
                 else: match = match_B if match_B else match_A
 
-                # =========================================================
-                # 🛑 步驟 2: 攔截者
-                # =========================================================
+                # 🛑 步驟 2: 攔截者 (已移除本體擋軸頸)
                 if match:
-                    s_upper = s_clean.upper()
                     t_upper = title_clean.upper()
                     
                     s_is_unregen = "未再生" in s_clean or "粗車" in s_clean
                     t_is_unregen = "未再生" in title_clean or "粗車" in title_clean
                     s_is_regen = ("再生" in s_clean or "精車" in s_clean) and not s_is_unregen
                     t_is_regen = ("再生" in title_clean or "精車" in title_clean or "車修" in title_clean) and not t_is_unregen
-                    
+                    s_is_journal = any(k in s_clean for k in journal_family)
                     s_is_body = "本體" in s_clean
                     t_is_body = "本體" in title_clean
-                    s_is_journal = any(k in s_clean for k in journal_family)
-                    t_is_journal = any(k in title_clean for k in journal_family)
 
                     if s_is_regen and t_is_unregen: match = False
                     if s_is_unregen and t_is_regen: match = False
-                    if s_is_body and not s_is_journal and t_is_journal: match = False
+                    
                     if s_is_journal and not s_is_body and t_is_body: match = False
-                    if "TOP" in s_upper and "BOTTOM" in t_upper: match = False
-                    if "BOTTOM" in s_upper and "TOP" in t_upper: match = False
+                    if "TOP" in s_upper_check and "BOTTOM" in t_upper: match = False
+                    if "BOTTOM" in s_upper_check and "TOP" in t_upper: match = False
 
                 if match:
+                    # 🔥 記錄使用的模式
+                    if match_B and not match_A:
+                        data["used_mode"] = "B"
+                        data["b_reason"] = b_debug_msg
+                    elif match_B and match_A:
+                        data["used_mode"] = "AB" # 兩者都通
+                    # 預設已經是 A，不用改
+
                     data["actual"] += qty_agg
                     c_msg = f"x{agg_multiplier}" if agg_multiplier != 1.0 else ""
                     data["details"].append({"page": page, "title": raw_title, "val": qty_agg, "note": c_msg})
@@ -1134,25 +1125,38 @@ def python_accounting_audit(dimension_data, res_main):
     # =================================================
     for s_title, data in global_sum_tracker.items():
         if abs(data["actual"] - data["target"]) > 0.01: 
+            
+            # 🔥 視覺化來源標籤
+            mode_label = "Mode A"
+            if data["used_mode"] == "B": mode_label = "Mode B 🚀"
+            elif data["used_mode"] == "AB": mode_label = "Mode A+B"
+            
+            src_str = f"🐍 會計引擎 ({mode_label})"
+
             fail_table = []
             fail_table.append({"頁碼": "總表", "項目名稱": f"🎯 目標 (實交)", "數量": data["target"], "備註": "基準"})
             for d in data["details"]:
                 fail_table.append({"頁碼": f"P.{d['page']}", "項目名稱": d['title'], "數量": d['val'], "備註": d['note']})
             fail_table.append({"頁碼": "∑", "項目名稱": "加總結果", "數量": data["actual"], "備註": "總計"})
 
+            # 把原因加到 common_reason 裡方便看
+            reason_str = f"實交({data['target']}) != 加總({data['actual']})"
+            if data['b_reason']:
+                reason_str += f" | {data['b_reason']}"
+
             accounting_issues.append({
                 "page": data["page"], "item": s_title, 
                 "issue_type": "🛑 明細匯總不符", 
-                "common_reason": f"實交({data['target']}) != 明細加總({data['actual']})", 
-                "failures": fail_table, "source": "🐍 會計引擎"
+                "common_reason": reason_str, 
+                "failures": fail_table, 
+                "source": src_str
             })
             
-    # 🔥🔥🔥 [關鍵]: 將命中資料當作一個隱藏的 ISSUE 回傳 (TYPE=HIDDEN_DATA)
     if rule_hits_log:
         accounting_issues.append({
             "issue_type": "HIDDEN_DATA",
             "rule_hits": rule_hits_log,
-            "fuzz_threshold": CURRENT_THRESHOLD # 🔥 顯示目前實際使用的門檻
+            "fuzz_threshold": CURRENT_THRESHOLD
         })
             
     return accounting_issues
