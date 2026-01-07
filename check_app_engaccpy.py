@@ -845,11 +845,11 @@ def python_numerical_audit(dimension_data):
     
 def python_accounting_audit(dimension_data, res_main):
     """
-    Python 會計官 (v58: 視覺偵錯版)
+    Python 會計官 (v59: "NAN"陷阱修復版)
     修正重點：
-    1. [視覺化]: 在 Source 標籤顯示 (Mode A) 或 (Mode B 🚀)。
-    2. [Debug]: 若開啟 B 模式，顯示觸發原因，方便除錯。
-    3. [邏輯]: 維持 v57 的嚴格 ROLL+銲補 邏輯。
+    1. [Bug修復]: 修正 Excel 空值 "nan" 被誤判為 Mode A 的嚴重 Bug。
+    2. [視覺化]: 保持 Mode B 🚀 的顯示功能。
+    3. [邏輯]: 保持 v58 的嚴格 ROLL+銲補 邏輯。
     """
     accounting_issues = []
     from thefuzz import fuzz
@@ -919,14 +919,13 @@ def python_accounting_audit(dimension_data, res_main):
                 "source": "🐍 會計引擎"
             })
         
-        # 初始化追蹤器 (新增 debug_mode 欄位)
         global_sum_tracker[s_title] = {
             "target": q_deliver, 
             "actual": 0, 
             "details": [], 
             "page": s.get('page', "總表"),
-            "used_mode": "A", # 預設 Mode A
-            "b_reason": ""    # B模式觸發原因
+            "used_mode": "A", 
+            "b_reason": ""
         }
 
     # =================================================
@@ -939,7 +938,7 @@ def python_accounting_audit(dimension_data, res_main):
         target_pc = safe_float(item.get("item_pc_target", 0)) 
         batch_qty = safe_float(item.get("batch_total_qty", 0))
         
-        # 2.1 規則匹配 (改用 token_sort_ratio)
+        # 2.1 規則匹配
         rule_set = None
         matched_rule_name = None
         match_type = ""
@@ -1022,13 +1021,22 @@ def python_accounting_audit(dimension_data, res_main):
             freight_val = actual_item_qty * fr_multiplier
             f_note = f"x{fr_multiplier}" if fr_multiplier != 1.0 else ""
 
-        # 確定 Agg Mode
+        # =================================================
+        # 🔥 [Bug修復] 決定 Agg Mode
+        # =================================================
         agg_mode = "B" 
         if u_agg:
             p_clean = str(u_agg).upper().replace(" ", "")
-            if "EXEMPT" in p_clean or "SKIP" in p_clean: agg_mode = "EXEMPT"
-            elif "AB" in p_clean: agg_mode = "AB"
-            elif "A" in p_clean: agg_mode = "A"
+            
+            # 🚑 安全檢查：如果是 "NAN"，直接忽略，當作沒設定 (回歸 B 模式)
+            if p_clean == "NAN":
+                agg_mode = "B"
+            elif "EXEMPT" in p_clean or "SKIP" in p_clean: 
+                agg_mode = "EXEMPT"
+            elif "AB" in p_clean: 
+                agg_mode = "AB"
+            elif "A" in p_clean: 
+                agg_mode = "A"
 
         agg_multiplier = parse_ratio(u_agg)
         qty_agg = batch_qty if batch_qty > 0 else actual_item_qty * agg_multiplier
@@ -1045,9 +1053,8 @@ def python_accounting_audit(dimension_data, res_main):
                     continue
 
                 # =========================================================
-                # 🧺 步驟 1: 籃子撈人 (v58: 視覺偵錯版)
+                # 🧺 步驟 1: 籃子撈人 (v59: "NAN"修復版)
                 # =========================================================
-                # 基本比對
                 match_A = (fuzz.partial_ratio(s_clean, title_clean) > 85)
                 match_B = False
                 b_debug_msg = ""
@@ -1057,15 +1064,12 @@ def python_accounting_audit(dimension_data, res_main):
                 is_dis = fuzz.partial_ratio("ROLL拆裝", s_upper_check) > 80
                 is_mac = fuzz.partial_ratio("ROLL車修", s_upper_check) > 80
                 
-                # --- v58 ROLL銲補判斷 ---
                 has_roll_kw = "ROLL" in s_upper_check
                 has_weld_kw = ("焊" in s_upper_check) or ("鉀" in s_upper_check) or ("銲" in s_upper_check)
                 
-                # 只要是 ROLL 且有 銲/焊/鉀 -> 開啟 B 模式
                 is_weld = (fuzz.partial_ratio("ROLL銲補", s_upper_check) > 85) or \
                           (has_roll_kw and has_weld_kw)
 
-                # --- 項目屬性 ---
                 has_part_body = "本體" in title_clean
                 has_part_journal = any(k in title_clean for k in journal_family)
                 
@@ -1073,7 +1077,6 @@ def python_accounting_audit(dimension_data, res_main):
                 has_act_weld = ("銲補" in title_clean or "焊" in title_clean or "鉀" in title_clean)
                 is_assy = ("組裝" in title_clean or "拆裝" in title_clean)
                 
-                # --- B模式判斷 ---
                 if is_dis and is_assy: 
                     match_B = True
                     b_debug_msg = "拆裝模式"
@@ -1088,7 +1091,6 @@ def python_accounting_audit(dimension_data, res_main):
                 elif agg_mode == "AB": match = match_A or match_B
                 else: match = match_B if match_B else match_A
 
-                # 🛑 步驟 2: 攔截者 (已移除本體擋軸頸)
                 if match:
                     t_upper = title_clean.upper()
                     
@@ -1102,19 +1104,16 @@ def python_accounting_audit(dimension_data, res_main):
 
                     if s_is_regen and t_is_unregen: match = False
                     if s_is_unregen and t_is_regen: match = False
-                    
                     if s_is_journal and not s_is_body and t_is_body: match = False
                     if "TOP" in s_upper_check and "BOTTOM" in t_upper: match = False
                     if "BOTTOM" in s_upper_check and "TOP" in t_upper: match = False
 
                 if match:
-                    # 🔥 記錄使用的模式
                     if match_B and not match_A:
                         data["used_mode"] = "B"
                         data["b_reason"] = b_debug_msg
                     elif match_B and match_A:
-                        data["used_mode"] = "AB" # 兩者都通
-                    # 預設已經是 A，不用改
+                        data["used_mode"] = "AB"
 
                     data["actual"] += qty_agg
                     c_msg = f"x{agg_multiplier}" if agg_multiplier != 1.0 else ""
@@ -1126,7 +1125,6 @@ def python_accounting_audit(dimension_data, res_main):
     for s_title, data in global_sum_tracker.items():
         if abs(data["actual"] - data["target"]) > 0.01: 
             
-            # 🔥 視覺化來源標籤
             mode_label = "Mode A"
             if data["used_mode"] == "B": mode_label = "Mode B 🚀"
             elif data["used_mode"] == "AB": mode_label = "Mode A+B"
@@ -1139,7 +1137,6 @@ def python_accounting_audit(dimension_data, res_main):
                 fail_table.append({"頁碼": f"P.{d['page']}", "項目名稱": d['title'], "數量": d['val'], "備註": d['note']})
             fail_table.append({"頁碼": "∑", "項目名稱": "加總結果", "數量": data["actual"], "備註": "總計"})
 
-            # 把原因加到 common_reason 裡方便看
             reason_str = f"實交({data['target']}) != 加總({data['actual']})"
             if data['b_reason']:
                 reason_str += f" | {data['b_reason']}"
