@@ -1162,7 +1162,7 @@ def python_accounting_audit(dimension_data, res_main):
                 else: match = match_B if match_B else match_A
 
                 # =========================================================
-                # 🛑 步驟 2: 攔截者 (v64: 銲補/粗車/精車 三方互鎖版)
+                # 🛑 步驟 2: 攔截者 (v69: 車修中立化版)
                 # =========================================================
                 if match:
                     t_upper = title_clean.upper()
@@ -1174,9 +1174,9 @@ def python_accounting_audit(dimension_data, res_main):
                     t_is_unregen = "未再生" in title_clean or "粗車" in title_clean
                     
                     # 2. 精車勢力 (Regen / Finish) 
-                    # 註: "車修" 歸類在精車，但必須排除粗車關鍵字
-                    s_is_regen = ("再生" in s_clean or "精車" in s_clean or "車修" in s_clean) and not s_is_unregen
-                    t_is_regen = ("再生" in title_clean or "精車" in title_clean or "車修" in title_clean) and not t_is_unregen
+                    # 🔥 [v69修正]: 移除 "車修"。讓 "車修" 變為中立，這樣它就可以同時接收 "未再生" 和 "再生"。
+                    s_is_regen = ("再生" in s_clean or "精車" in s_clean) and not s_is_unregen
+                    t_is_regen = ("再生" in title_clean or "精車" in title_clean) and not t_is_unregen
                     
                     # 3. 銲補勢力 (Weld)
                     s_is_weld = ("銲" in s_clean or "焊" in s_clean or "鉀" in s_clean)
@@ -1189,6 +1189,7 @@ def python_accounting_audit(dimension_data, res_main):
                         if t_is_regen or t_is_weld: match = False
                         
                     # 🔒 鎖定 2: 如果籃子是 [精車]，拒絕 [粗車] 與 [銲補]
+                    # (註：總表寫 "ROLL車修" 因為不再屬於 s_is_regen，所以不會啟動此鎖)
                     if s_is_regen:
                         if t_is_unregen or t_is_weld: match = False
                         
