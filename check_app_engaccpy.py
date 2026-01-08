@@ -428,6 +428,56 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
     except Exception as e:
         return {"job_no": f"JSON Parsing Error: {str(e)}", "issues": [], "dimension_data": []}
 
+# --- 平行處理輔助函式 ---
+
+def split_into_batches(pages, max_size=4):
+    """
+    切蛋糕邏輯：
+    1. 如果總頁數 <= 4，整顆拿去。
+    2. 如果 > 4，切成數塊，每塊最多 4 頁。
+       (例如 5頁 -> [1,2,3,4], [5])
+       (例如 8頁 -> [1,2,3,4], [5,6,7,8])
+    這樣做比 3+2 更穩，因為通常前幾頁資訊密度最高。
+    """
+    for i in range(0, len(pages), max_size):
+        yield pages[i:i + max_size]
+
+def merge_ai_results(results_list):
+    """
+    拼蛋糕邏輯：把並行跑回來的 JSON 碎片組合成一個完整的
+    """
+    final_res = {
+        "header_info": {},
+        "summary_rows": [],
+        "dimension_data": [],
+        "issues": [],
+        "_token_usage": {"input": 0, "output": 0}
+    }
+    
+    # 1. 合併 Header (通常第一塊最準，但如果有缺漏可以互補)
+    for res in results_list:
+        # 累積 Token 成本
+        usage = res.get("_token_usage", {})
+        final_res["_token_usage"]["input"] += usage.get("input", 0)
+        final_res["_token_usage"]["output"] += usage.get("output", 0)
+        
+        # 累積資料
+        final_res["summary_rows"].extend(res.get("summary_rows", []))
+        final_res["dimension_data"].extend(res.get("dimension_data", []))
+        final_res["issues"].extend(res.get("issues", []))
+        
+        # Header 策略：以第一份有抓到工令的為主
+        if not final_res["header_info"].get("job_no"):
+            h = res.get("header_info", {})
+            if h.get("job_no") and h.get("job_no") != "Unknown":
+                final_res["header_info"] = h
+
+    # 再次確認：如果都沒抓到，至少保留第一份的日期資訊
+    if not final_res["header_info"] and results_list:
+        final_res["header_info"] = results_list[0].get("header_info", {})
+
+    return final_res
+
 # --- 重點：Python 引擎獨立於 agent 函式之外 ---
 
 def assign_category_by_python(item_title):
@@ -1716,16 +1766,63 @@ if st.session_state.photo_gallery:
             for i, p in enumerate(st.session_state.photo_gallery):
                 combined_input += f"\n=== Page {i+1} ===\n{p.get('full_text','')}\n"
 
-                        # ... (上面是 2. 組合文字 combined_input，不用動) ...
+                        
+            # ==========================================
+            # 🚀 3. AI 並行分析 (Turbo Mode)
+            # ==========================================
+            status_box.write("🤖 AI 正在分批並行處理 (Turbo Mode)...")
+            ai_start_time = time.time()
+            
+            # 1. 準備批次
+            # 這裡設定 max_size=4，也就是 8 頁會拆成 4+4，5 頁會拆成 4+1
+            # 這是最符合您需求的拆法，且效率最高
+            all_pages = st.session_state.photo_gallery
+            batches = list(split_into_batches(all_pages, max_size=4)) 
+            
+            ai_futures = []
+            results_bucket = [None] * len(batches) # 用來按順序存結果
 
-            # 3. AI 分析 (加入計時)
-            status_box.write("🤖 AI 正在全卷分析...")
+            # 定義一個子任務函數
+            def process_batch(batch_idx, batch_pages):
+                # 組合該批次的文字
+                # 注意：這裡要保留原始頁碼 (real_page_index)，不然這批的第1頁會被當成全卷第1頁
+                batch_text = ""
+                for p in batch_pages:
+                    # 找出這張圖在原始全卷是第幾頁 (用 index+1)
+                    real_idx = all_pages.index(p) + 1 
+                    batch_text += f"\n=== Page {real_idx} ===\n{p.get('full_text','')}\n"
+                
+                # 呼叫 AI (全卷搜索文字可以用完整的，但這裡我們傳入 batch_text 讓 AI 專注)
+                # full_text_for_search 參數其實主要是給 Excel 模糊比對用的，傳全卷沒問題
+                full_text_all = "".join([p.get('full_text','') for p in all_pages])
+                
+                return agent_unified_check(batch_text, full_text_all, GEMINI_KEY, main_model_name)
+
+            # 2. 同時發射火箭 (並行執行)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                for idx, batch in enumerate(batches):
+                    future = executor.submit(process_batch, idx, batch)
+                    ai_futures.append((idx, future))
+                
+                # 等待所有火箭回來
+                for idx, future in ai_futures:
+                    try:
+                        res = future.result()
+                        results_bucket[idx] = res
+                    except Exception as e:
+                        # 萬一某一塊失敗，塞一個空殼避免程式崩潰
+                        results_bucket[idx] = {"header_info": {}, "summary_rows": [], "dimension_data": [], "issues": []}
+                        st.error(f"Batch {idx+1} 分析失敗: {e}")
+
+            # 3. 拼湊結果
+            res_main = merge_ai_results(results_bucket)
             
-            ai_start_time = time.time()  # ⏱️ [計時開始] AI
-            res_main = agent_unified_check(combined_input, combined_input, GEMINI_KEY, main_model_name)
-            ai_duration = time.time() - ai_start_time # ⏱️ [計時結束] AI
+            # 為了讓 Cache 存到完整的文字 (給 Excel 規則比對用)，我們還是組一個全卷字串
+            combined_input = ""
+            for i, p in enumerate(all_pages):
+                combined_input += f"\n=== Page {i+1} ===\n{p.get('full_text','')}\n"
             
-            progress_bar.progress(0.8)
+            ai_duration = time.time() - ai_start_time
             
             # 4. Python 邏輯檢查 (加入計時)
             status_box.write("🐍 Python 正在進行邏輯比對...")
