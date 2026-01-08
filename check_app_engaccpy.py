@@ -652,12 +652,11 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
 
 def python_numerical_audit(dimension_data):
     """
-    Python 工程引擎 (v35: 最終完美防護版)
-    整合內容：
-    1. [Range優化]: 允許 "135mm~129mm" 格式。
-    2. [結構修復]: 修正縮排錯誤，解決「有異常卻顯示空表格」的問題。
-    3. [安全防護]: 恢復 try...except 機制，防止單一爛資料導致程式崩潰。
-    4. [括號統一]: 支援全形括號自動轉半形。
+    Python 工程引擎 (v71: 冷酷正宮/全符號支援版)
+    升級內容 (基於 v35 架構)：
+    1. [強力清洗]: 支援全形符號 (＝, ×, ＋) 轉半形，確保與 Excel 規則完美匹配。
+    2. [冷酷正宮]: 若 Excel 有完全匹配項目，絕對禁止模糊匹配，防止誤用相似規格。
+    3. [結構保留]: 完整保留 v35 的正確縮排與 try...except 防護機制。
     """
     grouped_errors = {}
     import re
@@ -669,23 +668,30 @@ def python_numerical_audit(dimension_data):
 
     if not dimension_data: return []
 
-    # 🔥 [修正] 智能去尾函式 (v2: 防暴食版)
+    # 🔥 [修正] 智能去尾函式 (v2: 防暴食版) - 保留您的正確版本
     def remove_tail_info(text):
-        # 舊版 regex: r"[\(（].*?[\)）]\s*$"  <-- 會誤吃中間的字
-        # 新版 regex: r"[\(（][^\(（]*?[\)）]\s*$" 
-        # 解析: [^\(（]*? 代表「括號內容不能包含其他的左括號」
-        # 這樣就能確保只刪除「最後一組」獨立的括號，不會跨越吃掉中間的特規
         return re.sub(r"[\(（][^\(（]*?[\)）]\s*$", "", str(text)).strip()
 
-    # 🔥 2. 預先載入規則
-    rules_map = {}
+    # 🔥 [升級] 強力清洗函式 (v36: 符號轉半形版) - 新增這一段
+    def clean_text(text):
+        t = str(text).upper() # 強制大寫
+        t = t.replace("（", "(").replace("）", ")")
+        t = t.replace("＝", "=").replace("＋", "+").replace("－", "-")
+        t = t.replace("×", "X").replace("＊", "X") 
+        t = t.replace("＃", "#").replace("：", ":")
+        return t.replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
+
+    # 🔥 2. 預先載入規則 (升級為 rules_db 並使用強力清洗)
+    rules_db = {}
     try:
         df = pd.read_excel("rules.xlsx")
         df.columns = [c.strip() for c in df.columns]
         for _, row in df.iterrows():
             iname = str(row.get('Item_Name', '')).strip()
             if iname: 
-                rules_map[str(iname).replace(" ", "").replace("\n", "").strip()] = {
+                # Key 值改用 clean_text 處理
+                key = clean_text(iname)
+                rules_db[key] = {
                     "u_local": str(row.get('Unit_Rule_Local', '')).strip()
                 }
     except: pass
@@ -703,37 +709,38 @@ def python_numerical_audit(dimension_data):
         raw_spec = str(item.get("std_spec", "")).replace('"', "")
         
         # =========================================================
-        # 🔥 3. 執行特規配對 (整合智能去尾 + 括號統一)
+        # 🔥 3. 執行特規配對 (v71 冷酷邏輯)
         # =========================================================
         
+        # 1. 準備比對用的 Key
         title_no_tail = remove_tail_info(raw_title)
-        # 這裡加入全形轉半形
-        title_clean_for_rule = title_no_tail.replace("（", "(").replace("）", ")").replace(" ", "").replace('"', "").strip()
-        title_clean_full = title.strip()
+        title_clean_rule = clean_text(title_no_tail) # 去尾+清洗
+        title_clean_full = clean_text(raw_title)     # 完整+清洗
         
         rule_set = None
+        found_exact = False # 🚩 正宮旗標 (防亂認親戚關鍵)
+
+        # A. 完全匹配 (優先用去尾後的乾淨字串)
+        if title_clean_rule in rules_db:
+            rule_set = rules_db[title_clean_rule]
+            found_exact = True
         
-        # A. 完全匹配
-        if title_clean_full in rules_map:
-            rule_set = rules_map[title_clean_full]
+        # B. 完整匹配 (如果去尾失敗，試試看沒去尾的)
+        if not found_exact and title_clean_full in rules_db:
+            rule_set = rules_db[title_clean_full]
+            found_exact = True
         
-        # B. 去括號匹配
-        if not rule_set:
-            t_no = re.sub(r"[\(（].*?[\)）]", "", title_clean_full)
-            if t_no in rules_map:
-                rule_set = rules_map[t_no]
-        
-        # C. 模糊匹配
-        if not rule_set and rules_map:
+        # C. 模糊匹配 (🔥 只有在「沒找到正宮」時才執行)
+        if not found_exact and rules_db:
             best_score = 0
-            for k, v in rules_map.items():
-                sc = fuzz.token_sort_ratio(k, title_clean_for_rule)
+            for k, v in rules_db.items():
+                sc = fuzz.token_sort_ratio(k, title_clean_rule)
                 if sc > CURRENT_THRESHOLD and sc > best_score:
                     best_score = sc
                     rule_set = v
         
         # ⚡️ [豁免檢查]
-        t_upper = title.upper()
+        t_upper = clean_text(raw_title) # 使用清洗過的大寫來檢查豁免
         if any(k in t_upper for k in ["動平衡", "BALANCING", "熱處理", "HEAT"]):
             continue
             
@@ -742,7 +749,7 @@ def python_numerical_audit(dimension_data):
             if "SKIP" in u_local or "EXEMPT" in u_local or "豁免" in u_local:
                 continue
 
-        # --- 以下為數值提取與檢查邏輯 ---
+        # --- 以下為數值提取與檢查邏輯 (完全保留 v35 內容) ---
         
         mm_nums = [float(n) for n in re.findall(r"(\d+\.?\d*)\s*mm", raw_spec)]
         all_nums = [float(n) for n in re.findall(r"(\d+\.?\d*)", raw_spec)]
@@ -771,7 +778,7 @@ def python_numerical_audit(dimension_data):
             clean_part = part.replace("mm", "_").replace("MM", "_").replace(" ", "").replace("\n", "").strip()
             if not clean_part: continue
             
-            # [Phase 2] 處理 ~ (Range) - v34 寬容版
+            # [Phase 2] 處理 ~ (Range)
             tilde_matches = list(re.finditer(r"(\d+\.?\d*)\s*[_]*\s*[~～-]\s*[_]*\s*(\d+\.?\d*)", clean_part))
             has_valid_tilde = False
             if tilde_matches:
@@ -826,7 +833,7 @@ def python_numerical_audit(dimension_data):
             
             if not val_raw or val_raw in ["N/A", "nan", "M10"]: continue
 
-            # 🔥 這裡把安全防護衣 (try...except) 穿回來了
+            # 🔥 [安全防護] 保留您修復好的 try...except
             try:
                 is_passed, reason, t_used, engine_label = True, "", "N/A", "未知"
 
@@ -891,10 +898,10 @@ def python_numerical_audit(dimension_data):
                             "common_reason": reason, "failures": [],
                             "source": "🐍 工程引擎"
                         }
-                    # 🔥 關鍵！這裡的縮排是正確的，而且被包在 try 裡面
+                    # 🔥 縮排確保正確：在 try 內，if 內，與上層對齊
                     grouped_errors[key]["failures"].append({"id": rid, "val": val_str, "target": f"基準:{t_used}"})
                     
-            except: continue # 🔥 遇到壞掉的資料，安靜跳過，不影響其他資料
+            except: continue
                 
     return list(grouped_errors.values())
     
