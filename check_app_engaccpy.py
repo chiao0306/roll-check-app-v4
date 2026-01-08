@@ -1980,15 +1980,6 @@ if st.session_state.photo_gallery:
             python_process_issues = python_process_audit(dim_data) # 這裡就會讀到 "銲補" 而不是 "再生" 了
             python_header_issues = python_header_audit_batch(st.session_state.photo_gallery, res_main)
 
-            ai_filtered_issues = []
-            ai_raw_issues = res_main.get("issues", [])
-            if isinstance(ai_raw_issues, list):
-                for i in ai_raw_issues:
-                    if isinstance(i, dict):
-                        i['source'] = '🤖 總稽核 AI'
-                        if not any(k in i.get("issue_type", "") for k in ["流程", "規格提取失敗", "未匹配"]):
-                            ai_filtered_issues.append(i)
-
             # 🔥 [修正2] 只保留一次 all_issues 計算
             all_issues = ai_filtered_issues + python_numeric_issues + python_accounting_issues + python_process_issues + python_header_issues
             
@@ -2139,7 +2130,8 @@ if st.session_state.photo_gallery:
                             # 嘗試讀取更多欄位，若 Excel 沒這欄位會顯示 '-'
                             st.markdown(f"**Category:** `{info.get('Category', '-')}`")
                             st.markdown(f"**Process:** `{info.get('Process_Rule', '-')}`")
-                            st.markdown(f"**Logic:** `{info.get('Logic_Prompt', '-')}`")
+                            # 🔥 改成顯示 Force_Rename
+                            st.markdown(f"**Rename:** `{info.get('Force_Rename', '-')}`") 
                         # -----------------------------------------------------
                         
                         # 顯示明細表格
@@ -2281,7 +2273,7 @@ if st.session_state.photo_gallery:
             failed_set = set()
             for issue in visible_issues: # 使用已經濾掉 HIDDEN_DATA 的清單
                 p_str = str(issue.get('page', '?')).strip()
-                i_str = str(item.get('item', '')).strip()
+                i_str = str(issue.get('item', '')).strip()
                 # 針對總表異常，issue 的 page 通常是 "總表" 或來源頁碼
                 failed_set.add((p_str, issue.get('item', '')))
 
