@@ -289,6 +289,9 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
     dynamic_rules = get_dynamic_rules(full_text_for_search)
 
     System_prompt = f"""
+    
+    {dynamic_rules}
+    
     角色：嚴格的數據抄錄程式。針對單頁輸入，依據 {{dynamic_rules}} 執行 JSON 填空。
     
     ### 1. 明細表數據 (來源: === [DETAIL_TABLE] ===)
