@@ -2088,7 +2088,7 @@ if st.session_state.photo_gallery:
                 else:
                     st.info("本次無總表數據。")
 
-            # --- Tab 2: 明細檢查 (v4: 全域通緝版) ---
+             # --- Tab 2: 明細檢查 (v5: 語意防撞版) ---
             with tab_det:
                 raw_det = cache.get("ai_extracted_data", [])
                 
@@ -2138,28 +2138,55 @@ if st.session_state.photo_gallery:
                     for row in raw_det:
                         rp, rt = get_norm_key(row.get('page', '?'), row.get('item_title', ''))
                         
-                        # 標記這行是否看起來像總表標題 (如果頁碼是總表，或是標題包含特定字眼)
-                        # 這裡放寬一點，如果頁碼是數字但標題很像總表，也算
+                        # 標記這行是否看起來像總表標題
                         row_is_summary_page = (rp in SUMMARY_PAGES)
                         
                         current_status = {"會計": False, "工程": False, "流程": False}
                         
                         for iss in issue_registry:
-                            # 🔥 [核心修改] 匹配邏輯
-                            # 情況 A: 頁碼完全一樣 (P.3 對 P.3)
+                            # 情況 A: 頁碼完全一樣
                             match_page = (rp == iss['p'])
                             
-                            # 情況 B: 跨頁通緝 (其中一方是總表級，就忽略頁碼差異)
-                            # 例如: Issue說"總表"有錯，Row在"P.3" -> 允許匹配
+                            # 情況 B: 跨頁通緝
                             cross_page_match = (iss['is_global'] or row_is_summary_page)
                             
                             if match_page or cross_page_match:
                                 # 標題比對
-                                # 如果是跨頁匹配，要求標題相似度高一點 (避免誤殺)
-                                # 如果是同頁匹配，標準稍微寬鬆
                                 threshold = 90 if cross_page_match else 85
+                                score = fuzz.ratio(rt, iss['t'])
                                 
-                                if fuzz.ratio(rt, iss['t']) > threshold:
+                                if score > threshold:
+                                    # 🔥🔥🔥 [新增] 語意防撞機制 (Semantic Guardrails) 🔥🔥🔥
+                                    
+                                    # Guard 1: 本體 vs 軸頸 (絕對互斥)
+                                    # 防止 "本體再生" 撞到 "軸頸再生"
+                                    has_body_iss = "本體" in iss['t']
+                                    has_body_row = "本體" in rt
+                                    has_journal_iss = any(k in iss['t'] for k in ["軸頸", "軸頭", "軸位"])
+                                    has_journal_row = any(k in rt for k in ["軸頸", "軸頭", "軸位"])
+                                    
+                                    if (has_body_iss and has_journal_row) or (has_journal_iss and has_body_row):
+                                        continue
+
+                                    # Guard 2: 再生 vs 未再生 (絕對互斥)
+                                    # 防止 "未再生" 撞到 "再生" (字串包含關係)
+                                    is_unregen_iss = "未再生" in iss['t'] or "粗車" in iss['t']
+                                    is_unregen_row = "未再生" in rt or "粗車" in rt
+                                    
+                                    # 如果一個是未再生，另一個不是，那就絕對不是同一件事
+                                    if is_unregen_iss != is_unregen_row:
+                                        continue
+                                        
+                                    # Guard 3: 銲補 (絕對互斥)
+                                    # 防止 "車修" 撞到 "銲補"
+                                    weld_kws = ["銲", "焊", "鉀"]
+                                    is_weld_iss = any(k in iss['t'] for k in weld_kws)
+                                    is_weld_row = any(k in rt for k in weld_kws)
+                                    
+                                    if is_weld_iss != is_weld_row:
+                                        continue
+
+                                    # --- 通過所有防撞檢查，才正式亮燈 ---
                                     if iss['flags']['會計']: current_status['會計'] = True
                                     if iss['flags']['工程']: current_status['工程'] = True
                                     if iss['flags']['流程']: current_status['流程'] = True
