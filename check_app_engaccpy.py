@@ -1977,10 +1977,21 @@ if st.session_state.photo_gallery:
             # 開始各項稽核 (傳入修復後的資料)
             python_numeric_issues = python_numerical_audit(dim_data)
             python_accounting_issues = python_accounting_audit(dim_data, res_main)
-            python_process_issues = python_process_audit(dim_data) # 這裡就會讀到 "銲補" 而不是 "再生" 了
+            python_process_issues = python_process_audit(dim_data)
             python_header_issues = python_header_audit_batch(st.session_state.photo_gallery, res_main)
 
-            # 🔥 [修正2] 只保留一次 all_issues 計算
+            # 🔥 [關鍵補救] 這一塊必須留著！不能全刪！
+            ai_filtered_issues = []
+            ai_raw_issues = res_main.get("issues", [])
+            if isinstance(ai_raw_issues, list):
+                for i in ai_raw_issues:
+                    if isinstance(i, dict):
+                        i['source'] = '🤖 總稽核 AI'
+                        # 過濾掉一些沒用的 AI 雜訊
+                        if not any(k in i.get("issue_type", "") for k in ["流程", "規格提取失敗", "未匹配"]):
+                            ai_filtered_issues.append(i)
+
+            # 🔥 這裡執行合併 (現在 ai_filtered_issues 已經復活了，不會再報錯)
             all_issues = ai_filtered_issues + python_numeric_issues + python_accounting_issues + python_process_issues + python_header_issues
             
             py_duration = time.time() - py_start_time # ⏱️ [計時結束] Python
