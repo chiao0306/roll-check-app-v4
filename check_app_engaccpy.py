@@ -430,6 +430,85 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
 
 # --- 平行處理輔助函式 ---
 
+def rebalance_orphan_data(dimension_data):
+    """
+    羅賓漢演算法 (劫富濟貧 v1)
+    功能：解決「上一項的尾巴被誤判給下一項」的問題。
+    邏輯：
+    1. 遍歷清單，檢查相鄰的兩項 (Item A, Item B)。
+    2. 如果 A 的數量 < A的目標 (缺) 且 B 的數量 > B的目標 (多)。
+    3. 且 (B的多出量) 大約等於 (A的缺口)。
+    4. 將 B 的「前段數據」搬移給 A 的「後段」。
+    """
+    if not dimension_data: return dimension_data
+    
+    # 先做一個深拷貝以防萬一
+    import copy
+    data = copy.deepcopy(dimension_data)
+    
+    # 輔助：計算 ds 字串裡的項目數
+    def count_ds(ds_str):
+        if not ds_str: return 0
+        return len([x for x in ds_str.split("|") if ":" in x])
+
+    # 輔助：拆解與重組
+    def split_ds(ds_str):
+        return [x for x in ds_str.split("|") if ":" in x]
+    
+    def join_ds(list_data):
+        return "|".join(list_data)
+
+    # 開始巡邏 (從第一項看到倒數第二項)
+    for i in range(len(data) - 1):
+        item_a = data[i]
+        item_b = data[i+1]
+        
+        # 1. 取得目標值 (Target)
+        # 注意：要確保您的 JSON 欄位名稱正確，這裡假設是 'item_pc_target' 或 'target'
+        target_a = int(item_a.get('item_pc_target', 0) or item_a.get('target', 0))
+        target_b = int(item_b.get('item_pc_target', 0) or item_b.get('target', 0))
+        
+        # 如果沒有目標值，就沒辦法玩了，跳過
+        if target_a == 0 or target_b == 0: continue
+        
+        # 2. 取得實際值 (Actual String)
+        list_a = split_ds(item_a.get('ds', ''))
+        list_b = split_ds(item_b.get('ds', ''))
+        
+        len_a = len(list_a)
+        len_b = len(list_b)
+        
+        # 3. 計算缺口與盈餘
+        shortage_a = target_a - len_a   # A 缺多少 (例如 12 - 7 = 5)
+        surplus_b = len_b - target_b    # B 多多少 (例如 17 - 12 = 5)
+        
+        # 4. 判定是否為「誤判案例」
+        # 條件：A 有缺，B 有多，且 B 多出來的量剛好能補 A (或稍微多一點點也行)
+        # 這裡設定嚴格一點：B 多出來的量 >= A 缺的量
+        if shortage_a > 0 and surplus_b >= shortage_a:
+            
+            # 🔥 執行搬移手術
+            move_count = shortage_a # 搬移數量 = A 缺的數量
+            
+            # 從 B 的頭部切下 move_count 個
+            moving_part = list_b[:move_count]
+            remaining_b = list_b[move_count:]
+            
+            # 接到 A 的尾部
+            new_list_a = list_a + moving_part
+            
+            # 5. 更新資料
+            item_a['ds'] = join_ds(new_list_a)
+            item_b['ds'] = join_ds(remaining_b)
+            
+            # 更新後要在 Console 印出紀錄 (方便除錯)
+            print(f"⚖️ 自動平衡觸發：從 [{item_b.get('item_title')}] 移了 {move_count} 筆給 [{item_a.get('item_title')}]")
+            
+            # 注意：一旦搬移過，當前的 item_b (現在變成 item_a 的樣子了) 
+            # 在下一次迴圈變成 item_a 時，資料已經是正確的，可以繼續往下檢查
+            
+    return data
+
 def split_into_batches(pages, max_size=4):
     """
     切蛋糕邏輯：
@@ -1813,7 +1892,7 @@ if st.session_state.photo_gallery:
                         results_bucket[idx] = {"header_info": {}, "summary_rows": [], "dimension_data": [], "issues": []}
                         st.error(f"Batch {idx+1} 分析失敗: {e}")
 
-            # 3. 拼湊結果
+                        # 3. 拼湊結果
             res_main = merge_ai_results(results_bucket)
             
             # 為了讓 Cache 存到完整的文字 (給 Excel 規則比對用)，我們還是組一個全卷字串
@@ -1823,18 +1902,33 @@ if st.session_state.photo_gallery:
             
             ai_duration = time.time() - ai_start_time
             
+            # ========================================================
+            # 🔥 插入點：羅賓漢演算法 (劫富濟貧)
+            # ========================================================
+            # 在進入 Python 邏輯檢查前，先修復斷行誤判 (7個變12個的問題)
+            raw_dim_data = res_main.get("dimension_data", [])
+            balanced_dim_data = rebalance_orphan_data(raw_dim_data)
+            
+            # 重要！把修好的資料塞回 res_main，這樣全域才會同步
+            res_main["dimension_data"] = balanced_dim_data
+            # ========================================================
+
             # 4. Python 邏輯檢查 (加入計時)
             status_box.write("🐍 Python 正在進行邏輯比對...")
             
             py_start_time = time.time() # ⏱️ [計時開始] Python
             
+            # 這裡直接取用剛剛修復好的 balanced_dim_data (從 res_main 拿)
             dim_data = res_main.get("dimension_data", [])
+            
+            # 重新跑分類 (因為資料變動了，要確保分類正確)
             for item in dim_data:
                 new_cat = assign_category_by_python(item.get("item_title", ""))
                 item["category"] = new_cat
                 if "sl" not in item: item["sl"] = {}
                 item["sl"]["lt"] = new_cat
             
+            # 開始各項稽核 (傳入修復後的資料)
             python_numeric_issues = python_numerical_audit(dim_data)
             python_accounting_issues = python_accounting_audit(dim_data, res_main)
             python_process_issues = python_process_audit(dim_data)
