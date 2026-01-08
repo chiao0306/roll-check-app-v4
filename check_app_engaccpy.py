@@ -509,11 +509,12 @@ def rebalance_orphan_data(dimension_data):
             
     return data
 
-# --- 新增：M系列殺手 (清除被誤判為ID的螺紋規格) ---
-def purge_fake_m_ids(dimension_data):
+# --- 1. 雜訊殺手 (清除 M系列假ID 與 N/A 無效數據) ---
+def purge_fake_ids(dimension_data):
     """
-    功能：清除將 M10, M12 等螺紋規格誤判為 ID 的情況。
-    邏輯：檢查 ds 裡面的 Key，如果是 'M' 開頭後面純接數字，直接刪除該筆數據。
+    功能：
+    1. 清除將 M10, M12 等螺紋規格誤判為 ID 的情況。
+    2. 清除 N/A, NAN 等無效 ID。
     """
     if not dimension_data: return dimension_data
     import re
@@ -527,22 +528,19 @@ def purge_fake_m_ids(dimension_data):
         
         for seg in segments:
             if ":" not in seg: continue
-            
-            # 拆解 Key 和 Value
             k, v = seg.split(":", 1)
             k_clean = k.strip().upper().replace(" ", "")
             
-            # 🔥 核心過濾邏輯：
-            # Regex: ^M\d+$  -> 代表 M 開頭，後面接著 1 個以上的數字 (例如 M8, M10, M100)
-            # 如果符合這個格式，我們認定它是螺紋規格，不是 ID -> 跳過不存
+            # 🛑 規則 1: 殺掉 M 開頭接數字 (如 M10, M12)
             if re.match(r"^M\d+$", k_clean):
-                # 可以在這裡 print 出來看看殺了誰
-                # print(f"🔪 殺掉假 ID: {k_clean} (Item: {item.get('item_title')})")
+                continue
+
+            # 🛑 規則 2: 殺掉 N/A, NA, NAN
+            if k_clean in ["N/A", "NA", "NAN", "NULL", "NONE"]:
                 continue
                 
             valid_parts.append(seg)
         
-        # 重組乾淨的 ds
         item['ds'] = "|".join(valid_parts)
         
     return dimension_data
@@ -1947,7 +1945,7 @@ if st.session_state.photo_gallery:
             
             # 步驟 1: 先執行 M 系列殺手 (把 M10, M12 這種假 ID 殺掉)
             # 必須先做這個，不然數量會虛胖，影響後面的平衡計算
-            clean_dim_data = purge_fake_m_ids(raw_dim_data)
+            clean_dim_data = purge_fake_ids(raw_dim_data)
             
             # 步驟 2: 再執行 羅賓漢演算法 (修復 7個變12個 的斷行問題)
             # 這裡傳入的是已經殺乾淨的 clean_dim_data
