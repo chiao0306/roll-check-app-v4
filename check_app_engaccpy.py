@@ -1,4 +1,5 @@
 import streamlit as st
+st.cache_data.clear()  # <--- 🔥 請加上這一行！(看到介面變正常後可以刪掉)
 import streamlit.components.v1 as components
 from azure.core.credentials import AzureKeyCredential
 from azure.ai.documentintelligence import DocumentIntelligenceClient
@@ -104,7 +105,7 @@ with st.sidebar:
         on_change=update_url_param
     )
 
-# --- Excel 規則讀取函數 (最終顯示版 - 強制移除 Logic) ---
+# --- Excel 規則讀取函數 (最終淨化版) ---
 @st.cache_data
 def get_dynamic_rules(ocr_text, debug_mode=False):
     try:
@@ -116,7 +117,7 @@ def get_dynamic_rules(ocr_text, debug_mode=False):
         ocr_text_clean = str(ocr_text).upper().replace(" ", "").replace("\n", "")
         
         ai_prompt_list = []    # 給 AI 的
-        debug_view_list = []   # 給人看的 Debug 資訊
+        debug_view_list = []   # 給人看的
 
         for index, row in df.iterrows():
             item_name = str(row.get('Item_Name', '')).strip()
@@ -126,24 +127,21 @@ def get_dynamic_rules(ocr_text, debug_mode=False):
             if score >= 85:
                 def clean(v): return str(v).strip() if v and str(v) != 'nan' else None
                 
-                # 讀取欄位
                 spec = clean(row.get('Standard_Spec', ''))
-                
-                # 🔥 這裡我故意改名變數，確保舊的 Cache 失效
-                f_rename_check = clean(row.get('Force_Rename', '')) 
+                f_rename = clean(row.get('Force_Rename', '')) # 🔥 讀取強制改名
                 
                 u_fr = clean(row.get('Unit_Rule_Freight', ''))
                 u_loc = clean(row.get('Unit_Rule_Local', ''))
                 u_agg = clean(row.get('Unit_Rule_Agg', ''))
 
-                # --- A. 建構 AI Prompt ---
+                # --- A. 建構 AI Prompt (只給規格) ---
                 if not debug_mode:
                     if spec:
                         desc = f"- [參考資訊] {item_name}\n"
                         desc += f"  - 標準規格: {spec}\n"
                         ai_prompt_list.append(desc)
                 
-                # --- B. 建構 Debug 顯示 ---
+                # --- B. 建構 Debug 顯示 (邏輯與Logic徹底脫鉤) ---
                 else:
                     block = f"#### ■ {item_name} (匹配度 {score}%)\n"
                     
@@ -156,9 +154,9 @@ def get_dynamic_rules(ocr_text, debug_mode=False):
                     block += "\n**[ Python 硬邏輯設定 ]**\n"
                     has_py = False
                     
-                    # 🔥 這裡顯示 Force_Rename
-                    if f_rename_check:
-                        block += f"- ⚡ 強制改名 : `{f_rename_check}`\n"
+                    # 🔥 這裡顯示 Force_Rename，絕對沒有 Logic
+                    if f_rename:
+                        block += f"- ⚡ 強制改名 : `{f_rename}`\n"
                         has_py = True
                         
                     if u_fr: 
@@ -398,82 +396,77 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
 
 # --- 平行處理輔助函式 ---
 
-# --- 3. 強制更名官 (真相現行版 - Debug Mode) ---
+# --- 3. 強制更名官 (網頁廣播版) ---
 def apply_forced_renaming(dimension_data):
     """
-    功能：讀取 rules.xlsx 的 'Force_Rename' 欄位。
-    特點：會在 Terminal 印出詳細的除錯資訊，抓出改名失敗的原因。
+    功能：讀取 Excel 強制改名。
+    特點：直接在網頁上印出 Log，不用看後台。
     """
     if not dimension_data: return dimension_data
     import pandas as pd
     
-    # 統一清洗標準：轉大寫、去空、去括號、去換行
     def clean_key(text):
-        t = str(text).upper()
-        t = t.replace(" ", "").replace("\n", "").replace("\r", "")
+        t = str(text).upper().replace(" ", "").replace("\n", "").replace("\r", "")
         t = t.replace("（", "(").replace("）", ")")
         return t.strip()
 
-    print("\n" + "="*50)
-    print("🕵️‍♂️ [偵探模式] 開始執行強制更名檢查...")
-    
-    rename_map = {}
-    try:
-        # 強制重讀 Excel
-        df = pd.read_excel("rules.xlsx")
-        # 清洗欄位名稱
-        df.columns = [c.strip() for c in df.columns]
+    # 🔥 直接在網頁上開一個除錯視窗
+    with st.expander("🕵️‍♂️【強制更名官】現場直擊報告 (Debug)", expanded=True):
+        st.write("正在讀取 rules.xlsx...")
         
-        # 1. 檢查欄位是否存在
-        print(f"📊 Excel 現有欄位: {df.columns.tolist()}")
-        if "Force_Rename" not in df.columns:
-            print("❌ [致命錯誤] Excel 裡找不到 'Force_Rename' 欄位！請檢查拼字！")
-            print("="*50 + "\n")
+        rename_map = {}
+        try:
+            # 強制重讀 Excel
+            df = pd.read_excel("rules.xlsx")
+            df.columns = [c.strip() for c in df.columns]
+            
+            if "Force_Rename" not in df.columns:
+                st.error("❌ 嚴重錯誤：Excel 裡找不到 'Force_Rename' 欄位！")
+                st.dataframe(df.head()) # 秀出 Excel 給你看
+                return dimension_data
+            
+            # 載入規則
+            for i, row in df.iterrows():
+                orig = str(row.get('Item_Name', '')).strip()
+                target = str(row.get('Force_Rename', '')).strip()
+                
+                if orig and target and target.lower() != 'nan':
+                    key = clean_key(orig)
+                    rename_map[key] = target
+                    if "軸頸" in orig:
+                        st.text(f"📘 已載入規則: [{orig}] -> [{target}]")
+
+        except Exception as e:
+            st.error(f"❌ 讀取失敗: {e}")
             return dimension_data
-            
-        # 2. 載入規則
-        for i, row in df.iterrows():
-            orig = str(row.get('Item_Name', '')).strip()
-            target = str(row.get('Force_Rename', '')).strip()
-            
-            # 只有當 Force_Rename 有值才載入
-            if orig and target and target.lower() != 'nan':
-                key = clean_key(orig)
-                rename_map[key] = target
-                # 印出我們載入了什麼規則
-                if "軸頸" in orig: # 只印相關的避免洗版
-                    print(f"📘 [規則載入] 原名KEY: [{key}] -> 目標: [{target}]")
 
-    except Exception as e:
-        print(f"❌ 讀取 rules.xlsx 失敗: {e}")
-        return dimension_data
-
-    # 3. 執行比對
-    count = 0
-    for item in dimension_data:
-        old_title = item.get('item_title', '')
-        clean_t = clean_key(old_title)
+        # 執行比對
+        count = 0
+        st.write("--- 開始比對 AI 抄錄資料 ---")
         
-        # 只針對疑似目標進行 Log
-        if "軸頸" in old_title:
-            print(f"🧐 [AI 抄錄] 原始: [{old_title}] | 清洗後KEY: [{clean_t}]")
+        for item in dimension_data:
+            old_title = item.get('item_title', '')
+            clean_t = clean_key(old_title)
             
-            if clean_t in rename_map:
-                new_name = rename_map[clean_t]
-                print(f"✅ >> 匹配成功！準備改成: [{new_name}]")
-            else:
-                print(f"❌ >> 匹配失敗！規則庫裡沒有這個 KEY。")
-                # 提示使用者可能的差異
-                # 這裡可以看出來是不是差了一個空格或符號
+            # 針對目標進行顯示
+            if "軸頸" in old_title:
+                if clean_t in rename_map:
+                    new_name = rename_map[clean_t]
+                    st.success(f"✅ 抓到了！[{old_title}] 改名為 -> [{new_name}]")
+                    # 執行改名
+                    item['item_title'] = new_name
+                    item['_original_title'] = old_title
+                    count += 1
+                else:
+                    # 顯示為什麼沒抓到
+                    st.warning(f"❌ 沒抓到: [{old_title}]")
+                    st.caption(f"機器人的Key: '{clean_t}' (請檢查 Excel 裡的 Item_Name 是否跟這個一模一樣)")
 
-        if clean_t in rename_map:
-            item['item_title'] = rename_map[clean_t]
-            item['_original_title'] = old_title
-            count += 1
+        if count > 0:
+            st.success(f"🎉 總共成功修改了 {count} 筆資料！")
+        else:
+            st.error("⚠️ 掃描完畢，沒有任何項目被修改。請檢查上面的黃色警告。")
             
-    print(f"🕵️‍♂️ [偵探模式] 結束，共修改了 {count} 筆。")
-    print("="*50 + "\n")
-        
     return dimension_data
 
 def rebalance_orphan_data(dimension_data):
