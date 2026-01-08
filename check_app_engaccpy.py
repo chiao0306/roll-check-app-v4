@@ -1,5 +1,4 @@
 import streamlit as st
-st.cache_data.clear()  # <--- 🔥 請加上這一行！(看到介面變正常後可以刪掉)
 import streamlit.components.v1 as components
 from azure.core.credentials import AzureKeyCredential
 from azure.ai.documentintelligence import DocumentIntelligenceClient
@@ -396,16 +395,16 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
 
 # --- 平行處理輔助函式 ---
 
-# --- 3. 強制更名官 (存檔版 - 解決消失問題) ---
+# --- 強制更名官 (正式靜音版) ---
 def apply_forced_renaming(dimension_data):
+    """
+    功能：讀取 Excel 強制改名。
+    邏輯：使用「包含 (in)」邏輯，修正多餘符號或括號導致的匹配失敗。
+    """
     if not dimension_data: return dimension_data
     import pandas as pd
     
-    logs = []
-    logs.append("🚀 開始執行強制更名檢查 (包含匹配模式)...")
-
     def clean_key(text):
-        # 轉大寫並移除空格、換行、括號（統一比對標準）
         t = str(text).upper().replace(" ", "").replace("\n", "").replace("\r", "")
         t = t.replace("（", "(").replace("）", ")")
         return t.strip()
@@ -418,27 +417,24 @@ def apply_forced_renaming(dimension_data):
         for i, row in df.iterrows():
             orig = str(row.get('Item_Name', '')).strip()
             target = str(row.get('Force_Rename', '')).strip()
+            
             if orig and target and target.lower() != 'nan':
                 rename_map[clean_key(orig)] = target
-    except Exception as e:
-        logs.append(f"❌ 讀取 Excel 失敗: {e}")
-        return dimension_data
+    except:
+        pass # 正式版安靜失敗，不干擾流程
 
-    count = 0
+    # 執行比對
     for item in dimension_data:
         old_title = item.get('item_title', '')
         ai_clean_key = clean_key(old_title)
         
-        # 🔥 關鍵：檢查 Excel 的 Key 是否包含在 AI 的標題中
+        # 檢查 Excel 的 Key 是否包含在 AI 的標題中
         for rule_k, rule_v in rename_map.items():
             if rule_k in ai_clean_key:
                 item['item_title'] = rule_v
                 item['_original_title'] = old_title
-                logs.append(f"✅ 成功匹配！[{old_title}] -> 改名為 -> [{rule_v}]")
-                count += 1
                 break 
-
-    st.session_state['renaming_logs'] = logs # 讓結果顯示在網頁上
+            
     return dimension_data
 
 def rebalance_orphan_data(dimension_data):
@@ -2002,22 +1998,6 @@ if st.session_state.photo_gallery:
 
        # --- 💡 顯示結果區塊 ---
     if st.session_state.analysis_result_cache:
-    
-        # 🔥🔥🔥【插入點】顯示強制更名報告 (永久顯示) 🔥🔥🔥
-        if 'renaming_logs' in st.session_state and st.session_state['renaming_logs']:
-            with st.expander("🕵️‍♂️【強制更名官】現場直擊報告 (Debug)", expanded=True):
-                for log in st.session_state['renaming_logs']:
-                    if "✅" in log:
-                        st.success(log)
-                    elif "❌" in log:
-                        st.error(log)
-                    elif "⚠️" in log:
-                        st.warning(log)
-                    else:
-                        st.text(log)
-        # 🔥🔥🔥【插入結束】🔥🔥🔥
-        # ... (後面原本的程式碼) ...
-
         cache = st.session_state.analysis_result_cache
         all_issues = cache.get('all_issues', [])
 
