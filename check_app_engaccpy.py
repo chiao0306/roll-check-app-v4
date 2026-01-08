@@ -306,7 +306,7 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
     ### 1. 明細表數據 (來源: === [DETAIL_TABLE] ===)
     - **item_title**: 完整抄錄，嚴禁遺漏「未再生、銲補、車修、軸頸」等關鍵字。
     - **std_spec**: 抄錄含 `mm, ±, +, -` 的規格文字。
-    - **item_pc_target**: 提取標題括號內數字 (如 `(4SET)`->`4`), 無則 `0`。
+    - **item_pc_target**: 提取標題最後一個括號內數字 (如 `(4SET)`->`4`), 無則 `0`。
     - **batch_total_qty**: 若標題含「熱處理、研磨、動平衡」，提取首欄總量 (如 `2425KG`)，否則 `0`。
     - **ds**: 格式 `ID:數值|ID:數值`。
       - **規則**: 保留尾數0 (如 `349.90`)。
