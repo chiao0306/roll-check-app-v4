@@ -283,140 +283,6 @@ def extract_layout_with_azure(file_obj, endpoint, key):
 
     return markdown_output, header_snippet, final_full_text, None, real_page_num
     
-def assign_category_by_python(item_title):
-    """
-    Python 分類官 (v71: 三位一體完全版)
-    整合內容：
-    1. [強力清洗]: 支援全形符號 (＝, ×, ＋) 轉半形，解決 OCR 識別問題。
-    2. [冷酷正宮]: 導入 v71 邏輯，若 Excel 有完全匹配項目(含規則為空者)，絕對禁止模糊匹配。
-       - 避免 "正宮沒填規則，卻誤抓小三規則" 的情況。
-    3. [防暴食]: 保留 v2 去尾邏輯，保護 (1SET=4PCS) 結構。
-    """
-    import pandas as pd
-    from thefuzz import fuzz
-    import re
-
-    # 1. 讀取全域門檻
-    CURRENT_THRESHOLD = globals().get('GLOBAL_FUZZ_THRESHOLD', 90)
-
-    # 🔥 [修正] 智能去尾函式 (v2: 防暴食版)
-    def remove_tail_info(text):
-        # [^\(（]*? 代表「括號內容不能包含其他的左括號」
-        return re.sub(r"[\(（][^\(（]*?[\)）]\s*$", "", str(text)).strip()
-
-    # 🔥 [升級] 強力清洗函式 (v36: 符號轉半形版)
-    def clean_text(text):
-        t = str(text).upper() # 強制大寫
-        # 符號統一 (全形轉半形)
-        t = t.replace("（", "(").replace("）", ")")
-        t = t.replace("＝", "=").replace("＋", "+").replace("－", "-")
-        t = t.replace("×", "X").replace("＊", "X") # 乘號轉 X
-        t = t.replace("＃", "#").replace("：", ":")
-        # 清雜訊
-        return t.replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
-
-    # 🔥 [關鍵步驟] 先做去尾手術，再做強力清理
-    title_no_tail = remove_tail_info(item_title)
-    
-    # 用「去尾+清洗」後的乾淨字串來做比對鍵值 (Phase 2 用)
-    title_clean = clean_text(title_no_tail)
-    
-    # 原始大寫檢查用 (Phase 1 & 3 用)
-    t_upper = str(item_title).upper().replace(" ", "").replace("\n", "").replace('"', "")
-
-    # ==========================================
-    # ⚡️ Phase 1: 絕對豁免
-    # ==========================================
-    if any(k in t_upper for k in ["動平衡", "BALANCING", "熱處理", "HEAT", "TREATING"]):
-        return "exempt"
-
-    # ==========================================
-    # ⚡️ Phase 2: Excel 特規 (v71 冷酷正宮邏輯)
-    # ==========================================
-    try:
-        df = pd.read_excel("rules.xlsx")
-        df.columns = [c.strip() for c in df.columns]
-        
-        best_score = 0
-        forced_rule = None
-        found_exact = False # 🚩 正宮旗標
-
-        # 1. 建立搜尋清單 (先轉成字典以利快速查找)
-        rules_db = {}
-        for _, row in df.iterrows():
-            iname = str(row.get('Item_Name', '')).strip()
-            rule_cat = str(row.get('Category_Rule', '')).strip()
-            if rule_cat.lower() == 'nan': rule_cat = "" # 轉成空字串，方便後續判斷
-            
-            if iname:
-                # Key 值也要用強力清洗版
-                key = clean_text(iname)
-                rules_db[key] = rule_cat
-
-        # 2. 檢查完全匹配 (正宮檢查)
-        if title_clean in rules_db:
-            found_exact = True # 找到了！無論規則是不是空的，都算找到
-            forced_rule = rules_db[title_clean]
-            
-            # 如果規則是空的，代表 User 故意留白，意思是「不要用特規，回歸一般邏輯」
-            # 此時 forced_rule = ""，後面的 if forced_rule 判斷會跳過，直接進入 Phase 3
-            # 這是正確的！因為找到了正宮，所以我們「不跑模糊匹配」，直接往下走。
-
-        # 3. 檢查模糊匹配 (只在沒找到正宮時執行)
-        if not found_exact and rules_db:
-            for k, v in rules_db.items():
-                if not v: continue # 如果規則是空的，模糊匹配抓到也沒用，跳過
-                
-                score = fuzz.token_sort_ratio(k, title_clean)
-                if score > CURRENT_THRESHOLD: 
-                    if score > best_score:
-                        best_score = score
-                        forced_rule = v
-                    elif score == best_score:
-                        if len(v) > len(forced_rule if forced_rule else ""):
-                            forced_rule = v
-
-        # 4. 解析規則
-        if forced_rule:
-            fr = forced_rule.upper()
-            if "豁免" in fr or "EXEMPT" in fr or "SKIP" in fr: return "exempt"
-            if "本體" in fr or "UN_REGEN" in fr or "未再生" in fr: return "un_regen"
-            if "再生" in fr or "精車" in fr or "RANGE" in fr: return "range"
-            if "銲" in fr or "焊" in fr or "MIN" in fr: return "min_limit"
-            if "軸頸" in fr or "軸頭" in fr or "軸位" in fr or "MAX" in fr: return "max_limit"
-            
-    except Exception: pass
-
-    # ==========================================
-    # ⚡️ Phase 3: 關鍵字補底 (黃金順序)
-    # ==========================================
-    # 走到這裡代表：
-    # 1. Excel 裡完全沒這個項目
-    # 2. Excel 裡有這個項目(正宮)，但 Category_Rule 是空的 -> 回歸一般判斷
-
-    # 1. [內孔] 特例：優先權最高 -> range
-    if "內孔" in t_upper:
-        return "range"
-
-    # 2. [焊補]：優先於軸頸 -> min_limit
-    has_weld = any(k in t_upper for k in ["銲補", "銲接", "焊", "WELD", "鉀"])
-    if has_weld:
-        return "min_limit"
-
-    # 3. [未再生]：區分本體與軸頸
-    has_unregen = any(k in t_upper for k in ["未再生", "UN_REGEN", "粗車"])
-    if has_unregen:
-        if any(k in t_upper for k in ["軸頸", "軸頭", "軸位", "JOURNAL"]): 
-            return "max_limit"
-        return "un_regen"
-
-    # 4. [再生/精加工]：(移除了 "車修") -> range
-    has_regen = any(k in t_upper for k in ["再生", "研磨", "精加工", "KEYWAY", "GRIND", "MACHIN", "精車", "組裝", "拆裝", "裝配", "ASSY", "配磨"])
-    if has_regen:
-        return "range"
-
-    return "unknown"
-    
 def consolidate_issues(issues):
     """
     🗂️ 異常合併器：將「項目」、「錯誤類型」、「原因」完全相同的異常合併成一張卡片
@@ -589,6 +455,140 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
         return {"job_no": f"JSON Parsing Error: {str(e)}", "issues": [], "dimension_data": []}
 
 # --- 重點：Python 引擎獨立於 agent 函式之外 ---
+
+def assign_category_by_python(item_title):
+    """
+    Python 分類官 (v71: 三位一體完全版)
+    整合內容：
+    1. [強力清洗]: 支援全形符號 (＝, ×, ＋) 轉半形，解決 OCR 識別問題。
+    2. [冷酷正宮]: 導入 v71 邏輯，若 Excel 有完全匹配項目(含規則為空者)，絕對禁止模糊匹配。
+       - 避免 "正宮沒填規則，卻誤抓小三規則" 的情況。
+    3. [防暴食]: 保留 v2 去尾邏輯，保護 (1SET=4PCS) 結構。
+    """
+    import pandas as pd
+    from thefuzz import fuzz
+    import re
+
+    # 1. 讀取全域門檻
+    CURRENT_THRESHOLD = globals().get('GLOBAL_FUZZ_THRESHOLD', 90)
+
+    # 🔥 [修正] 智能去尾函式 (v2: 防暴食版)
+    def remove_tail_info(text):
+        # [^\(（]*? 代表「括號內容不能包含其他的左括號」
+        return re.sub(r"[\(（][^\(（]*?[\)）]\s*$", "", str(text)).strip()
+
+    # 🔥 [升級] 強力清洗函式 (v36: 符號轉半形版)
+    def clean_text(text):
+        t = str(text).upper() # 強制大寫
+        # 符號統一 (全形轉半形)
+        t = t.replace("（", "(").replace("）", ")")
+        t = t.replace("＝", "=").replace("＋", "+").replace("－", "-")
+        t = t.replace("×", "X").replace("＊", "X") # 乘號轉 X
+        t = t.replace("＃", "#").replace("：", ":")
+        # 清雜訊
+        return t.replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
+
+    # 🔥 [關鍵步驟] 先做去尾手術，再做強力清理
+    title_no_tail = remove_tail_info(item_title)
+    
+    # 用「去尾+清洗」後的乾淨字串來做比對鍵值 (Phase 2 用)
+    title_clean = clean_text(title_no_tail)
+    
+    # 原始大寫檢查用 (Phase 1 & 3 用)
+    t_upper = str(item_title).upper().replace(" ", "").replace("\n", "").replace('"', "")
+
+    # ==========================================
+    # ⚡️ Phase 1: 絕對豁免
+    # ==========================================
+    if any(k in t_upper for k in ["動平衡", "BALANCING", "熱處理", "HEAT", "TREATING"]):
+        return "exempt"
+
+    # ==========================================
+    # ⚡️ Phase 2: Excel 特規 (v71 冷酷正宮邏輯)
+    # ==========================================
+    try:
+        df = pd.read_excel("rules.xlsx")
+        df.columns = [c.strip() for c in df.columns]
+        
+        best_score = 0
+        forced_rule = None
+        found_exact = False # 🚩 正宮旗標
+
+        # 1. 建立搜尋清單 (先轉成字典以利快速查找)
+        rules_db = {}
+        for _, row in df.iterrows():
+            iname = str(row.get('Item_Name', '')).strip()
+            rule_cat = str(row.get('Category_Rule', '')).strip()
+            if rule_cat.lower() == 'nan': rule_cat = "" # 轉成空字串，方便後續判斷
+            
+            if iname:
+                # Key 值也要用強力清洗版
+                key = clean_text(iname)
+                rules_db[key] = rule_cat
+
+        # 2. 檢查完全匹配 (正宮檢查)
+        if title_clean in rules_db:
+            found_exact = True # 找到了！無論規則是不是空的，都算找到
+            forced_rule = rules_db[title_clean]
+            
+            # 如果規則是空的，代表 User 故意留白，意思是「不要用特規，回歸一般邏輯」
+            # 此時 forced_rule = ""，後面的 if forced_rule 判斷會跳過，直接進入 Phase 3
+            # 這是正確的！因為找到了正宮，所以我們「不跑模糊匹配」，直接往下走。
+
+        # 3. 檢查模糊匹配 (只在沒找到正宮時執行)
+        if not found_exact and rules_db:
+            for k, v in rules_db.items():
+                if not v: continue # 如果規則是空的，模糊匹配抓到也沒用，跳過
+                
+                score = fuzz.token_sort_ratio(k, title_clean)
+                if score > CURRENT_THRESHOLD: 
+                    if score > best_score:
+                        best_score = score
+                        forced_rule = v
+                    elif score == best_score:
+                        if len(v) > len(forced_rule if forced_rule else ""):
+                            forced_rule = v
+
+        # 4. 解析規則
+        if forced_rule:
+            fr = forced_rule.upper()
+            if "豁免" in fr or "EXEMPT" in fr or "SKIP" in fr: return "exempt"
+            if "本體" in fr or "UN_REGEN" in fr or "未再生" in fr: return "un_regen"
+            if "再生" in fr or "精車" in fr or "RANGE" in fr: return "range"
+            if "銲" in fr or "焊" in fr or "MIN" in fr: return "min_limit"
+            if "軸頸" in fr or "軸頭" in fr or "軸位" in fr or "MAX" in fr: return "max_limit"
+            
+    except Exception: pass
+
+    # ==========================================
+    # ⚡️ Phase 3: 關鍵字補底 (黃金順序)
+    # ==========================================
+    # 走到這裡代表：
+    # 1. Excel 裡完全沒這個項目
+    # 2. Excel 裡有這個項目(正宮)，但 Category_Rule 是空的 -> 回歸一般判斷
+
+    # 1. [內孔] 特例：優先權最高 -> range
+    if "內孔" in t_upper:
+        return "range"
+
+    # 2. [焊補]：優先於軸頸 -> min_limit
+    has_weld = any(k in t_upper for k in ["銲補", "銲接", "焊", "WELD", "鉀"])
+    if has_weld:
+        return "min_limit"
+
+    # 3. [未再生]：區分本體與軸頸
+    has_unregen = any(k in t_upper for k in ["未再生", "UN_REGEN", "粗車"])
+    if has_unregen:
+        if any(k in t_upper for k in ["軸頸", "軸頭", "軸位", "JOURNAL"]): 
+            return "max_limit"
+        return "un_regen"
+
+    # 4. [再生/精加工]：(移除了 "車修") -> range
+    has_regen = any(k in t_upper for k in ["再生", "研磨", "精加工", "KEYWAY", "GRIND", "MACHIN", "精車", "組裝", "拆裝", "裝配", "ASSY", "配磨"])
+    if has_regen:
+        return "range"
+
+    return "unknown"
 
 def python_numerical_audit(dimension_data):
     """
