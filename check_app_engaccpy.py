@@ -85,7 +85,7 @@ with st.sidebar:
     model_selection = st.selectbox(
         "負責：規格、製程、數量、統計全包", 
         options=options_list, 
-        index=2, 
+        index=1, 
         key="main_model"
     )
     main_model_name = model_options[model_selection]
@@ -1852,7 +1852,7 @@ if st.session_state.photo_gallery:
             # 這裡設定 max_size=4，也就是 8 頁會拆成 4+4，5 頁會拆成 4+1
             # 這是最符合您需求的拆法，且效率最高
             all_pages = st.session_state.photo_gallery
-            batches = list(split_into_batches(all_pages, max_size=1)) 
+            batches = list(split_into_batches(all_pages, max_size=3)) 
             
             ai_futures = []
             results_bucket = [None] * len(batches) # 用來按順序存結果
