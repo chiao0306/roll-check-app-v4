@@ -1270,11 +1270,11 @@ def python_accounting_audit(dimension_data, res_main):
 
 def python_process_audit(dimension_data):
     """
-    Python 流程引擎 (v33: 智能去尾配對版)
-    升級內容：
-    1. [匹配升級]: 引入 remove_tail_info，在流程規則配對時去除標題末端括號。
-       - 確保流程引擎能正確抓到 Excel 指定的製程屬性 (track) 與工序 (stage)。
-    2. [核心邏輯]: 繼承 v25 的全域大寫強制與規則優先邏輯。
+    Python 流程引擎 (v71: 冷酷正宮/全符號支援版)
+    升級內容 (基於您的 v33 架構)：
+    1. [強力清洗]: 支援全形符號 (＝, ×, ＋) 轉半形，確保與 Excel 規則完美匹配。
+    2. [冷酷正宮]: 若 Excel 有完全匹配項目(含空白規則)，絕對禁止模糊匹配，避免誤判。
+    3. [ID修復]: 完整保留您修正的 31×83 -> 31X83 邏輯。
     """
     process_issues = []
     import re
@@ -1284,24 +1284,22 @@ def python_process_audit(dimension_data):
     # 🔥 1. 讀取全域門檻
     CURRENT_THRESHOLD = globals().get('GLOBAL_FUZZ_THRESHOLD', 95)
 
-    # 🔥 [修正] 智能去尾函式 (v2: 防暴食版)
+    # 🔥 [修正] 智能去尾函式 (v2: 防暴食版) - 保留您的正確版本
     def remove_tail_info(text):
-        # 舊版 regex: r"[\(（].*?[\)）]\s*$"  <-- 會誤吃中間的字
-        # 新版 regex: r"[\(（][^\(（]*?[\)）]\s*$" 
-        # 解析: [^\(（]*? 代表「括號內容不能包含其他的左括號」
-        # 這樣就能確保只刪除「最後一組」獨立的括號，不會跨越吃掉中間的特規
         return re.sub(r"[\(（][^\(（]*?[\)）]\s*$", "", str(text)).strip()
 
+    # 🔥 [升級] 強力清洗函式 (v36: 符號轉半形版)
     def clean_text(text):
-        t = str(text).upper() # 1. 轉大寫
+        t = str(text).upper() # 1. 強制轉大寫
         # 2. 符號統一 (全形轉半形)
         t = t.replace("（", "(").replace("）", ")")
         t = t.replace("＝", "=").replace("＋", "+").replace("－", "-")
+        t = t.replace("×", "X").replace("＊", "X") 
         t = t.replace("＃", "#").replace("：", ":")
         # 3. 清雜訊
         return t.replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
 
-    # 2. 載入規則 (Key 與 Value 都會被轉大寫)
+    # 2. 載入規則 (升級邏輯：空規則也要載入)
     rules_map = {}
     try:
         df = pd.read_excel("rules.xlsx")
@@ -1309,10 +1307,11 @@ def python_process_audit(dimension_data):
         for _, row in df.iterrows():
             iname = str(row.get('Item_Name', '')).strip()
             p_rule = str(row.get('Process_Rule', '')).strip()
-            
-            # 排除空值與 nan
-            if iname and p_rule and p_rule.lower() != 'nan':
-                # Key 經過 clean_text 變大寫，Value 也轉大寫
+            if p_rule.lower() == 'nan': p_rule = "" # 轉成空字串
+
+            if iname:
+                # Key 值使用強力清洗
+                # 即使 p_rule 是空的，也要存進去，這是「冷酷正宮」的基礎
                 rules_map[clean_text(iname)] = p_rule.upper()
     except: pass
 
@@ -1325,42 +1324,41 @@ def python_process_audit(dimension_data):
         p_num = item.get("page", "?")
         title = str(item.get("item_title", "")).strip()
         
-        # 這裡出來的 title_clean 已經是全大寫了
-        title_clean = clean_text(title)
-        
-        # 準備匹配用的去尾標題
-        title_no_tail = remove_tail_info(title) # 先去尾 (這裡傳入原始 title 比較保險，雖然 title_clean 是大寫去空)
-        # 修正：因為 remove_tail_info 處理的是原始字串，我們再對處理結果做 clean_text
-        # 但要注意 remove_tail_info 內部邏輯可能依賴括號，而 clean_text 尚未去除括號
-        # 最佳順序：先去尾 -> 再轉大寫去空
-        title_clean_rule = clean_text(title_no_tail)
+        # 準備匹配用的 Key
+        title_no_tail = remove_tail_info(title)
+        title_clean_rule = clean_text(title_no_tail) # 去尾+清洗 (Key)
+        title_clean_full = clean_text(title)         # 完整+清洗 (豁免檢查用)
         
         ds = str(item.get("ds", ""))
         
-        # ⚡️ [既有豁免] 動平衡、熱處理直接跳過 (關鍵字已是大寫，比對安全)
-        if any(k in title_clean for k in ["動平衡", "BALANCING", "熱處理", "HEAT"]):
+        # ⚡️ [既有豁免]
+        if any(k in title_clean_full for k in ["動平衡", "BALANCING", "熱處理", "HEAT"]):
             continue
 
         # =========================================================
-        # 🔥 3. 執行特規配對 (整合智能去尾)
+        # 🔥 3. 執行特規配對 (v71 冷酷邏輯)
         # =========================================================
         forced_rule = None
-        
-        # A. 完全匹配 (優先用完整字串)
-        if title_clean in rules_map:
-            forced_rule = rules_map[title_clean]
-        
-        # B. 去括號匹配 (去中間括號)
-        if not forced_rule:
-            t_no = re.sub(r"[\(（].*?[\)）]", "", title_clean)
+        found_exact = False # 🚩 正宮旗標
+
+        # A. 完全匹配 (優先用去尾後的乾淨字串)
+        if title_clean_rule in rules_map:
+            forced_rule = rules_map[title_clean_rule]
+            found_exact = True # 找到了！
+
+        # B. 去括號匹配 (去中間括號) - 這是您原本有的邏輯，我保留著
+        if not found_exact: # 只有沒找到時才試這個
+            t_no = re.sub(r"[\(（].*?[\)）]", "", title_clean_rule)
             if t_no in rules_map:
                 forced_rule = rules_map[t_no]
+                found_exact = True
 
-        # C. 模糊匹配 (🔥 改用去尾後的 title_clean_rule)
-        if not forced_rule and rules_map:
+        # C. 模糊匹配 (🔥 只有在「沒找到正宮」時才執行)
+        if not found_exact and rules_map:
             best_score = 0
             for k, v in rules_map.items():
-                # token_sort_ratio 對大小寫不敏感，但我們已經全轉大寫了，更保險
+                if not v: continue # 規則是空的不用比 (模糊匹配不抓空規則)
+
                 sc = fuzz.token_sort_ratio(k, title_clean_rule) 
                 if sc > CURRENT_THRESHOLD and sc > best_score:
                     best_score = sc
@@ -1370,7 +1368,7 @@ def python_process_audit(dimension_data):
         track = "Unknown"
         stage = 0
         
-        # 如果配對到規則，解析規則內容
+        # 如果配對到規則 (且規則不是空的)，解析規則內容
         if forced_rule:
             fr = forced_rule # 已經是大寫了
             # ⚡️ [規則豁免]
@@ -1386,16 +1384,16 @@ def python_process_audit(dimension_data):
             elif "研磨" in fr: stage = 4
 
         # 如果規則沒指定(或沒配到)，使用預設關鍵字判斷
-        # 這裡 title_clean 是大寫，所以關鍵字要確保大寫或中文
+        # 這裡 title_clean_full 是大寫
         if stage == 0:
-            if "研磨" in title_clean: stage = 4
-            elif any(k in title_clean for k in ["銲補", "銲接", "焊", "鉀"]): stage = 2
-            elif "未再生" in title_clean or "粗車" in title_clean: stage = 1
-            elif "再生" in title_clean or "精車" in title_clean: stage = 3
+            if "研磨" in title_clean_full: stage = 4
+            elif any(k in title_clean_full for k in ["銲補", "銲接", "焊", "鉀"]): stage = 2
+            elif "未再生" in title_clean_full or "粗車" in title_clean_full: stage = 1
+            elif "再生" in title_clean_full or "精車" in title_clean_full: stage = 3
 
         if track == "Unknown":
-            if "本體" in title_clean: track = "本體"
-            elif any(k in title_clean for k in ["軸頸", "軸頭", "軸位", "內孔", "JOURNAL"]): track = "軸頸"
+            if "本體" in title_clean_full: track = "本體"
+            elif any(k in title_clean_full for k in ["軸頸", "軸頭", "軸位", "內孔", "JOURNAL"]): track = "軸頸"
         
         if track == "Unknown" or stage == 0: continue 
 
@@ -1405,7 +1403,7 @@ def python_process_audit(dimension_data):
             parts = seg.split(":")
             if len(parts) < 2: continue
             
-            # 👇 改這一行就好！
+            # 👇 保留您修正好的：強制大寫 + 乘號轉 X
             rid = parts[0].strip().upper().replace("×", "X").replace("*", "X")
             
             val_str = parts[1].strip()
@@ -1420,7 +1418,7 @@ def python_process_audit(dimension_data):
                 "val": val, "page": p_num, "title": title
             }
 
-    # --- 以下為檢查邏輯 (保持不變) ---
+    # --- 以下為檢查邏輯 (完全保持不變) ---
     for (rid, track), stages_data in history.items():
         present_stages = sorted(stages_data.keys())
         if not present_stages: continue
