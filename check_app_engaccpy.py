@@ -348,13 +348,12 @@ def python_engineering_audit(dimension_data):
 
 def assign_category_by_python(item_title):
     """
-    Python 分類官 (v68: 智能去尾增強版)
-    修正重點：
-    1. [車修]: 視為雜訊，不參與判斷。
-    2. [內孔]: 強制歸類為 range (公差區間)。
-    3. [順序]: 焊補(Min) > 未再生(軸頸Max/本體Un_regen) > 再生(Range)。
-    4. [精簡]: 移除純軸頸的強制分類，避免誤判。
-    5. [新增]: 引入 remove_tail_info，在比對 Excel 特規前，先切除標題末端的括號。
+    Python 分類官 (v71: 三位一體完全版)
+    整合內容：
+    1. [強力清洗]: 支援全形符號 (＝, ×, ＋) 轉半形，解決 OCR 識別問題。
+    2. [冷酷正宮]: 導入 v71 邏輯，若 Excel 有完全匹配項目(含規則為空者)，絕對禁止模糊匹配。
+       - 避免 "正宮沒填規則，卻誤抓小三規則" 的情況。
+    3. [防暴食]: 保留 v2 去尾邏輯，保護 (1SET=4PCS) 結構。
     """
     import pandas as pd
     from thefuzz import fuzz
@@ -365,23 +364,27 @@ def assign_category_by_python(item_title):
 
     # 🔥 [修正] 智能去尾函式 (v2: 防暴食版)
     def remove_tail_info(text):
-        # 舊版 regex: r"[\(（].*?[\)）]\s*$"  <-- 會誤吃中間的字
-        # 新版 regex: r"[\(（][^\(（]*?[\)）]\s*$" 
-        # 解析: [^\(（]*? 代表「括號內容不能包含其他的左括號」
-        # 這樣就能確保只刪除「最後一組」獨立的括號，不會跨越吃掉中間的特規
+        # [^\(（]*? 代表「括號內容不能包含其他的左括號」
         return re.sub(r"[\(（][^\(（]*?[\)）]\s*$", "", str(text)).strip()
 
+    # 🔥 [升級] 強力清洗函式 (v36: 符號轉半形版)
     def clean_text(text):
-        # 原本邏輯 + 全形轉半形
-        return str(text).replace("（", "(").replace("）", ")").replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
+        t = str(text).upper() # 強制大寫
+        # 符號統一 (全形轉半形)
+        t = t.replace("（", "(").replace("）", ")")
+        t = t.replace("＝", "=").replace("＋", "+").replace("－", "-")
+        t = t.replace("×", "X").replace("＊", "X") # 乘號轉 X
+        t = t.replace("＃", "#").replace("：", ":")
+        # 清雜訊
+        return t.replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
 
-    # 🔥 [關鍵修改] 先做去尾手術，再做清理
+    # 🔥 [關鍵步驟] 先做去尾手術，再做強力清理
     title_no_tail = remove_tail_info(item_title)
     
-    # 用「去尾後」的乾淨字串來做比對鍵值 (給 Phase 2 用)
+    # 用「去尾+清洗」後的乾淨字串來做比對鍵值 (Phase 2 用)
     title_clean = clean_text(title_no_tail)
     
-    # 原始大寫檢查用 (給 Phase 1 & 3 關鍵字補底用，保留全貌以免誤刪關鍵字)
+    # 原始大寫檢查用 (Phase 1 & 3 用)
     t_upper = str(item_title).upper().replace(" ", "").replace("\n", "").replace('"', "")
 
     # ==========================================
@@ -391,7 +394,7 @@ def assign_category_by_python(item_title):
         return "exempt"
 
     # ==========================================
-    # ⚡️ Phase 2: Excel 特規 (帶反向鎖)
+    # ⚡️ Phase 2: Excel 特規 (v71 冷酷正宮邏輯)
     # ==========================================
     try:
         df = pd.read_excel("rules.xlsx")
@@ -399,27 +402,44 @@ def assign_category_by_python(item_title):
         
         best_score = 0
         forced_rule = None
-        
-        for _, row in df.iterrows():
-            rule_cat = str(row.get('Category_Rule', '')).strip()
-            iname = str(row.get('Item_Name', '')).strip()
-            
-            if not rule_cat or rule_cat.lower() == 'nan' or not iname: continue
-            
-            clean_rule_name = clean_text(iname)
-            
-            # 🔥 全域反向鎖 (Token Sort Ratio)
-            # 因為 title_clean 已經去掉了 (2PC)，這裡的分數會更準確
-            score = fuzz.token_sort_ratio(clean_rule_name, title_clean)
-            
-            if score > CURRENT_THRESHOLD: 
-                if score > best_score:
-                    best_score = score
-                    forced_rule = rule_cat
-                elif score == best_score:
-                    if len(rule_cat) > len(forced_rule if forced_rule else ""):
-                        forced_rule = rule_cat
+        found_exact = False # 🚩 正宮旗標
 
+        # 1. 建立搜尋清單 (先轉成字典以利快速查找)
+        rules_db = {}
+        for _, row in df.iterrows():
+            iname = str(row.get('Item_Name', '')).strip()
+            rule_cat = str(row.get('Category_Rule', '')).strip()
+            if rule_cat.lower() == 'nan': rule_cat = "" # 轉成空字串，方便後續判斷
+            
+            if iname:
+                # Key 值也要用強力清洗版
+                key = clean_text(iname)
+                rules_db[key] = rule_cat
+
+        # 2. 檢查完全匹配 (正宮檢查)
+        if title_clean in rules_db:
+            found_exact = True # 找到了！無論規則是不是空的，都算找到
+            forced_rule = rules_db[title_clean]
+            
+            # 如果規則是空的，代表 User 故意留白，意思是「不要用特規，回歸一般邏輯」
+            # 此時 forced_rule = ""，後面的 if forced_rule 判斷會跳過，直接進入 Phase 3
+            # 這是正確的！因為找到了正宮，所以我們「不跑模糊匹配」，直接往下走。
+
+        # 3. 檢查模糊匹配 (只在沒找到正宮時執行)
+        if not found_exact and rules_db:
+            for k, v in rules_db.items():
+                if not v: continue # 如果規則是空的，模糊匹配抓到也沒用，跳過
+                
+                score = fuzz.token_sort_ratio(k, title_clean)
+                if score > CURRENT_THRESHOLD: 
+                    if score > best_score:
+                        best_score = score
+                        forced_rule = v
+                    elif score == best_score:
+                        if len(v) > len(forced_rule if forced_rule else ""):
+                            forced_rule = v
+
+        # 4. 解析規則
         if forced_rule:
             fr = forced_rule.upper()
             if "豁免" in fr or "EXEMPT" in fr or "SKIP" in fr: return "exempt"
@@ -433,6 +453,9 @@ def assign_category_by_python(item_title):
     # ==========================================
     # ⚡️ Phase 3: 關鍵字補底 (黃金順序)
     # ==========================================
+    # 走到這裡代表：
+    # 1. Excel 裡完全沒這個項目
+    # 2. Excel 裡有這個項目(正宮)，但 Category_Rule 是空的 -> 回歸一般判斷
 
     # 1. [內孔] 特例：優先權最高 -> range
     if "內孔" in t_upper:
@@ -446,7 +469,6 @@ def assign_category_by_python(item_title):
     # 3. [未再生]：區分本體與軸頸
     has_unregen = any(k in t_upper for k in ["未再生", "UN_REGEN", "粗車"])
     if has_unregen:
-        # 繼承 v11 邏輯：軸頸未再生通常檢查上限
         if any(k in t_upper for k in ["軸頸", "軸頭", "軸位", "JOURNAL"]): 
             return "max_limit"
         return "un_regen"
@@ -455,8 +477,6 @@ def assign_category_by_python(item_title):
     has_regen = any(k in t_upper for k in ["再生", "研磨", "精加工", "KEYWAY", "GRIND", "MACHIN", "精車", "組裝", "拆裝", "裝配", "ASSY", "配磨"])
     if has_regen:
         return "range"
-
-    # (原本這裡有一個 "5. 純軸頸 -> max_limit" 的防線，已經移除了)
 
     return "unknown"
     
