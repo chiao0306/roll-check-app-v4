@@ -1093,39 +1093,62 @@ def python_accounting_audit(dimension_data, res_main):
                     data["details"].append({"page": page, "title": raw_title, "val": qty_agg, "note": c_msg})
 
     # =================================================
-    # 🕵️‍♂️ 第三關：明細總結算
+    # 🕵️‍♂️ 第三關：明細總結算 (Loop 3)
     # =================================================
     for s_title, data in global_sum_tracker.items():
-        # 1. (原有的異常判斷邏輯，保持不變)
         if abs(data["actual"] - data["target"]) > 0.01: 
-            # ... (原本產生 accounting_issues 的代碼) ...
-            # ... (略) ...
-            accounting_issues.append({ ... })
+            
+            mode_label = "Mode A"
+            if data["used_mode"] == "B": mode_label = "Mode B 🚀"
+            elif data["used_mode"] == "AB": mode_label = "Mode A+B"
+            
+            src_str = f"🐍 會計引擎 ({mode_label})"
 
-    # 🔥🔥🔥【新增】步驟 4: 成績單回寫 (Write-Back) 🔥🔥🔥
-    # 這段會把會計引擎的「運算過程」貼回原始資料，讓 UI 可以直接顯示，不用瞎猜
+            fail_table = []
+            fail_table.append({"頁碼": "總表", "項目名稱": f"🎯 目標 (實交)", "數量": data["target"], "備註": "基準"})
+            for d in data["details"]:
+                fail_table.append({"頁碼": f"P.{d['page']}", "項目名稱": d['title'], "數量": d['val'], "備註": d['note']})
+            fail_table.append({"頁碼": "∑", "項目名稱": "加總結果", "數量": data["actual"], "備註": "總計"})
+
+            reason_str = f"實交({data['target']}) != 加總({data['actual']})"
+            if data['b_reason']: reason_str += f" | {data['b_reason']}"
+
+            accounting_issues.append({
+                "page": data["page"], "item": s_title, 
+                "issue_type": "🛑 明細匯總不符", 
+                "common_reason": reason_str, 
+                "failures": fail_table, 
+                "source": src_str
+            })
+
+    # ========================================================
+    # 🔥🔥🔥【這裡插入】步驟 4: 成績單回寫 (Write-Back) 🔥🔥🔥
+    # ========================================================
     if res_main and "summary_rows" in res_main:
         for row in res_main["summary_rows"]:
             t = row.get('title', '')
+            # 只有當這個項目有被追蹤到 (global_sum_tracker) 才回寫
             if t in global_sum_tracker:
                 info = global_sum_tracker[t]
                 
-                # 1. 回寫模式 (A / B / AB / None)
-                # 如果 actual > 0 代表有算到錢，這時才標記模式
+                # 1. 回寫模式
                 if info['actual'] > 0:
                     row['_audit_mode'] = info['used_mode'] # "A", "B", "AB"
                 else:
-                    row['_audit_mode'] = "無匹配"
+                    row['_audit_mode'] = "無匹配" # 代表根本沒算到半個明細
 
-                # 2. 回寫匹配到的明細 (只取前 3 筆當代表)
+                # 2. 回寫匹配到的明細 (供 UI 顯示)
+                # 這裡只存名稱就好，UI 自己會去組字串
                 matched_names = [d['title'] for d in info['details']]
                 row['_audit_details'] = matched_names
                 
-                # 3. 回寫分數 (如果是 A 模式，我們沒存分數，但可以標記)
-                # 這裡做一個簡單標記，讓 UI 知道
+                # 3. 回寫狀態與備註
                 row['_audit_status'] = "🔴 異常" if abs(info["actual"] - info["target"]) > 0.01 else "🟢 合格"
                 row['_audit_note'] = info.get('b_reason', '') # 把 B 模式的理由帶出去
 
+    # ========================================================
+    # 這是您原本的結尾 (HIDDEN_DATA 處理)
+    # ========================================================
     if rule_hits_log:
         accounting_issues.append({
             "issue_type": "HIDDEN_DATA",
@@ -1134,7 +1157,7 @@ def python_accounting_audit(dimension_data, res_main):
         })
             
     return accounting_issues
-
+    
 def python_process_audit(dimension_data):
     """
     Python 流程引擎 (v71: 冷酷正宮/全符號支援版)
