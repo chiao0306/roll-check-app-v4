@@ -1977,17 +1977,7 @@ if st.session_state.photo_gallery:
                         if not any(k in i.get("issue_type", "") for k in ["流程", "規格提取失敗", "未匹配"]):
                             ai_filtered_issues.append(i)
 
-            all_issues = ai_filtered_issues + python_numeric_issues + python_accounting_issues + python_process_issues + python_header_issues
-
-            ai_filtered_issues = []
-            ai_raw_issues = res_main.get("issues", [])
-            if isinstance(ai_raw_issues, list):
-                for i in ai_raw_issues:
-                    if isinstance(i, dict):
-                        i['source'] = '🤖 總稽核 AI'
-                        if not any(k in i.get("issue_type", "") for k in ["流程", "規格提取失敗", "未匹配"]):
-                            ai_filtered_issues.append(i)
-
+            # 🔥 [修正2] 只保留一次 all_issues 計算
             all_issues = ai_filtered_issues + python_numeric_issues + python_accounting_issues + python_process_issues + python_header_issues
             
             py_duration = time.time() - py_start_time # ⏱️ [計時結束] Python
