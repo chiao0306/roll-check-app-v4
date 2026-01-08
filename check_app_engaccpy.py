@@ -104,7 +104,7 @@ with st.sidebar:
         on_change=update_url_param
     )
 
-# --- Excel 規則讀取函數 (極簡乾淨版 - 已移除 Logic_Prompt) ---
+# --- Excel 規則讀取函數 (最終顯示版 - 含 Force_Rename) ---
 @st.cache_data
 def get_dynamic_rules(ocr_text, debug_mode=False):
     try:
@@ -127,20 +127,22 @@ def get_dynamic_rules(ocr_text, debug_mode=False):
                 # 取值與清洗
                 def clean(v): return str(v).strip() if v and str(v) != 'nan' else None
                 
-                # 只讀取這些欄位，Logic_Prompt 直接無視
+                # 讀取欄位 (新增 f_rename)
                 spec = clean(row.get('Standard_Spec', ''))
+                f_rename = clean(row.get('Force_Rename', '')) # 🔥 新增讀取這一欄
+                
                 u_fr = clean(row.get('Unit_Rule_Freight', ''))
                 u_loc = clean(row.get('Unit_Rule_Local', ''))
                 u_agg = clean(row.get('Unit_Rule_Agg', ''))
 
-                # --- A. 建構 AI Prompt (只給規格) ---
+                # --- A. 建構 AI Prompt (AI 只看規格) ---
                 if not debug_mode:
                     if spec:
                         desc = f"- [參考資訊] {item_name}\n"
                         desc += f"  - 標準規格: {spec}\n"
                         ai_prompt_list.append(desc)
                 
-                # --- B. 建構 Debug 顯示 (只顯示有效設定) ---
+                # --- B. 建構 Debug 顯示 (給人看的卡片) ---
                 else:
                     block = f"#### ■ {item_name} (匹配度 {score}%)\n"
                     
@@ -151,9 +153,15 @@ def get_dynamic_rules(ocr_text, debug_mode=False):
                     else:
                         block += "- (無特定輸入)\n"
 
-                    # Python 區塊
+                    # Python 區塊 (這裡加入 Force_Rename)
                     block += "\n**[ Python 硬邏輯設定 ]**\n"
                     has_py = False
+                    
+                    # 🔥 優先顯示強制改名
+                    if f_rename:
+                        block += f"- ⚡ 強制改名 : `{f_rename}`\n"
+                        has_py = True
+                        
                     if u_fr: 
                         block += f"- 運費邏輯 : `{u_fr}`\n"
                         has_py = True
