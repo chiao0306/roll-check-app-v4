@@ -398,73 +398,47 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
 
 # --- 3. 強制更名官 (存檔版 - 解決消失問題) ---
 def apply_forced_renaming(dimension_data):
-    """
-    功能：讀取 Excel 強制改名。
-    特點：將 Log 存入 Session State，避免 rerun 後消失。
-    """
     if not dimension_data: return dimension_data
     import pandas as pd
     
-    # 初始化 Log 容器
     logs = []
-    logs.append("🚀 開始執行強制更名檢查...")
+    logs.append("🚀 開始執行強制更名檢查 (包含匹配模式)...")
 
     def clean_key(text):
+        # 轉大寫並移除空格、換行、括號（統一比對標準）
         t = str(text).upper().replace(" ", "").replace("\n", "").replace("\r", "")
         t = t.replace("（", "(").replace("）", ")")
         return t.strip()
 
     rename_map = {}
     try:
-        # 強制重讀 Excel
         df = pd.read_excel("rules.xlsx")
         df.columns = [c.strip() for c in df.columns]
         
-        if "Force_Rename" not in df.columns:
-            logs.append("❌ [嚴重錯誤] Excel 裡找不到 'Force_Rename' 欄位！")
-        else:
-            # 載入規則
-            for i, row in df.iterrows():
-                orig = str(row.get('Item_Name', '')).strip()
-                target = str(row.get('Force_Rename', '')).strip()
-                
-                if orig and target and target.lower() != 'nan':
-                    key = clean_key(orig)
-                    rename_map[key] = target
-                    if "軸頸" in orig:
-                        logs.append(f"📘 已載入規則: [{orig}] -> [{target}]")
-
+        for i, row in df.iterrows():
+            orig = str(row.get('Item_Name', '')).strip()
+            target = str(row.get('Force_Rename', '')).strip()
+            if orig and target and target.lower() != 'nan':
+                rename_map[clean_key(orig)] = target
     except Exception as e:
-        logs.append(f"❌ 讀取 rules.xlsx 失敗: {e}")
-        st.session_state['renaming_logs'] = logs # 存檔
+        logs.append(f"❌ 讀取 Excel 失敗: {e}")
         return dimension_data
 
-    # 執行比對
     count = 0
     for item in dimension_data:
         old_title = item.get('item_title', '')
-        clean_t = clean_key(old_title)
+        ai_clean_key = clean_key(old_title)
         
-        # 針對目標進行 Log
-        if "軸頸" in old_title:
-            if clean_t in rename_map:
-                new_name = rename_map[clean_t]
-                logs.append(f"✅ 抓到了！[{old_title}] 改名為 -> [{new_name}]")
-                # 執行改名
-                item['item_title'] = new_name
+        # 🔥 關鍵：檢查 Excel 的 Key 是否包含在 AI 的標題中
+        for rule_k, rule_v in rename_map.items():
+            if rule_k in ai_clean_key:
+                item['item_title'] = rule_v
                 item['_original_title'] = old_title
+                logs.append(f"✅ 成功匹配！[{old_title}] -> 改名為 -> [{rule_v}]")
                 count += 1
-            else:
-                logs.append(f"⚠️ 沒抓到: [{old_title}] (Key: {clean_t})")
+                break 
 
-    if count > 0:
-        logs.append(f"🎉 總共成功修改了 {count} 筆資料！")
-    else:
-        logs.append("ℹ️ 掃描完畢，沒有任何項目被修改。")
-    
-    # 🔥🔥🔥 關鍵：把 Log 存進 Session State 讓它活下去 🔥🔥🔥
-    st.session_state['renaming_logs'] = logs
-            
+    st.session_state['renaming_logs'] = logs # 讓結果顯示在網頁上
     return dimension_data
 
 def rebalance_orphan_data(dimension_data):
