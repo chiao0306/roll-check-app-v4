@@ -1995,25 +1995,59 @@ if st.session_state.photo_gallery:
             # 建立分頁
             tab_sum, tab_det = st.tabs(["📊 總表項目 (Summary)", "📝 明細項目 (Detail)"])
 
-            # --- Tab 1: 總表檢查 ---
+            # --- Tab 1: 總表檢查 (v3: 引擎直讀版) ---
             with tab_sum:
                 raw_sum = cache.get("summary_rows", [])
+                
                 if raw_sum:
                     sum_data = []
+                    
                     for row in raw_sum:
-                        # 判斷狀態
-                        r_title = row.get('title', '')
-                        # 寬鬆比對：只要異常清單裡有這個標題，就當作它異常
-                        is_failed = any(issue['item'] == r_title for issue in visible_issues if "總表" in issue['issue_type'])
+                        # 直接讀取引擎回寫的資料
+                        mode = row.get('_audit_mode', '未運算')
+                        details = row.get('_audit_details', [])
+                        status = row.get('_audit_status', '⚪ 未知')
+                        note = row.get('_audit_note', '')
                         
-                        status = "🔴 異常" if is_failed else "🟢 合格"
+                        # 1. 處理「列表項目」顯示
+                        # 如果有匹配到，顯示明細名稱；如果沒匹配到，顯示空
+                        if details:
+                            matched_display = " | ".join(details)
+                            if len(matched_display) > 25: matched_display = matched_display[:25] + "..."
+                            matched_display += f" (共{len(details)}筆)"
+                        else:
+                            matched_display = "(無匹配明細)"
+
+                        # 2. 處理「匹配分數/模式」顯示
+                        if mode == "B":
+                            score_display = "Mode B 🚀"
+                        elif mode == "AB":
+                            score_display = "Mode A+B"
+                        elif mode == "A":
+                            score_display = "Mode A" # A 模式通常是純運算，沒特別存分數，但能匹配到就是有分
+                        else:
+                            score_display = "-"
+
+                        # 3. 如果是 B 模式，把理由加進說明
+                        final_note = ""
+                        if note: final_note = f"[{note}] "
                         
+                        # 檢查是否有異常清單裡的錯誤訊息 (這是最準的異常理由來源)
+                        err_obj = next((i for i in visible_issues 
+                                        if "總表" in str(i.get('issue_type','')) and 
+                                        (row.get('title','') in str(i.get('item','')))), None)
+                        if err_obj:
+                            final_note += err_obj['common_reason']
+
                         sum_data.append({
                             "狀態": status,
                             "頁碼": row.get('page', '?'),
-                            "項目名稱": r_title,
-                            "申請數量": row.get('apply_qty', 0),
-                            "實交數量": row.get('delivery_qty', row.get('target', 0))
+                            "總表項目": row.get('title', ''),
+                            "列表項目": matched_display,
+                            "匹配模式": score_display,
+                            "申請": row.get('apply_qty', 0),
+                            "實交": row.get('delivery_qty', row.get('target', 0)),
+                            "說明": final_note
                         })
                     
                     st.dataframe(
@@ -2021,7 +2055,11 @@ if st.session_state.photo_gallery:
                         use_container_width=True, 
                         hide_index=True,
                         column_config={
-                            "狀態": st.column_config.TextColumn("判定", help="Python 總表稽核結果"),
+                            "狀態": st.column_config.TextColumn("狀態", width="small"),
+                            "總表項目": st.column_config.TextColumn("總表項目", width="medium"),
+                            "列表項目": st.column_config.TextColumn("列表項目 (實際運算結果)", width="medium", help="會計引擎實際納入計算的明細"),
+                            "匹配模式": st.column_config.TextColumn("模式", width="small"),
+                            "說明": st.column_config.TextColumn("異常原因", width="large"),
                         }
                     )
                 else:
