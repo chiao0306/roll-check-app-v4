@@ -391,6 +391,64 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
 
 # --- 平行處理輔助函式 ---
 
+# --- 強制更名官 (讀取 Excel Force_Rename 欄位) ---
+def apply_forced_renaming(dimension_data):
+    """
+    功能：讀取 rules.xlsx 的 'Force_Rename' 欄位。
+    若發現項目名稱匹配 (Item_Name)，強制將其標題改為新名稱 (Force_Rename)。
+    用途：修正合約筆誤 (如：將 '再生' 強制改為 '銲補' 以符合邏輯)。
+    """
+    if not dimension_data: return dimension_data
+    import pandas as pd
+    
+    # 1. 內建清洗函式 (確保比對時忽略空格與符號差異)
+    def clean_key(text):
+        t = str(text).upper()
+        t = t.replace("（", "(").replace("）", ")").replace(" ", "")
+        return t.strip()
+
+    # 2. 載入更名規則
+    rename_map = {}
+    try:
+        df = pd.read_excel("rules.xlsx")
+        # 清洗欄位名稱，去除前後空白
+        df.columns = [c.strip() for c in df.columns]
+        
+        if "Force_Rename" in df.columns:
+            for _, row in df.iterrows():
+                # 原始名稱 (Excel 裡的 Item_Name)
+                orig = str(row.get('Item_Name', '')).strip()
+                # 目標名稱 (Excel 裡的 Force_Rename)
+                target = str(row.get('Force_Rename', '')).strip()
+                
+                # 只有當「目標名稱」有寫字，且不是 nan 時才生效
+                if orig and target and target.lower() != 'nan':
+                    rename_map[clean_key(orig)] = target
+    except Exception as e:
+        print(f"⚠️ 讀取 rules.xlsx 失敗，跳過強制更名: {e}")
+        return dimension_data
+
+    # 3. 執行更名手術
+    count = 0
+    for item in dimension_data:
+        old_title = item.get('item_title', '')
+        clean_t = clean_key(old_title)
+        
+        if clean_t in rename_map:
+            new_title = rename_map[clean_t]
+            # 🔥 覆蓋標題
+            item['item_title'] = new_title
+            # 留個記號 (可選)
+            item['_original_title'] = old_title 
+            
+            print(f"🔄 強制更名：[{old_title}] -> [{new_title}]")
+            count += 1
+            
+    if count > 0:
+        print(f"✅ 共強制修正了 {count} 個項目名稱。")
+        
+    return dimension_data
+
 def rebalance_orphan_data(dimension_data):
     """
     羅賓漢演算法 (劫富濟貧 v1)
@@ -1892,7 +1950,7 @@ if st.session_state.photo_gallery:
             # 3. 拼湊結果
             res_main = merge_ai_results(results_bucket)
             
-            # 為了讓 Cache 存到完整的文字...
+            # 為了讓 Cache 存到完整的文字 (給 Excel 規則比對用)，我們還是組一個全卷字串
             combined_input = ""
             for i, p in enumerate(all_pages):
                 combined_input += f"\n=== Page {i+1} ===\n{p.get('full_text','')}\n"
@@ -1900,16 +1958,21 @@ if st.session_state.photo_gallery:
             ai_duration = time.time() - ai_start_time
             
             # ========================================================
-            # 🔥 插入點：僅保留羅賓漢 (修復斷行誤判)
+            # 🔥 插入點：資料修復流水線 (結構修復 -> 語意修復)
             # ========================================================
-            # 已移除 sanitize_ai_data (M殺手/雜訊清洗)，因為 Flash 模型較穩定
             raw_dim_data = res_main.get("dimension_data", [])
             
-            # 僅保留「斷行修復」邏輯 (解決 7個變12個 的問題)
+            # 步驟 1: 執行羅賓漢 (修復結構)
+            # 先解決視覺斷行誤判 (例如 7個變12個的問題)
             balanced_dim_data = rebalance_orphan_data(raw_dim_data)
             
-            # 回存
-            res_main["dimension_data"] = balanced_dim_data
+            # 步驟 2: 執行強制更名 (修復語意/筆誤)
+            # 讀取 Excel Force_Rename，把 "軸頸再生" 強制改名為 "軸頸銲補"
+            # 傳入的是已經結構正確的 balanced_dim_data
+            final_dim_data = apply_forced_renaming(balanced_dim_data)
+            
+            # 步驟 3: 回存最終結果 (確保後續所有流程都用新名字)
+            res_main["dimension_data"] = final_dim_data
             # ========================================================
 
             # 4. Python 邏輯檢查 (加入計時)
@@ -1917,10 +1980,10 @@ if st.session_state.photo_gallery:
             
             py_start_time = time.time() # ⏱️ [計時開始] Python
             
-            # 這裡直接取用剛剛修復好的 balanced_dim_data (從 res_main 拿)
+            # 這裡直接取用剛剛修復並改名後的 final_dim_data (從 res_main 拿)
             dim_data = res_main.get("dimension_data", [])
             
-            # 重新跑分類 (因為資料變動了，要確保分類正確)
+            # 重新跑分類 (重要！因為名字剛被我們改成銲補，這裡分類就會自動變成銲補)
             for item in dim_data:
                 new_cat = assign_category_by_python(item.get("item_title", ""))
                 item["category"] = new_cat
@@ -1930,7 +1993,7 @@ if st.session_state.photo_gallery:
             # 開始各項稽核 (傳入修復後的資料)
             python_numeric_issues = python_numerical_audit(dim_data)
             python_accounting_issues = python_accounting_audit(dim_data, res_main)
-            python_process_issues = python_process_audit(dim_data)
+            python_process_issues = python_process_audit(dim_data) # 這裡就會讀到 "銲補" 而不是 "再生" 了
             python_header_issues = python_header_audit_batch(st.session_state.photo_gallery, res_main)
 
             ai_filtered_issues = []
