@@ -85,7 +85,7 @@ with st.sidebar:
     model_selection = st.selectbox(
         "負責：規格、製程、數量、統計全包", 
         options=options_list, 
-        index=1, 
+        index=2, 
         key="main_model"
     )
     main_model_name = model_options[model_selection]
