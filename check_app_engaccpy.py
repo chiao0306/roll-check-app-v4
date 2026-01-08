@@ -104,16 +104,19 @@ with st.sidebar:
         on_change=update_url_param
     )
 
-# --- Excel 規則讀取函數 (專業極簡版) ---
+# --- Excel 規則讀取函數 (極簡乾淨版 - 已移除 Logic_Prompt) ---
 @st.cache_data
 def get_dynamic_rules(ocr_text, debug_mode=False):
     try:
+        import pandas as pd
+        from thefuzz import fuzz
+
         df = pd.read_excel("rules.xlsx")
         df.columns = [c.strip() for c in df.columns]
         ocr_text_clean = str(ocr_text).upper().replace(" ", "").replace("\n", "")
         
-        ai_prompt_list = []    # 給 AI 的 (純文字)
-        debug_view_list = []   # 給人看的 (排版清潔)
+        ai_prompt_list = []    # 給 AI 的 (只含規格)
+        debug_view_list = []   # 給人看的 Debug 資訊
 
         for index, row in df.iterrows():
             item_name = str(row.get('Item_Name', '')).strip()
@@ -124,30 +127,27 @@ def get_dynamic_rules(ocr_text, debug_mode=False):
                 # 取值與清洗
                 def clean(v): return str(v).strip() if v and str(v) != 'nan' else None
                 
+                # 只讀取這些欄位，Logic_Prompt 直接無視
                 spec = clean(row.get('Standard_Spec', ''))
-                logic = clean(row.get('Logic_Prompt', ''))
                 u_fr = clean(row.get('Unit_Rule_Freight', ''))
                 u_loc = clean(row.get('Unit_Rule_Local', ''))
                 u_agg = clean(row.get('Unit_Rule_Agg', ''))
 
-                # --- A. 建構 AI Prompt (維持不變) ---
+                # --- A. 建構 AI Prompt (只給規格) ---
                 if not debug_mode:
-                    if spec or logic:
+                    if spec:
                         desc = f"- [參考資訊] {item_name}\n"
-                        if spec: desc += f"  - 標準規格: {spec}\n"
-                        if logic: desc += f"  - 注意事項: {logic}\n"
+                        desc += f"  - 標準規格: {spec}\n"
                         ai_prompt_list.append(desc)
                 
-                # --- B. 建構 Debug 顯示 (去除圖案，改用表格感排版) ---
+                # --- B. 建構 Debug 顯示 (只顯示有效設定) ---
                 else:
-                    # 使用 Markdown 的引用區塊 (>) 來做層級區分，看起來很乾淨
                     block = f"#### ■ {item_name} (匹配度 {score}%)\n"
                     
                     # AI 區塊
                     block += "**[ AI Prompt 輸入 ]**\n"
-                    if spec or logic:
-                        if spec: block += f"- 規格標準 : `{spec}`\n"
-                        if logic: block += f"- 注意事項 : `{logic}`\n"
+                    if spec:
+                        block += f"- 規格標準 : `{spec}`\n"
                     else:
                         block += "- (無特定輸入)\n"
 
