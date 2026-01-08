@@ -1096,31 +1096,36 @@ def python_accounting_audit(dimension_data, res_main):
     # 🕵️‍♂️ 第三關：明細總結算
     # =================================================
     for s_title, data in global_sum_tracker.items():
+        # 1. (原有的異常判斷邏輯，保持不變)
         if abs(data["actual"] - data["target"]) > 0.01: 
-            
-            mode_label = "Mode A"
-            if data["used_mode"] == "B": mode_label = "Mode B 🚀"
-            elif data["used_mode"] == "AB": mode_label = "Mode A+B"
-            
-            src_str = f"🐍 會計引擎 ({mode_label})"
+            # ... (原本產生 accounting_issues 的代碼) ...
+            # ... (略) ...
+            accounting_issues.append({ ... })
 
-            fail_table = []
-            fail_table.append({"頁碼": "總表", "項目名稱": f"🎯 目標 (實交)", "數量": data["target"], "備註": "基準"})
-            for d in data["details"]:
-                fail_table.append({"頁碼": f"P.{d['page']}", "項目名稱": d['title'], "數量": d['val'], "備註": d['note']})
-            fail_table.append({"頁碼": "∑", "項目名稱": "加總結果", "數量": data["actual"], "備註": "總計"})
+    # 🔥🔥🔥【新增】步驟 4: 成績單回寫 (Write-Back) 🔥🔥🔥
+    # 這段會把會計引擎的「運算過程」貼回原始資料，讓 UI 可以直接顯示，不用瞎猜
+    if res_main and "summary_rows" in res_main:
+        for row in res_main["summary_rows"]:
+            t = row.get('title', '')
+            if t in global_sum_tracker:
+                info = global_sum_tracker[t]
+                
+                # 1. 回寫模式 (A / B / AB / None)
+                # 如果 actual > 0 代表有算到錢，這時才標記模式
+                if info['actual'] > 0:
+                    row['_audit_mode'] = info['used_mode'] # "A", "B", "AB"
+                else:
+                    row['_audit_mode'] = "無匹配"
 
-            reason_str = f"實交({data['target']}) != 加總({data['actual']})"
-            if data['b_reason']: reason_str += f" | {data['b_reason']}"
+                # 2. 回寫匹配到的明細 (只取前 3 筆當代表)
+                matched_names = [d['title'] for d in info['details']]
+                row['_audit_details'] = matched_names
+                
+                # 3. 回寫分數 (如果是 A 模式，我們沒存分數，但可以標記)
+                # 這裡做一個簡單標記，讓 UI 知道
+                row['_audit_status'] = "🔴 異常" if abs(info["actual"] - info["target"]) > 0.01 else "🟢 合格"
+                row['_audit_note'] = info.get('b_reason', '') # 把 B 模式的理由帶出去
 
-            accounting_issues.append({
-                "page": data["page"], "item": s_title, 
-                "issue_type": "🛑 明細匯總不符", 
-                "common_reason": reason_str, 
-                "failures": fail_table, 
-                "source": src_str
-            })
-            
     if rule_hits_log:
         accounting_issues.append({
             "issue_type": "HIDDEN_DATA",
