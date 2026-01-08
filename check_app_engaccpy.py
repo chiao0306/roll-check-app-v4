@@ -1522,7 +1522,8 @@ def python_process_audit(dimension_data):
                     sign = "<" if expect_a_smaller else ">"
                     process_issues.append({
                         "page": info_b['page'],
-                        "item": f"[{track}] 尺寸邏輯",
+                        # 🔥 修改：直接使用該項目的真實名稱，讓前台能配對亮燈
+                        "item": info_b['title'], 
                         "issue_type": "🛑流程異常(尺寸倒置)",
                         "common_reason": f"尺寸邏輯錯誤：{STAGE_MAP[s_a]} 應 {sign} {STAGE_MAP[s_b]}",
                         "failures": [{"id": STAGE_MAP[s_a], "val": info_a['val'], "calc": "前"}, {"id": STAGE_MAP[s_b], "val": info_b['val'], "calc": "後"}],
