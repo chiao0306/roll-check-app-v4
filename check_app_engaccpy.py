@@ -716,8 +716,8 @@ def python_numerical_audit(dimension_data):
             if "±" in part:
                 left_str, right_str = part.split("±", 1)
                 
-                left_str = left_str.replace(" ", "")
-                right_str = right_str.replace(" ", "")
+                left_str = left_str.replace(" ", "")
+                right_str = right_str.replace(" ", "")
                 
                 left_nums = re.findall(r"(\d+\.?\d*)", left_str)
                 right_nums = re.findall(r"(\d+\.?\d*)", right_str)
