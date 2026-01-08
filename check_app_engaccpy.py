@@ -294,14 +294,12 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
     import time
     
     # 1. 準備動態規則
-    # (假設 get_dynamic_rules 已經定義在外面，若無定義請確保有此函式或給空字串)
     try:
         dynamic_rules = get_dynamic_rules(full_text_for_search)
     except:
         dynamic_rules = ""
 
-    # 2. 定義 Prompt (使用 Flash-Lite 優化版)
-    # 注意：這裡不用 f-string，改用 replace 避免規則裡的 {} 導致 Python 報錯
+    # 2. 定義 Prompt
     base_prompt = """
     角色：嚴格的數據抄錄程式。針對單頁輸入，依據 {{RULES_PLACEHOLDER}} 執行 JSON 填空。
     
@@ -340,18 +338,17 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
     }
     """
     
-    # 安全插入規則
     system_instruction = base_prompt.replace("{{RULES_PLACEHOLDER}}", str(dynamic_rules))
 
-    # 3. 設定 API (強制 JSON 模式)
+    # 3. 設定 API
     genai.configure(api_key=api_key)
     
     generation_config = {
-        "temperature": 0.0,      # 0.0 最精準，不做創意發揮
+        "temperature": 0.0,
         "top_p": 0.95,
         "top_k": 40,
         "max_output_tokens": 8192,
-        "response_mime_type": "application/json", # 🔥 強制回傳 JSON (Flash-Lite 支援)
+        "response_mime_type": "application/json", 
     }
 
     model = genai.GenerativeModel(
@@ -360,37 +357,43 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
         system_instruction=system_instruction,
     )
 
-    # 4. 執行呼叫 (加入重試機制)
+    # 4. 執行呼叫
     retries = 2
     last_error = None
     
     for attempt in range(retries + 1):
         try:
-            # 發送請求
             response = model.generate_content(combined_input)
-            
-            # 取得文字結果
             raw_text = response.text.strip()
-            
-            # 5. 解析 JSON
-            # 因為用了 response_mime_type="application/json"，回傳的一定是乾淨的 JSON
             final_json = json.loads(raw_text)
             
-            # 成功解析後，直接回傳
+            # 【修正點】撿回 Token 使用量 
+            # 如果不加這一段，主程式的 merge_ai_results 就會因為找不到 "_token_usage" 而填 0
+            try:
+                usage = response.usage_metadata
+                final_json["_token_usage"] = {
+                    "input": usage.prompt_token_count,
+                    "output": usage.candidates_token_count
+                }
+            except:
+                # 萬一 API 沒回傳 metadata (極少見)，給個預設值
+                final_json["_token_usage"] = {"input": 0, "output": 0}
+            # 【修正結束】
+            
             return final_json
 
         except Exception as e:
             last_error = e
-            time.sleep(1) # 休息一下再試
+            time.sleep(1)
             continue
 
-    # 6. 若全部失敗，回傳空結構 (避免程式崩潰)
-    print(f"❌ AI 分析失敗 (已重試 {retries} 次): {last_error}")
+    print(f"❌ AI 分析失敗: {last_error}")
     return {
         "header_info": {}, 
         "summary_rows": [], 
         "dimension_data": [], 
-        "issues": [{"issue_type": "AI_ERROR", "common_reason": str(last_error)}]
+        "issues": [{"issue_type": "AI_ERROR", "common_reason": str(last_error)}],
+        "_token_usage": {"input": 0, "output": 0} # 失敗時也要補上這個欄位
     }
 
 # --- 平行處理輔助函式 ---
@@ -437,9 +440,9 @@ def apply_forced_renaming(dimension_data):
             
     return dimension_data
 
+# --- 羅賓漢演算法 (劫富濟貧 v1) ---
 def rebalance_orphan_data(dimension_data):
     """
-    羅賓漢演算法 (劫富濟貧 v1)
     功能：解決「上一項的尾巴被誤判給下一項」的問題。
     邏輯：
     1. 遍歷清單，檢查相鄰的兩項 (Item A, Item B)。
@@ -516,6 +519,7 @@ def rebalance_orphan_data(dimension_data):
             
     return data
 
+# --- 切蛋糕邏輯 ---
 def split_into_batches(pages, max_size=4):
     """
     切蛋糕邏輯：
@@ -528,6 +532,7 @@ def split_into_batches(pages, max_size=4):
     for i in range(0, len(pages), max_size):
         yield pages[i:i + max_size]
 
+# --- 拼蛋糕邏輯 ---
 def merge_ai_results(results_list):
     """
     拼蛋糕邏輯：把並行跑回來的 JSON 碎片組合成一個完整的
@@ -564,7 +569,7 @@ def merge_ai_results(results_list):
 
     return final_res
 
-# --- 重點：Python 引擎獨立於 agent 函式之外 ---
+# --- 重點：Python 引擎 ---
 
 def assign_category_by_python(item_title):
     """
