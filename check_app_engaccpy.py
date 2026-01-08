@@ -1766,7 +1766,6 @@ if st.session_state.photo_gallery:
             for i, p in enumerate(st.session_state.photo_gallery):
                 combined_input += f"\n=== Page {i+1} ===\n{p.get('full_text','')}\n"
 
-                        
             # ==========================================
             # 🚀 3. AI 並行分析 (Turbo Mode)
             # ==========================================
