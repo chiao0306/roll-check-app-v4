@@ -509,6 +509,44 @@ def rebalance_orphan_data(dimension_data):
             
     return data
 
+# --- 新增：M系列殺手 (清除被誤判為ID的螺紋規格) ---
+def purge_fake_m_ids(dimension_data):
+    """
+    功能：清除將 M10, M12 等螺紋規格誤判為 ID 的情況。
+    邏輯：檢查 ds 裡面的 Key，如果是 'M' 開頭後面純接數字，直接刪除該筆數據。
+    """
+    if not dimension_data: return dimension_data
+    import re
+    
+    for item in dimension_data:
+        ds_str = str(item.get('ds', ''))
+        if not ds_str: continue
+        
+        valid_parts = []
+        segments = ds_str.split("|")
+        
+        for seg in segments:
+            if ":" not in seg: continue
+            
+            # 拆解 Key 和 Value
+            k, v = seg.split(":", 1)
+            k_clean = k.strip().upper().replace(" ", "")
+            
+            # 🔥 核心過濾邏輯：
+            # Regex: ^M\d+$  -> 代表 M 開頭，後面接著 1 個以上的數字 (例如 M8, M10, M100)
+            # 如果符合這個格式，我們認定它是螺紋規格，不是 ID -> 跳過不存
+            if re.match(r"^M\d+$", k_clean):
+                # 可以在這裡 print 出來看看殺了誰
+                # print(f"🔪 殺掉假 ID: {k_clean} (Item: {item.get('item_title')})")
+                continue
+                
+            valid_parts.append(seg)
+        
+        # 重組乾淨的 ds
+        item['ds'] = "|".join(valid_parts)
+        
+    return dimension_data
+    
 def split_into_batches(pages, max_size=4):
     """
     切蛋糕邏輯：
@@ -1892,7 +1930,7 @@ if st.session_state.photo_gallery:
                         results_bucket[idx] = {"header_info": {}, "summary_rows": [], "dimension_data": [], "issues": []}
                         st.error(f"Batch {idx+1} 分析失敗: {e}")
 
-                        # 3. 拼湊結果
+            # 3. 拼湊結果
             res_main = merge_ai_results(results_bucket)
             
             # 為了讓 Cache 存到完整的文字 (給 Excel 規則比對用)，我們還是組一個全卷字串
@@ -1903,13 +1941,19 @@ if st.session_state.photo_gallery:
             ai_duration = time.time() - ai_start_time
             
             # ========================================================
-            # 🔥 插入點：羅賓漢演算法 (劫富濟貧)
+            # 🔥 插入點：資料清洗與修復 (M系列殺手 + 羅賓漢)
             # ========================================================
-            # 在進入 Python 邏輯檢查前，先修復斷行誤判 (7個變12個的問題)
             raw_dim_data = res_main.get("dimension_data", [])
-            balanced_dim_data = rebalance_orphan_data(raw_dim_data)
             
-            # 重要！把修好的資料塞回 res_main，這樣全域才會同步
+            # 步驟 1: 先執行 M 系列殺手 (把 M10, M12 這種假 ID 殺掉)
+            # 必須先做這個，不然數量會虛胖，影響後面的平衡計算
+            clean_dim_data = purge_fake_m_ids(raw_dim_data)
+            
+            # 步驟 2: 再執行 羅賓漢演算法 (修復 7個變12個 的斷行問題)
+            # 這裡傳入的是已經殺乾淨的 clean_dim_data
+            balanced_dim_data = rebalance_orphan_data(clean_dim_data)
+            
+            # 步驟 3: 重要！把修好的資料塞回 res_main，確保全域同步
             res_main["dimension_data"] = balanced_dim_data
             # ========================================================
 
@@ -1933,6 +1977,17 @@ if st.session_state.photo_gallery:
             python_accounting_issues = python_accounting_audit(dim_data, res_main)
             python_process_issues = python_process_audit(dim_data)
             python_header_issues = python_header_audit_batch(st.session_state.photo_gallery, res_main)
+
+            ai_filtered_issues = []
+            ai_raw_issues = res_main.get("issues", [])
+            if isinstance(ai_raw_issues, list):
+                for i in ai_raw_issues:
+                    if isinstance(i, dict):
+                        i['source'] = '🤖 總稽核 AI'
+                        if not any(k in i.get("issue_type", "") for k in ["流程", "規格提取失敗", "未匹配"]):
+                            ai_filtered_issues.append(i)
+
+            all_issues = ai_filtered_issues + python_numeric_issues + python_accounting_issues + python_process_issues + python_header_issues
 
             ai_filtered_issues = []
             ai_raw_issues = res_main.get("issues", [])
