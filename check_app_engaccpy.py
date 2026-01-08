@@ -283,29 +283,6 @@ def extract_layout_with_azure(file_obj, endpoint, key):
 
     return markdown_output, header_snippet, final_full_text, None, real_page_num
     
-def consolidate_issues(issues):
-    """
-    🗂️ 異常合併器：將「項目」、「錯誤類型」、「原因」完全相同的異常合併成一張卡片
-    """
-    grouped = {}
-    for i in issues:
-        key = (i.get('item', ''), i.get('issue_type', ''), i.get('common_reason', ''))
-        if key not in grouped:
-            grouped[key] = i.copy()
-            grouped[key]['pages_set'] = {str(i.get('page', '?'))}
-            grouped[key]['failures'] = i.get('failures', []).copy()
-        else:
-            grouped[key]['pages_set'].add(str(i.get('page', '?')))
-            grouped[key]['failures'].extend(i.get('failures', []))
-            
-    result = []
-    for key, val in grouped.items():
-        sorted_pages = sorted(list(val['pages_set']), key=lambda x: int(x) if x.isdigit() else 999)
-        val['page'] = ", ".join(sorted_pages)
-        del val['pages_set']
-        result.append(val)
-    return result
-
 # --- 5. 總稽核 Agent (雙核心引擎版：Gemini + OpenAI) ---
 def agent_unified_check(combined_input, full_text_for_search, api_key, model_name):
     # 1. 準備 Prompt (規則與指令)
@@ -1472,6 +1449,29 @@ def python_header_audit_batch(photo_gallery, ai_res_json):
             pass # 日期格式讀不懂，跳過
 
     return header_issues
+    
+def consolidate_issues(issues):
+    """
+    🗂️ 異常合併器：將「項目」、「錯誤類型」、「原因」完全相同的異常合併成一張卡片
+    """
+    grouped = {}
+    for i in issues:
+        key = (i.get('item', ''), i.get('issue_type', ''), i.get('common_reason', ''))
+        if key not in grouped:
+            grouped[key] = i.copy()
+            grouped[key]['pages_set'] = {str(i.get('page', '?'))}
+            grouped[key]['failures'] = i.get('failures', []).copy()
+        else:
+            grouped[key]['pages_set'].add(str(i.get('page', '?')))
+            grouped[key]['failures'].extend(i.get('failures', []))
+            
+    result = []
+    for key, val in grouped.items():
+        sorted_pages = sorted(list(val['pages_set']), key=lambda x: int(x) if x.isdigit() else 999)
+        val['page'] = ", ".join(sorted_pages)
+        del val['pages_set']
+        result.append(val)
+    return result
     
 # --- 6. 手機版 UI 與 核心執行邏輯 ---
 st.title("🏭 交貨單稽核")
