@@ -332,10 +332,7 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
 
     #### 📋 模組 C：表頭資訊 (Header Info)
     ⚠️ **注意範圍**：你只能從標記為 `=== [SUMMARY_TABLE (總表)] ===` 的區域提取數據。
-    1. **工令單號 (job_no)：在左上角工令編號後，長度 10 碼，由英文字母 (W, R, O, Y) 開頭。 注意規則：
-	•	O 開頭：允許包含英數字混合 (例如 OW62JGGY11)。
-	•	W/R/Y 開頭：通常應為數字為主。
-	•	排除雜訊：若字串看起來像單字 (如 "KEYWAY", "YWAY") 或完全沒有數字，請勿提取。
+    1. **工令編號 (job_no)**：通常是 10 碼，由英文字母 (W, R, O, Y) 開頭。
     2. **預定交貨日 (scheduled_date)**：請將日期統一格式化為 "YYYY/MM/DD"。
     3. **實際交貨日 (actual_date)**：請將日期統一格式化為 "YYYY/MM/DD"。
 
