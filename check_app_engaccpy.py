@@ -528,42 +528,6 @@ def rebalance_orphan_data(dimension_data):
             
     return data
 
-# --- 1. 雜訊殺手 (清除 M系列假ID 與 N/A 無效數據) ---
-def purge_fake_ids(dimension_data):
-    """
-    功能：
-    1. 清除將 M10, M12 等螺紋規格誤判為 ID 的情況。
-    2. 清除 N/A, NAN 等無效 ID。
-    """
-    if not dimension_data: return dimension_data
-    import re
-    
-    for item in dimension_data:
-        ds_str = str(item.get('ds', ''))
-        if not ds_str: continue
-        
-        valid_parts = []
-        segments = ds_str.split("|")
-        
-        for seg in segments:
-            if ":" not in seg: continue
-            k, v = seg.split(":", 1)
-            k_clean = k.strip().upper().replace(" ", "")
-            
-            # 🛑 規則 1: 殺掉 M 開頭接數字 (如 M10, M12)
-            if re.match(r"^M\d+$", k_clean):
-                continue
-
-            # 🛑 規則 2: 殺掉 N/A, NA, NAN
-            if k_clean in ["N/A", "NA", "NAN", "NULL", "NONE"]:
-                continue
-                
-            valid_parts.append(seg)
-        
-        item['ds'] = "|".join(valid_parts)
-        
-    return dimension_data
-    
 def split_into_batches(pages, max_size=4):
     """
     切蛋糕邏輯：
