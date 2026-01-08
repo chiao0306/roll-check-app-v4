@@ -652,49 +652,20 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
 
 def python_numerical_audit(dimension_data):
     """
-    Python 工程引擎 (v71: 冷酷正宮/全符號支援版)
-    升級內容 (基於 v35 架構)：
-    1. [強力清洗]: 支援全形符號 (＝, ×, ＋) 轉半形，確保與 Excel 規則完美匹配。
-    2. [冷酷正宮]: 若 Excel 有完全匹配項目，絕對禁止模糊匹配，防止誤用相似規格。
-    3. [結構保留]: 完整保留 v35 的正確縮排與 try...except 防護機制。
+    Python 工程引擎 (v72: 純粹執行版)
+    架構優化：
+    1. [移除依賴]: 移除 Excel 讀取與模糊匹配。完全依賴「分類官」的判斷。
+    2. [解除耦合]: 不再讀取 Unit_Rule_Local，解決「會計SKIP導致工程漏檢」的副作用。
+    3. [單純化]: 專注於數值提取與邏輯運算，提升效能與穩定性。
+    4. [防護保留]: 保留 v35 的 try...except 與正確縮排。
     """
     grouped_errors = {}
     import re
-    import pandas as pd
-    from thefuzz import fuzz
-
-    # 🔥 1. 讀取全域門檻
-    CURRENT_THRESHOLD = globals().get('GLOBAL_FUZZ_THRESHOLD', 95)
-
+    # 移除 pandas 和 thefuzz，因為不再需要查 Excel 了
+    
     if not dimension_data: return []
 
-    # 🔥 [修正] 智能去尾函式 (v2: 防暴食版) - 保留您的正確版本
-    def remove_tail_info(text):
-        return re.sub(r"[\(（][^\(（]*?[\)）]\s*$", "", str(text)).strip()
-
-    # 🔥 [升級] 強力清洗函式 (v36: 符號轉半形版) - 新增這一段
-    def clean_text(text):
-        t = str(text).upper() # 強制大寫
-        t = t.replace("（", "(").replace("）", ")")
-        t = t.replace("＝", "=").replace("＋", "+").replace("－", "-")
-        t = t.replace("×", "X").replace("＊", "X") 
-        t = t.replace("＃", "#").replace("：", ":")
-        return t.replace(" ", "").replace("\n", "").replace("\r", "").replace('"', '').replace("'", "").strip()
-
-    # 🔥 2. 預先載入規則 (升級為 rules_db 並使用強力清洗)
-    rules_db = {}
-    try:
-        df = pd.read_excel("rules.xlsx")
-        df.columns = [c.strip() for c in df.columns]
-        for _, row in df.iterrows():
-            iname = str(row.get('Item_Name', '')).strip()
-            if iname: 
-                # Key 值改用 clean_text 處理
-                key = clean_text(iname)
-                rules_db[key] = {
-                    "u_local": str(row.get('Unit_Rule_Local', '')).strip()
-                }
-    except: pass
+    # (注意：這裡不需要 remove_tail_info 或 clean_text 了，因為不需要去配對 Excel)
 
     for item in dimension_data:
         ds = str(item.get("ds", ""))
@@ -704,52 +675,28 @@ def python_numerical_audit(dimension_data):
         # 原始標題處理
         raw_title = str(item.get("item_title", ""))
         title = raw_title.replace(" ", "").replace('"', "")
+        
+        # 🔥 關鍵：直接讀取分類官給的 category
         cat = str(item.get("category", "")).strip()
+        
         page_num = item.get("page", "?")
         raw_spec = str(item.get("std_spec", "")).replace('"', "")
         
-        # =========================================================
-        # 🔥 3. 執行特規配對 (v71 冷酷邏輯)
-        # =========================================================
-        
-        # 1. 準備比對用的 Key
-        title_no_tail = remove_tail_info(raw_title)
-        title_clean_rule = clean_text(title_no_tail) # 去尾+清洗
-        title_clean_full = clean_text(raw_title)     # 完整+清洗
-        
-        rule_set = None
-        found_exact = False # 🚩 正宮旗標 (防亂認親戚關鍵)
-
-        # A. 完全匹配 (優先用去尾後的乾淨字串)
-        if title_clean_rule in rules_db:
-            rule_set = rules_db[title_clean_rule]
-            found_exact = True
-        
-        # B. 完整匹配 (如果去尾失敗，試試看沒去尾的)
-        if not found_exact and title_clean_full in rules_db:
-            rule_set = rules_db[title_clean_full]
-            found_exact = True
-        
-        # C. 模糊匹配 (🔥 只有在「沒找到正宮」時才執行)
-        if not found_exact and rules_db:
-            best_score = 0
-            for k, v in rules_db.items():
-                sc = fuzz.token_sort_ratio(k, title_clean_rule)
-                if sc > CURRENT_THRESHOLD and sc > best_score:
-                    best_score = sc
-                    rule_set = v
-        
-        # ⚡️ [豁免檢查]
-        t_upper = clean_text(raw_title) # 使用清洗過的大寫來檢查豁免
+        # ⚡️ [豁免檢查 Phase 1] 標題關鍵字 (保留最後一道防線)
+        t_upper = title.upper()
         if any(k in t_upper for k in ["動平衡", "BALANCING", "熱處理", "HEAT"]):
             continue
             
-        if rule_set:
-            u_local = rule_set.get("u_local", "").upper()
-            if "SKIP" in u_local or "EXEMPT" in u_local or "豁免" in u_local:
-                continue
+        # ⚡️ [豁免檢查 Phase 2] 查看分類官給的指令
+        # 以前是看 Excel 的 Unit_Rule，現在直接看 item 裡的 sl (Smart Logic)
+        logic = item.get("sl", {})
+        l_type = logic.get("lt", "") # 例如: max_limit, range, exempt
+        
+        # 如果分類官說這題是 exempt/skip，那就直接跳過
+        if "SKIP" in str(l_type).upper() or "EXEMPT" in str(l_type).upper() or "豁免" in str(l_type):
+            continue
 
-        # --- 以下為數值提取與檢查邏輯 (完全保留 v35 內容) ---
+        # --- 以下為數值提取與檢查邏輯 (完全保留 v35/v71 數學核心) ---
         
         mm_nums = [float(n) for n in re.findall(r"(\d+\.?\d*)\s*mm", raw_spec)]
         all_nums = [float(n) for n in re.findall(r"(\d+\.?\d*)", raw_spec)]
@@ -810,13 +757,10 @@ def python_numerical_audit(dimension_data):
                             s_ranges.append([b, b])
             except: continue
                     
-        # ... 邏輯判斷 ...
-        logic = item.get("sl", {})
-        l_type = logic.get("lt", "")
+        # ... 邏輯判斷 (依賴分類官傳來的 logic) ...
+        # 注意：這裡不再檢查 l_type 是否為 SKIP，因為上面已經檢查過了
         
-        if "SKIP" in l_type.upper() or "EXEMPT" in l_type.upper() or "豁免" in l_type:
-            un_regen_target = None
-        elif l_type in ["range", "max_limit", "min_limit"]:
+        if l_type in ["range", "max_limit", "min_limit"]:
             un_regen_target = None
         else:
             s_threshold = logic.get("t", 0)
@@ -833,7 +777,7 @@ def python_numerical_audit(dimension_data):
             
             if not val_raw or val_raw in ["N/A", "nan", "M10"]: continue
 
-            # 🔥 [安全防護] 保留您修復好的 try...except
+            # 🔥 [安全防護] try...except
             try:
                 is_passed, reason, t_used, engine_label = True, "", "N/A", "未知"
 
@@ -853,10 +797,8 @@ def python_numerical_audit(dimension_data):
                 else:
                     is_two_dec, is_pure_int = True, True 
 
-                if "SKIP" in l_type.upper() or "EXEMPT" in l_type.upper():
-                    continue
-
-                elif "min_limit" in l_type or "銲補" in (cat + title):
+                # Engine 邏輯分支
+                if "min_limit" in str(l_type) or "銲補" in (cat + title):
                     engine_label = "銲補"
                     if not is_pure_int: is_passed, reason = False, "應為純整數"
                     elif clean_std:
@@ -871,7 +813,7 @@ def python_numerical_audit(dimension_data):
                     elif not is_two_dec: 
                         is_passed, reason = False, "應填兩位小數"
 
-                elif l_type == "max_limit" or (any(k in (cat + title) for k in ["軸頸", "軸頭", "軸位"]) and ("未再生" in (cat + title))):
+                elif str(l_type) == "max_limit" or (any(k in (cat + title) for k in ["軸頸", "軸頭", "軸位"]) and ("未再生" in (cat + title))):
                     engine_label = "軸頸(上限)"
                     candidates = clean_std
                     target = max(candidates) if candidates else 0
@@ -880,7 +822,7 @@ def python_numerical_audit(dimension_data):
                         if not is_pure_int: is_passed, reason = False, "應為純整數"
                         elif val > target: is_passed, reason = False, f"超過上限 {target}"
 
-                elif l_type == "range" or (any(x in (cat + title) for x in ["再生", "精加工", "研磨", "車修", "組裝", "拆裝", "真圓度"]) and "未再生" not in (cat + title)):
+                elif str(l_type) == "range" or (any(x in (cat + title) for x in ["再生", "精加工", "研磨", "車修", "組裝", "拆裝", "真圓度"]) and "未再生" not in (cat + title)):
                     engine_label = "精加工"
                     if not is_two_dec:
                         is_passed, reason = False, "應填兩位小數"
@@ -898,7 +840,6 @@ def python_numerical_audit(dimension_data):
                             "common_reason": reason, "failures": [],
                             "source": "🐍 工程引擎"
                         }
-                    # 🔥 縮排確保正確：在 try 內，if 內，與上層對齊
                     grouped_errors[key]["failures"].append({"id": rid, "val": val_str, "target": f"基準:{t_used}"})
                     
             except: continue
