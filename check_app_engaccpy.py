@@ -1892,7 +1892,7 @@ if st.session_state.photo_gallery:
             # 3. 拼湊結果
             res_main = merge_ai_results(results_bucket)
             
-            # 為了讓 Cache 存到完整的文字 (給 Excel 規則比對用)，我們還是組一個全卷字串
+            # 為了讓 Cache 存到完整的文字...
             combined_input = ""
             for i, p in enumerate(all_pages):
                 combined_input += f"\n=== Page {i+1} ===\n{p.get('full_text','')}\n"
@@ -1900,19 +1900,15 @@ if st.session_state.photo_gallery:
             ai_duration = time.time() - ai_start_time
             
             # ========================================================
-            # 🔥 插入點：資料清洗與修復 (M系列殺手 + 羅賓漢)
+            # 🔥 插入點：僅保留羅賓漢 (修復斷行誤判)
             # ========================================================
+            # 已移除 sanitize_ai_data (M殺手/雜訊清洗)，因為 Flash 模型較穩定
             raw_dim_data = res_main.get("dimension_data", [])
             
-            # 步驟 1: 先執行 M 系列殺手 (把 M10, M12 這種假 ID 殺掉)
-            # 必須先做這個，不然數量會虛胖，影響後面的平衡計算
-            clean_dim_data = purge_fake_ids(raw_dim_data)
+            # 僅保留「斷行修復」邏輯 (解決 7個變12個 的問題)
+            balanced_dim_data = rebalance_orphan_data(raw_dim_data)
             
-            # 步驟 2: 再執行 羅賓漢演算法 (修復 7個變12個 的斷行問題)
-            # 這裡傳入的是已經殺乾淨的 clean_dim_data
-            balanced_dim_data = rebalance_orphan_data(clean_dim_data)
-            
-            # 步驟 3: 重要！把修好的資料塞回 res_main，確保全域同步
+            # 回存
             res_main["dimension_data"] = balanced_dim_data
             # ========================================================
 
