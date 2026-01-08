@@ -1415,12 +1415,57 @@ def python_process_audit(dimension_data):
 
     return process_issues
     
+def clean_job_no_list(job_list):
+    """
+    清洗工令清單 (v2: O系列特權版)
+    邏輯：
+    1. O 開頭：只要長度對，且至少含 2 個數字 (避免純英文單字)，就放行。
+    2. W/R/Y 開頭：必須含有 6 個以上數字 (擋掉亂碼與雜訊)。
+    3. 絕對過濾：擋掉包含 "KEY"、"WAY" 的字串。
+    """
+    import re
+    valid_jobs = []
+    seen = set()
+    
+    for job in job_list:
+        j = str(job).strip().upper()
+        
+        # 1. 基本門檻：長度 10，指定開頭
+        if len(j) != 10 or j[0] not in ['W', 'R', 'O', 'Y']:
+            continue
+            
+        # 2. 絕對防禦：KEYWAY 雜訊
+        if "KEY" in j or "WAY" in j:
+            continue
+
+        # 計算數字個數
+        digit_count = len(re.findall(r"\d", j))
+        
+        # 3. 分流審查
+        is_valid = False
+        
+        if j.startswith("O"):
+            # 【O系列規則】：寬鬆，但至少要有 2 個數字 (OW62JGGY11 有4個數字 -> PASS)
+            # 防止單純被誤判為O開頭的英文單字
+            if digit_count >= 2:
+                is_valid = True
+        else:
+            # 【W/R/Y系列規則】：嚴格，必須有 6 個以上數字
+            # W363150820 (9個數字) -> PASS
+            # YWAYCKEYWA (0個數字) -> FAIL
+            # W3BCC350PI (3個數字) -> FAIL (因為數字太少)
+            if digit_count >= 6:
+                is_valid = True
+                
+        if is_valid and j not in seen:
+            valid_jobs.append(j)
+            seen.add(j)
+            
+    return valid_jobs
+    
 def python_header_audit_batch(photo_gallery, ai_res_json):
     """
-    Python 表頭稽核官 (Batch 架構適配版 v30)
-    1. [Raw Text] 掃描每一頁 OCR 文字，檢查工令是否混單 (Regex)。
-    2. [AI JSON] 檢查 AI 讀出的工令格式 (10碼)。
-    3. [AI JSON] 檢查日期邏輯 (實際 <= 預定)。
+    Python 表頭稽核官 (Batch 架構適配版 v31: 整合工令淨化)
     """
     header_issues = []
     import re
@@ -1435,7 +1480,12 @@ def python_header_audit_batch(photo_gallery, ai_res_json):
         txt = item.get('full_text', '').upper().replace(" ", "").replace("-", "")
         # 尋找所有疑似工令的字串
         matches = re.findall(job_pattern, txt)
-        for job in matches:
+        
+        # 🔥🔥🔥 [關鍵修改] 呼叫淨化函式過濾雜訊 🔥🔥🔥
+        valid_matches = clean_job_no_list(matches)
+        
+        # 只把「淨化後」的工令加入清單
+        for job in valid_matches:
             if job not in found_jobs_map: found_jobs_map[job] = []
             found_jobs_map[job].append(idx + 1)
 
