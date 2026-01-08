@@ -716,7 +716,7 @@ def python_numerical_audit(dimension_data):
             if "±" in part:
                 left_str, right_str = part.split("±", 1)
                 
-                 # 🔥 [修正] 在這裡加入去空白！
+                # 🔥 [修正] 在這裡加入去空白！
                 # 這樣 "0. 0125" 就會變成 "0.0125"，Regex 就能完整抓到了
                 left_str = left_str.replace(" ", "")
                 right_str = right_str.replace(" ", "")
