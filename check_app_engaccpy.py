@@ -283,16 +283,23 @@ def extract_layout_with_azure(file_obj, endpoint, key):
 
     return markdown_output, header_snippet, final_full_text, None, real_page_num
     
-# --- 5. 總稽核 Agent (雙核心引擎版：Gemini + OpenAI) ---
 def agent_unified_check(combined_input, full_text_for_search, api_key, model_name):
-    # 1. 準備 Prompt (規則與指令)
-    dynamic_rules = get_dynamic_rules(full_text_for_search)
+    import google.generativeai as genai
+    import json
+    import re
+    import time
+    
+    # 1. 準備動態規則
+    # (假設 get_dynamic_rules 已經定義在外面，若無定義請確保有此函式或給空字串)
+    try:
+        dynamic_rules = get_dynamic_rules(full_text_for_search)
+    except:
+        dynamic_rules = ""
 
-    System_prompt = f"""
-    
-    {dynamic_rules}
-    
-    角色：嚴格的數據抄錄程式。針對單頁輸入，依據 {{dynamic_rules}} 執行 JSON 填空。
+    # 2. 定義 Prompt (使用 Flash-Lite 優化版)
+    # 注意：這裡不用 f-string，改用 replace 避免規則裡的 {} 導致 Python 報錯
+    base_prompt = """
+    角色：嚴格的數據抄錄程式。針對單頁輸入，依據 {{RULES_PLACEHOLDER}} 執行 JSON 填空。
     
     ### 1. 明細表數據 (來源: === [DETAIL_TABLE] ===)
     - **item_title**: 完整抄錄，嚴禁遺漏「未再生、銲補、車修、軸頸」等關鍵字。
@@ -311,11 +318,11 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
       - `scheduled_date` / `actual_date`: 格式 `YYYY/MM/DD`。
     
     ### 3. 輸出格式 (JSON Only)
-    {{
-      "header_info": {{ "job_no": "...", "scheduled_date": "...", "actual_date": "..." }},
-      "summary_rows": [ {{ "page": 1, "title": "...", "apply_qty": 0, "delivery_qty": 0 }} ],
+    {
+      "header_info": { "job_no": "...", "scheduled_date": "...", "actual_date": "..." },
+      "summary_rows": [ { "page": 1, "title": "...", "apply_qty": 0, "delivery_qty": 0 } ],
       "dimension_data": [
-         {{
+         {
            "page": 1, 
            "item_title": "...", 
            "std_spec": "...", 
@@ -323,79 +330,64 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
            "batch_total_qty": 0, 
            "category": null, 
            "ds": "ID:值|ID:值" 
-         }}
+         }
       ],
       "issues": []
-    }}
+    }
     """
-
-    # 2. 判斷要使用哪一顆引擎
-    raw_content = ""
     
-    # --- 引擎 A: OpenAI GPT 系列 ---
-    if "gpt" in model_name.lower():
+    # 安全插入規則
+    system_instruction = base_prompt.replace("{{RULES_PLACEHOLDER}}", str(dynamic_rules))
+
+    # 3. 設定 API (強制 JSON 模式)
+    genai.configure(api_key=api_key)
+    
+    generation_config = {
+        "temperature": 0.0,      # 0.0 最精準，不做創意發揮
+        "top_p": 0.95,
+        "top_k": 40,
+        "max_output_tokens": 8192,
+        "response_mime_type": "application/json", # 🔥 強制回傳 JSON (Flash-Lite 支援)
+    }
+
+    model = genai.GenerativeModel(
+        model_name=model_name,
+        generation_config=generation_config,
+        system_instruction=system_instruction,
+    )
+
+    # 4. 執行呼叫 (加入重試機制)
+    retries = 2
+    last_error = None
+    
+    for attempt in range(retries + 1):
         try:
-            # 必須使用全域變數 OPENAI_KEY，因為傳入的 api_key 參數通常是 GEMINI_KEY
-            openai_key = st.secrets.get("OPENAI_KEY", "")
-            if not openai_key:
-                return {"job_no": "Error: 缺少 OPENAI_KEY", "issues": [], "dimension_data": []}
-                
-            client = OpenAI(api_key=openai_key)
+            # 發送請求
+            response = model.generate_content(combined_input)
             
-            response = client.chat.completions.create(
-                model=model_name,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": combined_input}
-                ],
-                temperature=0.0,
-                response_format={"type": "json_object"} # GPT-4o 支援強制 JSON 模式
-            )
-            raw_content = response.choices[0].message.content
+            # 取得文字結果
+            raw_text = response.text.strip()
             
-            # 模擬 Token 用量 (OpenAI 格式不同，這裡做個簡單轉換以便統一顯示)
-            input_tokens = response.usage.prompt_tokens
-            output_tokens = response.usage.completion_tokens
+            # 5. 解析 JSON
+            # 因為用了 response_mime_type="application/json"，回傳的一定是乾淨的 JSON
+            final_json = json.loads(raw_text)
             
+            # 成功解析後，直接回傳
+            return final_json
+
         except Exception as e:
-            return {"job_no": f"OpenAI Error: {str(e)}", "issues": [], "dimension_data": []}
+            last_error = e
+            time.sleep(1) # 休息一下再試
+            continue
 
-    # --- 引擎 B: Google Gemini 系列 ---
-    else:
-        try:
-            genai.configure(api_key=api_key) # 這裡用傳入的 GEMINI_KEY
-            generation_config = {"response_mime_type": "application/json", "temperature": 0.0}
-            model = genai.GenerativeModel(model_name)
-            
-            # Gemini 2.0 可能需要不同的呼叫方式，這裡保持通用接口
-            response = model.generate_content([system_prompt, combined_input], generation_config=generation_config)
-            raw_content = response.text
-            
-            input_tokens = response.usage_metadata.prompt_token_count
-            output_tokens = response.usage_metadata.candidates_token_count
-            
-        except Exception as e:
-            return {"job_no": f"Gemini Error: {str(e)}", "issues": [], "dimension_data": []}
-
-    # 3. 統一解析與回傳
-    try:
-        # 🛡️ 超級解析器：防止 AI 輸出帶有 Markdown 標籤或廢話
-        import re
-        json_match = re.search(r"\{.*\}", raw_content, re.DOTALL)
-        if json_match:
-            raw_content = json_match.group()
-            
-        parsed_data = json.loads(raw_content)
-        
-        # 統一 Token 用量格式
-        parsed_data["_token_usage"] = {
-            "input": input_tokens, 
-            "output": output_tokens
-        }
-        return parsed_data
-
-    except Exception as e:
-        return {"job_no": f"JSON Parsing Error: {str(e)}", "issues": [], "dimension_data": []}
+    # 6. 若全部失敗，回傳空結構 (避免程式崩潰)
+    print(f"❌ AI 分析失敗 (已重試 {retries} 次): {last_error}")
+    return {
+        "header_info": {}, 
+        "summary_rows": [], 
+        "dimension_data": [], 
+        "issues": [{"issue_type": "AI_ERROR", "common_reason": str(last_error)}]
+    }
 
 # --- 平行處理輔助函式 ---
 
