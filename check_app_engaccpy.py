@@ -283,69 +283,6 @@ def extract_layout_with_azure(file_obj, endpoint, key):
 
     return markdown_output, header_snippet, final_full_text, None, real_page_num
     
-def python_engineering_audit(dimension_data):
-    """
-    Python 工程引擎 (新增：負責 Excel 強制分類與數值檢查)
-    1. 這是原本我們要修改的邏輯，現在獨立出來，不與表頭檢查衝突。
-    2. 負責執行：Range(再生), Un_regen(本體), Max, Min, Exempt(豁免)。
-    """
-    issues = []
-    import re
-
-    # 輔助：數值提取
-    def get_val(val_str):
-        clean_v = "".join(re.findall(r"[\d\.\-]+", str(val_str)))
-        try: return float(clean_v)
-        except: return None
-
-    # 核心檢查迴圈
-    for item in dimension_data:
-        p_num = item.get("page", "?")
-        title = item.get("item_title", "Unknown")
-        ds_str = item.get("ds", "")
-        
-        # 1. 取得分類 (這裡會去呼叫我們等下要更新的 assign_category_by_python)
-        # 這一步最關鍵！它會去讀 Excel 看有沒有強制規則
-        final_category = assign_category_by_python(title)
-        
-        # 2. ⚡️ 豁免機制：若 Excel 設定為「豁免」，直接跳過
-        if final_category == "exempt":
-            continue
-
-        # 3. 執行各類別檢查
-        
-        # A. Un_regen (本體未再生 - 強制整數檢查)
-        if final_category == "un_regen":
-            for pair in ds_str.split("|"):
-                if ":" not in pair: continue
-                rid, val_s = pair.split(":")[:2]
-                val = get_val(val_s)
-                
-                if val is not None:
-                    # 檢查是否為整數 (允許 0.05 誤差)
-                    if abs(val - round(val)) > 0.05:
-                         issues.append({
-                            "page": p_num,
-                            "item": title,
-                            "issue_type": "⚠️異常(未再生)",
-                            "common_reason": "應為整數 (Excel規則:本體未再生)",
-                            "failures": [{"id": rid, "val": val, "calc": "非整數"}],
-                            "source": "🐍 工程引擎"
-                        })
-
-        # B. Range (再生車修 - 區間檢查)
-        elif final_category == "range":
-            # 這裡您可以呼叫原本寫好的 check_range 邏輯
-            # 或者暫時留空，至少它不會誤判成 "未再生"
-            pass 
-
-        # C. Max/Min Limit (軸頸/銲補)
-        elif final_category == "max_limit" or final_category == "min_limit":
-             # 這裡呼叫原本的 check_limit 邏輯
-             pass 
-
-    return issues
-
 def assign_category_by_python(item_title):
     """
     Python 分類官 (v71: 三位一體完全版)
