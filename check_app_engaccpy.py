@@ -707,38 +707,38 @@ def assign_category_by_python(item_title):
 
 def python_numerical_audit(dimension_data):
     """
-    Python 工程引擎 (v74: 支援 M10/NA 跳過檢查 + 規格缺漏檢查)
-    - 保留 v73 的規格缺漏檢查。
-    - [修改] 針對 M10, N/A 等非數值資料，不再視為垃圾丟棄，而是「跳過運算」，避免會計引擎算不到個數。
+    Python 工程引擎 (v76: 規格優先檢查版)
+    邏輯順序修正：
+    1. [嚴格] 規格缺漏檢查優先執行。即使是熱處理，若規格欄全空，視為異常。
+    2. [豁免] 確認有規格後，才執行熱處理/Exempt的豁免邏輯 (跳過數學比對)。
+    3. [運算] 一般項目執行數值與公差比對。
     """
     grouped_errors = {}
     import re
-    # 移除 pandas 和 thefuzz，因為不再需要查 Excel 了
     
     if not dimension_data: return []
 
-    # (注意：這裡不需要 remove_tail_info 或 clean_text 了，因為不需要去配對 Excel)
-
     for item in dimension_data:
         ds = str(item.get("ds", ""))
-        if not ds: continue
+        # 註解掉這行，確保即使沒數據，也要檢查有沒有漏填規格
+        # if not ds: continue  
+        
         raw_entries = [p.split(":") for p in ds.split("|") if ":" in p]
         
         # 原始標題處理
         raw_title = str(item.get("item_title", ""))
         title = raw_title.replace(" ", "").replace('"', "")
         
-        # 🔥 關鍵：直接讀取分類官給的 category
+        # 讀取分類與邏輯
         cat = str(item.get("category", "")).strip()
-        
         page_num = item.get("page", "?")
         raw_spec = str(item.get("std_spec", "")).replace('"', "")
 
         # ========================================================
-        # 🔥 [新增功能] 規格缺漏檢查 (Missing Spec Check)
+        # 🔥 [Check 1] 規格缺漏檢查 (優先權最高)
         # ========================================================
-        # 邏輯：如果有標題(title)，且已經有數據(ds在上面已檢查過)，
-        # 但規格(raw_spec)是空的，這是不合理的，必須報錯。
+        # 即使是熱處理，這裡也必須過關 (必須有規格字串)
+        # 如果標題存在，但規格完全是空的 -> 報錯
         if title and not raw_spec.strip() and len(title) > 1:
             key = (page_num, raw_title, "規格缺漏")
             if key not in grouped_errors:
@@ -746,29 +746,33 @@ def python_numerical_audit(dimension_data):
                     "page": page_num, 
                     "item": raw_title, 
                     "issue_type": "⚠️規格缺漏", 
-                    "common_reason": "有項目名稱與實測數據，但未偵測到規格標準", 
+                    "common_reason": "有項目名稱，但未偵測到規格標準", 
                     "failures": [{"id": "規格欄", "val": "空白", "calc": "缺失"}],
                     "source": "🐍 工程引擎"
                 }
-            # 因為沒規格也無法進行後續比對，直接跳過
-            continue
+            continue # 既然沒規格，後面也不用看了
         # ========================================================
+
+        # ========================================================
+        # ⚡️ [Check 2] 豁免邏輯 (Exemption)
+        # ========================================================
+        # 走到這裡代表「有規格」了。
+        # 現在檢查是否為「熱處理」或「豁免項目」，如果是，就不算公差了。
         
-        # ⚡️ [豁免檢查 Phase 1] 標題關鍵字 (保留最後一道防線)
+        # 1. 標題關鍵字豁免
         t_upper = title.upper()
         if any(k in t_upper for k in ["動平衡", "BALANCING", "熱處理", "HEAT"]):
             continue
             
-        # ⚡️ [豁免檢查 Phase 2] 查看分類官給的指令
-        # 以前是看 Excel 的 Unit_Rule，現在直接看 item 裡的 sl (Smart Logic)
+        # 2. 分類官指令豁免
         logic = item.get("sl", {})
-        l_type = logic.get("lt", "") # 例如: max_limit, range, exempt
+        l_type = logic.get("lt", "") 
         
-        # 如果分類官說這題是 exempt/skip，那就直接跳過
         if "SKIP" in str(l_type).upper() or "EXEMPT" in str(l_type).upper() or "豁免" in str(l_type):
             continue
+        # ========================================================
 
-        # --- 以下為數值提取與檢查邏輯 (完全保留 v35/v71 數學核心) ---
+        # --- 以下為數值提取與檢查邏輯 (維持不變) ---
         
         mm_nums = [float(n) for n in re.findall(r"(\d+\.?\d*)\s*mm", raw_spec)]
         all_nums = [float(n) for n in re.findall(r"(\d+\.?\d*)", raw_spec)]
@@ -781,13 +785,10 @@ def python_numerical_audit(dimension_data):
         for part in spec_parts:
             part = part.replace("+-", "±").replace("＋－", "±")
             
-            # [Phase 0] 優先處理 ±
             if "±" in part:
                 left_str, right_str = part.split("±", 1)
-                
                 left_str = left_str.replace(" ", "")
                 right_str = right_str.replace(" ", "")
-                
                 left_nums = re.findall(r"(\d+\.?\d*)", left_str)
                 right_nums = re.findall(r"(\d+\.?\d*)", right_str)
                 
@@ -797,11 +798,9 @@ def python_numerical_audit(dimension_data):
                     s_ranges.append([round(b - o, 4), round(b + o, 4)])
                     continue 
             
-            # [Phase 1] mm 隔離
             clean_part = part.replace("mm", "_").replace("MM", "_").replace(" ", "").replace("\n", "").strip()
             if not clean_part: continue
             
-            # [Phase 2] 處理 ~ (Range)
             tilde_matches = list(re.finditer(r"(\d+\.?\d*)\s*[_]*\s*[~～-]\s*[_]*\s*(\d+\.?\d*)", clean_part))
             has_valid_tilde = False
             if tilde_matches:
@@ -813,7 +812,6 @@ def python_numerical_audit(dimension_data):
                         has_valid_tilde = True
             if has_valid_tilde: continue
 
-            # [Phase 3] Base + Offsets
             all_numbers = re.findall(r"[-+]?\d+\.?\d*", clean_part)
             if not all_numbers: continue
             try:
@@ -833,9 +831,6 @@ def python_numerical_audit(dimension_data):
                             s_ranges.append([b, b])
             except: continue
                     
-        # ... 邏輯判斷 (依賴分類官傳來的 logic) ...
-        # 注意：這裡不再檢查 l_type 是否為 SKIP，因為上面已經檢查過了
-        
         if l_type in ["range", "max_limit", "min_limit"]:
             un_regen_target = None
         else:
@@ -851,15 +846,11 @@ def python_numerical_audit(dimension_data):
             rid = str(entry[0]).strip().replace(" ", "")
             val_raw = str(entry[1]).strip().replace(" ", "")
             
-            # 🔥 [修改 1] 這裡只過濾真正的空值 'nan'，不要在這裡殺掉 M10/N/A
+            # 🔥 [防護] M10, N/A, OK 這些非數值，在這裡優雅跳過 (保留字串存在感)
             if not val_raw or val_raw.lower() == 'nan': continue
-
-            # 🔥 [修改 2] M10, N/A, OK 等合法非數值，在這裡優雅跳過 (Soft Skip)
-            # 這樣工程引擎不會報錯，但因為沒有 continue 掉整個迴圈，數據在前面已經被讀取了
             if val_raw.upper() in ["N/A", "NA", "M10", "OK", "-", ""]: 
                 continue 
 
-            # 🔥 [安全防護] try...except (以下維持不變)
             try:
                 is_passed, reason, t_used, engine_label = True, "", "N/A", "未知"
 
@@ -879,7 +870,6 @@ def python_numerical_audit(dimension_data):
                 else:
                     is_two_dec, is_pure_int = True, True 
 
-                # Engine 邏輯分支
                 if "min_limit" in str(l_type) or "銲補" in (cat + title):
                     engine_label = "銲補"
                     if not is_pure_int: is_passed, reason = False, "應為純整數"
