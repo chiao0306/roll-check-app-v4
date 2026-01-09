@@ -308,9 +308,9 @@ def agent_unified_check(combined_input, full_text_for_search, api_key, model_nam
     - **std_spec**: 抄錄含 `mm, ±, +, -` 的規格文字。
     - **item_pc_target**: 提取標題最後一個括號內數字 (如 `(4SET)`->`4`), 無則 `0`。
     - **batch_total_qty**: 若標題含「熱處理、研磨、動平衡」，提取首欄總量 (如 `2425KG`)，否則 `0`。
-    - **ds**: 格式 `ID:數值|ID:數值`。
-      - **規則**: 保留尾數0 (如 `349.90`)。
-      - **雜訊**: 若塗改/模糊/看不清，數值填 `[!]` (如 `V1:[!]`)，**嚴禁猜測**。
+    - **ds**: 格式 `ID:內容|ID:內容`。
+      - **規則**: 完整抄錄實測欄位，包含數字、文字(如 `M10`, `OK`) 或 `N/A`。
+      - **雜訊**: 若塗改/模糊/看不清，填 `[!]` (如 `V1:[!]`)，**嚴禁猜測**。
     - **category**: 固定回傳 `null`。
     
     ### 2. 總表數據 (來源: === [SUMMARY_TABLE] ===)
@@ -707,9 +707,9 @@ def assign_category_by_python(item_title):
 
 def python_numerical_audit(dimension_data):
     """
-    Python 工程引擎 (v73: 含規格缺漏檢查 - 基於 v72 修改)
-    新增功能：
-    - 若有項目名稱 (item_title)，但規格 (std_spec) 為空，直接報錯。
+    Python 工程引擎 (v74: 支援 M10/NA 跳過檢查 + 規格缺漏檢查)
+    - 保留 v73 的規格缺漏檢查。
+    - [修改] 針對 M10, N/A 等非數值資料，不再視為垃圾丟棄，而是「跳過運算」，避免會計引擎算不到個數。
     """
     grouped_errors = {}
     import re
@@ -851,9 +851,15 @@ def python_numerical_audit(dimension_data):
             rid = str(entry[0]).strip().replace(" ", "")
             val_raw = str(entry[1]).strip().replace(" ", "")
             
-            if not val_raw or val_raw in ["N/A", "nan", "M10"]: continue
+            # 🔥 [修改 1] 這裡只過濾真正的空值 'nan'，不要在這裡殺掉 M10/N/A
+            if not val_raw or val_raw.lower() == 'nan': continue
 
-            # 🔥 [安全防護] try...except
+            # 🔥 [修改 2] M10, N/A, OK 等合法非數值，在這裡優雅跳過 (Soft Skip)
+            # 這樣工程引擎不會報錯，但因為沒有 continue 掉整個迴圈，數據在前面已經被讀取了
+            if val_raw.upper() in ["N/A", "NA", "M10", "OK", "-", ""]: 
+                continue 
+
+            # 🔥 [安全防護] try...except (以下維持不變)
             try:
                 is_passed, reason, t_used, engine_label = True, "", "N/A", "未知"
 
