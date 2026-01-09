@@ -1768,233 +1768,48 @@ with st.container(border=True):
             except Exception as e:
                 st.error(f"JSON 檔案格式錯誤: {e}")
 
-    # --- 情況 C: 上傳 Excel (純代碼直讀版 - 不經 AI) ---
+        # --- 情況 C: 上傳 Excel (新增的放在這) ---
     elif data_source == "📊 上傳 Excel 檔":
-        st.info("💡 使用「純代碼直讀」模式：直接提取 Excel 數值，速度最快且準確。")
+        st.info("💡 上傳 Excel 檔後，系統會將表格內容轉換為文字供 AI 稽核。")
+        # 這裡記得維持我們上次改的 xlsm 支援
         uploaded_xlsx = st.file_uploader("上傳 Excel 檔", type=['xlsx', 'xls', 'xlsm'], key="xlsx_uploader")
         
         if uploaded_xlsx:
             try:
                 current_file_name = uploaded_xlsx.name
                 if st.session_state.get('last_loaded_xlsx_name') != current_file_name:
+                    # 1. 讀取 Excel (header=None 保持不變)
+                    df_dict = pd.read_excel(uploaded_xlsx, sheet_name=None, header=None)
                     
-                    # 1. 讀取 Excel (讀取所有內容為字串，避免 001 被轉成 1)
-                    # header=None 代表我們不預設第一列是標題，直接看座標
-                    df_dict = pd.read_excel(uploaded_xlsx, sheet_name=None, header=None, dtype=str)
-                    
+                    st.session_state.photo_gallery = []
                     st.session_state.source_mode = 'excel'
                     st.session_state.last_loaded_xlsx_name = current_file_name
                     
-                    # 準備一個容器來裝「偽裝成 AI 輸出」的結果
-                    fake_ai_result = {
-                        "header_info": {},
-                        "summary_rows": [],
-                        "dimension_data": [],
-                        "issues": [],
-                        "_token_usage": {"input": 0, "output": 0} # 假裝沒花錢
-                    }
-                    
-                    # 用來顯示圖片預覽的 list
-                    st.session_state.photo_gallery = []
-
-                    # --- 開始解析每一個 Sheet ---
                     for sheet_name, df in df_dict.items():
-                        # 清洗數據：填補空值，移除換行
-                        df = df.fillna("").astype(str)
-                        df = df.replace(r'\n', '', regex=True).replace(r'\r', '', regex=True)
+                        df = df.fillna("")
                         
-                        # 轉成 List of Lists 比較好操作座標
-                        rows = df.values.tolist()
+                        # 🔥🔥🔥 [新增這段：暴力壓平換行符號] 🔥🔥🔥
+                        # 這行指令會把所有格子裡的 "\n" (換行) 替換成 " " (空格)
+                        # 這樣 "W3...\n本體..." 就會變成 "W3... 本體..." (同一行)
+                        df = df.astype(str).replace(r'\n', ' ', regex=True).replace(r'\r', ' ', regex=True)
                         
-                        # 暫存變數
-                        current_item_title = None
-                        current_std_spec = None
-                        
-                        # --- 掃描每一列 ---
-                        for r_idx, row in enumerate(rows):
-                            row_str = "".join(row).replace(" ", "") # 該列所有文字黏在一起方便檢查
-                            
-                            # 1. 抓表頭 (Header Info)
-                            # 邏輯：檢查這一列有沒有關鍵字，如果有，抓它右邊那一格
-                            for c_idx, cell in enumerate(row):
-                                cell_clean = str(cell).replace(" ", "").replace(":", "").replace("：", "")
-                                if "工令" in cell_clean and (c_idx + 1 < len(row)):
-                                    # 只有當還沒抓到，或抓到的是 Unknown 時才更新
-                                    if not fake_ai_result["header_info"].get("job_no"):
-                                        val = str(row[c_idx+1]).strip()
-                                        if val: fake_ai_result["header_info"]["job_no"] = val
-                                        
-                                if "預定" in cell_clean and (c_idx + 1 < len(row)):
-                                    fake_ai_result["header_info"]["scheduled_date"] = str(row[c_idx+1]).strip()
-                                    
-                                if "實際" in cell_clean or "完成交貨" in cell_clean:
-                                    if c_idx + 1 < len(row):
-                                        fake_ai_result["header_info"]["actual_date"] = str(row[c_idx+1]).strip()
-
-                            # 2. 抓總表 (Summary)
-                            # 邏輯：通常會有「項目名稱」、「申請」、「實交」在同一列或附近
-                            # 這裡簡化邏輯：如果該列第0格有東西，且後面格子有數字，且不是「規範/標準」等字眼
-                            # (這部分依據你的 Excel 實際狀況可能需要微調座標)
-                            if "申請" in row_str and "實交" in row_str:
-                                # 這是總表標題列，跳過
-                                continue
-                                
-                            # 假設總表在上方，且特徵是：第2欄是申請量，第3欄是實交量 (依照常見 Excel 格式猜測)
-                            # 你可能需要根據實際 Excel 欄位 index 修改這裡的 [1], [2]
-                            # 這裡寫一個簡單的啟發式搜尋：
-                            if len(row) > 3 and r_idx < 15: # 假設總表在前15列
-                                try:
-                                    # 嘗試找看起來像數字的欄位
-                                    col_title = row[0] # 假設第一欄是標題
-                                    col_apply = row[1] # 假設第二欄是申請
-                                    col_deliv = row[2] # 假設第三欄是實交
-                                    
-                                    # 簡單判斷：標題有字，且申請/實交看起來像數字
-                                    if col_title and any(k in col_title for k in ["W", "R", "O", "Y", "軸", "輪", "套"]): 
-                                        if re.match(r"^\d+\.?\d*$", str(col_apply)) and re.match(r"^\d+\.?\d*$", str(col_deliv)):
-                                            fake_ai_result["summary_rows"].append({
-                                                "page": sheet_name,
-                                                "title": str(col_title).strip(),
-                                                "apply_qty": float(col_apply),
-                                                "delivery_qty": float(col_deliv)
-                                            })
-                                except: pass
-
-                            # 3. 抓明細 (Detail) - 這是重點
-                            # 邏輯：左邊第一欄(index 0) 是項目名稱，下一列的第一欄是規範
-                            first_cell = str(row[0]).strip()
-                            
-                            # 判斷是否為「項目名稱」列
-                            # 條件：不是空值，不是關鍵字，且長度足夠
-                            skip_keywords = ["規範", "規格", "標準", "尺寸", "檢驗", "項次", "工令", "日期", "申請", "實交", "備註"]
-                            is_title_row = first_cell and not any(k in first_cell for k in skip_keywords)
-                            
-                            if is_title_row:
-                                # 找到新項目！
-                                current_item_title = first_cell
-                                current_std_spec = "" # 重置規格，等待下一行讀取
-                                
-                                # 順便找目標值 (4SET)
-                                target = 0
-                                match_target = re.search(r"[（(](\d+)[)）]", current_item_title)
-                                if match_target:
-                                    target = int(match_target.group(1))
-                                
-                                # 預先建立資料物件
-                                item_data = {
-                                    "page": sheet_name,
-                                    "item_title": current_item_title,
-                                    "std_spec": "", # 稍後填入
-                                    "item_pc_target": target,
-                                    "batch_total_qty": 0,
-                                    "category": None,
-                                    "ds": ""
-                                }
-                                fake_ai_result["dimension_data"].append(item_data)
-                                
-                                # 這一列右邊可能有數據 (ID: Value)
-                                # 假設從第 1 欄開始往右都是數據區
-                                ds_pairs = []
-                                for i in range(1, len(row)-1, 2): # 跳著讀：ID, Val, ID, Val...
-                                    rid = str(row[i]).strip()
-                                    val = str(row[i+1]).strip()
-                                    if rid and val:
-                                        ds_pairs.append(f"{rid}:{val}")
-                                
-                                if ds_pairs and fake_ai_result["dimension_data"]:
-                                     fake_ai_result["dimension_data"][-1]["ds"] = "|".join(ds_pairs)
-
-                            elif "規範" in first_cell or "規格" in first_cell or "標準" in first_cell:
-                                # 這是上一項目的「規格列」
-                                if fake_ai_result["dimension_data"]: # 確保有上一項
-                                    # 有時候規格會寫在第一欄，有時候在第二欄，這裡把整列文字接起來當規格
-                                    spec_text = " ".join([str(x) for x in row if x]).replace("規範標準", "").strip()
-                                    fake_ai_result["dimension_data"][-1]["std_spec"] = spec_text
-                                    
-                                    # 規格列的右邊也可能有數據！(ID: Value)
-                                    # 接續上一項的 ds
-                                    current_ds = fake_ai_result["dimension_data"][-1]["ds"]
-                                    extra_pairs = []
-                                    for i in range(1, len(row)-1, 2):
-                                        rid = str(row[i]).strip()
-                                        val = str(row[i+1]).strip()
-                                        if rid and val and rid not in ["規範標準", "規格"]:
-                                            extra_pairs.append(f"{rid}:{val}")
-                                    
-                                    if extra_pairs:
-                                        if current_ds:
-                                            fake_ai_result["dimension_data"][-1]["ds"] += "|" + "|".join(extra_pairs)
-                                        else:
-                                            fake_ai_result["dimension_data"][-1]["ds"] = "|".join(extra_pairs)
-
-                            else:
-                                # 既不是標題也不是規格，可能是純數據列 (例如 ID太多換行了)
-                                # 如果目前有正在處理的項目，嘗試讀取右邊的格子
-                                if current_item_title and fake_ai_result["dimension_data"]:
-                                    more_pairs = []
-                                    # 從第 1 欄開始掃
-                                    for i in range(1, len(row)-1, 2):
-                                        rid = str(row[i]).strip()
-                                        val = str(row[i+1]).strip()
-                                        # 簡單過濾雜訊
-                                        if rid and val and len(rid) < 10 and len(val) < 10:
-                                            more_pairs.append(f"{rid}:{val}")
-                                    
-                                    if more_pairs:
-                                        current_ds = fake_ai_result["dimension_data"][-1]["ds"]
-                                        if current_ds:
-                                            fake_ai_result["dimension_data"][-1]["ds"] += "|" + "|".join(more_pairs)
-                                        else:
-                                            fake_ai_result["dimension_data"][-1]["ds"] = "|".join(more_pairs)
-
-                        # 建立預覽文字 (Optional)
                         md_table = df.to_markdown(index=False)
                         st.session_state.photo_gallery.append({
                             'file': None,
                             'table_md': md_table,
                             'header_text': f"來源分頁: {sheet_name}",
-                            'full_text': f"Excel 直讀模式 - {sheet_name}",
+                            'full_text': f"Excel 內容 - 分頁 {sheet_name}\n" + md_table,
                             'raw_json': None,
                             'real_page': sheet_name
                         })
-
-                    # --- [關鍵] 將直讀結果存入 Cache，跳過 AI ---
-                    # 我們直接構造一個完整的 cache 物件，騙過後面的程式
-                    st.session_state.analysis_result_cache = {
-                        "job_no": fake_ai_result["header_info"].get("job_no", "Unknown"),
-                        "header_info": fake_ai_result["header_info"],
-                        "summary_rows": fake_ai_result["summary_rows"],
-                        "dimension_data": fake_ai_result["dimension_data"],
-                        "issues": [], # Excel 直讀通常沒有 AI 解析錯誤
-                        "_token_usage": {"input": 0, "output": 0},
-                        
-                        # 補上計時資訊 (這是 Python 運算所需)
-                        "total_duration": 0.5,
-                        "ocr_duration": 0,
-                        "ai_duration": 0,
-                        "py_duration": 0,
-                        "cost_twd": 0,
-                        "total_in": 0, 
-                        "total_out": 0,
-                        
-                        "ai_extracted_data": fake_ai_result["dimension_data"],
-                        "full_text_for_search": "Excel Direct Read",
-                        "combined_input": "Excel Direct Read"
-                    }
-                    
-                    st.toast(f"✅ 成功載入 Excel 並完成解析: {current_file_name}", icon="⚡")
-                    
-                    # 🔥 [重要] 這裡直接觸發 rerun，讓 UI 讀取剛剛存進 cache 的資料
-                    # 但為了讓 Python 邏輯 (check) 跑一次，我們設定 auto_start = True
-                    # 可是因為我們已經把結果做好塞進 cache 了，其實只要按下「開始分析」時
-                    # 我們可以寫一個判斷：如果是 Excel 模式，直接跳過 AI 呼叫，只跑 Python check
-                    st.session_state.auto_start_analysis = True 
+                    st.toast(f"✅ 成功載入 Excel: {current_file_name}", icon="📊")
+                    if st.session_state.enable_auto_analysis:
+                        st.session_state.auto_start_analysis = True
                     st.rerun()
-                    
                 else:
                     st.success(f"📊 目前載入 Excel：**{uploaded_xlsx.name}**")
             except Exception as e:
-                st.error(f"Excel 解析失敗: {e}")
+                st.error(f"Excel 讀取失敗: {e}")
 
 if st.session_state.photo_gallery:
     st.caption(f"已累積 {len(st.session_state.photo_gallery)} 頁文件")
@@ -2020,134 +1835,97 @@ if st.session_state.photo_gallery:
     trigger_analysis = start_btn or is_auto_start
 
     if trigger_analysis:
-        # --- [修改 1] 智慧清除 Cache ---
-        # 如果是 Excel 直讀模式且已經有結果 (剛上傳完)，就不要清除 Cache，否則數據會不見！
-        # 其他模式 (照片/JSON) 則強制清除，確保是新的分析
-        is_excel_direct_mode = (st.session_state.get('source_mode') == 'excel' and st.session_state.analysis_result_cache)
-        
-        if not is_excel_direct_mode:
-            st.session_state.analysis_result_cache = None 
-            
+        # 強制清除上一筆
+        st.session_state.analysis_result_cache = None 
         st.session_state.auto_start_analysis = False
         total_start = time.time()
         
         with st.status("總稽核官正在進行全方位分析...", expanded=True) as status_box:
             progress_bar = st.progress(0)
             
-            # 初始化變數 (確保後面 Python 邏輯有東西可讀)
-            res_main = {}
-            ocr_duration = 0
-            ai_duration = 0
+            # 1. OCR
+            status_box.write("👀 正在進行 OCR 文字識別...")
+            ocr_start = time.time()
+            
+            def process_task(index, item):
+                if item.get('full_text'): return index, item.get('header_text',''), item['full_text'], None
+                try:
+                    item['file'].seek(0)
+                    _, h, f, _, _ = extract_layout_with_azure(item['file'], DOC_ENDPOINT, DOC_KEY)
+                    return index, h, f, None
+                except Exception as e: return index, None, None, str(e)
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                futures = [executor.submit(process_task, i, item) for i, item in enumerate(st.session_state.photo_gallery)]
+                for future in concurrent.futures.as_completed(futures):
+                    idx, h_txt, f_txt, err = future.result()
+                    if not err:
+                        st.session_state.photo_gallery[idx].update({'header_text': h_txt, 'full_text': f_txt, 'file': None})
+                    progress_bar.progress(0.4 * ((idx + 1) / len(st.session_state.photo_gallery)))
+
+            ocr_duration = time.time() - ocr_start
+            
+            # 2. 組合文字
             combined_input = ""
+            for i, p in enumerate(st.session_state.photo_gallery):
+                combined_input += f"\n=== Page {i+1} ===\n{p.get('full_text','')}\n"
 
             # ==========================================
-            # 🔀 分流判斷：Excel 直讀 vs AI 分析
+            # 🚀 3. AI 並行分析 (Turbo Mode)
             # ==========================================
-            if is_excel_direct_mode:
-                status_box.write("⚡ 偵測到 Excel 直讀數據，跳過 AI 分析，直接執行邏輯稽核...")
-                time.sleep(0.5) # 給個視覺緩衝
+            status_box.write("🤖 AI 正在分批並行處理 (Turbo Mode)...")
+            ai_start_time = time.time()
+            
+            # 1. 準備批次
+            # 這裡設定 max_size=4，也就是 8 頁會拆成 4+4，5 頁會拆成 4+1
+            # 這是最符合您需求的拆法，且效率最高
+            all_pages = st.session_state.photo_gallery
+            batches = list(split_into_batches(all_pages, max_size=3)) 
+            
+            ai_futures = []
+            results_bucket = [None] * len(batches) # 用來按順序存結果
+
+            # 定義一個子任務函數
+            def process_batch(batch_idx, batch_pages):
+                # 組合該批次的文字
+                # 注意：這裡要保留原始頁碼 (real_page_index)，不然這批的第1頁會被當成全卷第1頁
+                batch_text = ""
+                for p in batch_pages:
+                    # 找出這張圖在原始全卷是第幾頁 (用 index+1)
+                    real_idx = all_pages.index(p) + 1 
+                    batch_text += f"\n=== Page {real_idx} ===\n{p.get('full_text','')}\n"
                 
-                # 直接從 Cache 拿資料
-                res_main = st.session_state.analysis_result_cache
-                combined_input = res_main.get("combined_input", "Excel Direct Read")
+                # 呼叫 AI (全卷搜索文字可以用完整的，但這裡我們傳入 batch_text 讓 AI 專注)
+                # full_text_for_search 參數其實主要是給 Excel 模糊比對用的，傳全卷沒問題
+                full_text_all = "".join([p.get('full_text','') for p in all_pages])
                 
-                # 模擬進度條跑完
-                progress_bar.progress(0.4)
+                return agent_unified_check(batch_text, full_text_all, GEMINI_KEY, main_model_name)
+
+            # 2. 同時發射火箭 (並行執行)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                for idx, batch in enumerate(batches):
+                    future = executor.submit(process_batch, idx, batch)
+                    ai_futures.append((idx, future))
                 
-            else:
-                # ==========================================
-                # 方案 A: 標準 AI 流程 (OCR + Gemini)
-                # ==========================================
-                
-                # 1. OCR
-                status_box.write("👀 正在進行 OCR 文字識別...")
-                ocr_start = time.time()
-                
-                def process_task(index, item):
-                    if item.get('full_text'): return index, item.get('header_text',''), item['full_text'], None
+                # 等待所有火箭回來
+                for idx, future in ai_futures:
                     try:
-                        item['file'].seek(0)
-                        _, h, f, _, _ = extract_layout_with_azure(item['file'], DOC_ENDPOINT, DOC_KEY)
-                        return index, h, f, None
-                    except Exception as e: return index, None, None, str(e)
+                        res = future.result()
+                        results_bucket[idx] = res
+                    except Exception as e:
+                        # 萬一某一塊失敗，塞一個空殼避免程式崩潰
+                        results_bucket[idx] = {"header_info": {}, "summary_rows": [], "dimension_data": [], "issues": []}
+                        st.error(f"Batch {idx+1} 分析失敗: {e}")
 
-                with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-                    futures = [executor.submit(process_task, i, item) for i, item in enumerate(st.session_state.photo_gallery)]
-                    for future in concurrent.futures.as_completed(futures):
-                        idx, h_txt, f_txt, err = future.result()
-                        if not err:
-                            st.session_state.photo_gallery[idx].update({'header_text': h_txt, 'full_text': f_txt, 'file': None})
-                        progress_bar.progress(0.4 * ((idx + 1) / len(st.session_state.photo_gallery)))
-
-                ocr_duration = time.time() - ocr_start
-                
-                # 2. 組合文字
-                combined_input = ""
-                for i, p in enumerate(st.session_state.photo_gallery):
-                    combined_input += f"\n=== Page {i+1} ===\n{p.get('full_text','')}\n"
-
-                # ==========================================
-                # 🚀 3. AI 並行分析 (Turbo Mode)
-                # ==========================================
-                status_box.write("🤖 AI 正在分批並行處理 (Turbo Mode)...")
-                ai_start_time = time.time()
-                
-                # 1. 準備批次
-                all_pages = st.session_state.photo_gallery
-                batches = list(split_into_batches(all_pages, max_size=3)) 
-                
-                ai_futures = []
-                results_bucket = [None] * len(batches)
-
-                # 定義一個子任務函數
-                def process_batch(batch_idx, batch_pages):
-                    batch_text = ""
-                    for p in batch_pages:
-                        real_idx = all_pages.index(p) + 1 
-                        batch_text += f"\n=== Page {real_idx} ===\n{p.get('full_text','')}\n"
-                    
-                    full_text_all = "".join([p.get('full_text','') for p in all_pages])
-                    return agent_unified_check(batch_text, full_text_all, GEMINI_KEY, main_model_name)
-
-                # 2. 同時發射火箭
-                with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-                    for idx, batch in enumerate(batches):
-                        future = executor.submit(process_batch, idx, batch)
-                        ai_futures.append((idx, future))
-                    
-                    for idx, future in ai_futures:
-                        try:
-                            res = future.result()
-                            results_bucket[idx] = res
-                        except Exception as e:
-                            results_bucket[idx] = {"header_info": {}, "summary_rows": [], "dimension_data": [], "issues": []}
-                            st.error(f"Batch {idx+1} 分析失敗: {e}")
-
-                # 3. 拼湊結果
-                res_main = merge_ai_results(results_bucket)
-                
-                # 更新全卷文字供 Cache 使用
-                combined_input = ""
-                for i, p in enumerate(all_pages):
-                    combined_input += f"\n=== Page {i+1} ===\n{p.get('full_text','')}\n"
-                
-                ai_duration = time.time() - ai_start_time
-
-            # ========================================================
-            # 🏁 流程匯合：以下邏輯無論是 Excel 還是 AI 都會執行
-            # ========================================================
+            # 3. 拼湊結果
+            res_main = merge_ai_results(results_bucket)
             
-            # 🔥 插入點：資料修復流水線 (結構修復 -> 語意修復)
-            raw_dim_data = res_main.get("dimension_data", [])
+            # 為了讓 Cache 存到完整的文字 (給 Excel 規則比對用)，我們還是組一個全卷字串
+            combined_input = ""
+            for i, p in enumerate(all_pages):
+                combined_input += f"\n=== Page {i+1} ===\n{p.get('full_text','')}\n"
             
-            # 步驟 1: 執行羅賓漢 (修復結構)
-            balanced_dim_data = rebalance_orphan_data(raw_dim_data)
-            
-            # 步驟 2: 執行強制更名 (修復語意/筆誤)
-            final_dim_data = apply_forced_renaming(balanced_dim_data)
-            
-            # 步驟 3: 回存最終結果
-            res_main["dimension_data"] = final_dim_data
+            ai_duration = time.time() - ai_start_time
             
             # ========================================================
             # 🔥 插入點：資料修復流水線 (結構修復 -> 語意修復)
