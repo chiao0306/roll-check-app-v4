@@ -1,4 +1,25 @@
-       # ========================================================
+def python_numerical_audit(dimension_data):
+    """
+    Python 工程引擎 (v73: 含規格缺漏檢查)
+    新增功能：
+    - 若有項目名稱 (item_title)，但規格 (std_spec) 為空，直接報錯。
+    """
+    grouped_errors = {}
+    import re
+    
+    if not dimension_data: return []
+
+    for item in dimension_data:
+        # 1. 基礎變數提取
+        page_num = item.get("page", "?")
+        raw_title = str(item.get("item_title", ""))
+        title = raw_title.replace(" ", "").replace('"', "").strip()
+        
+        # 取得並清洗規格
+        raw_spec = str(item.get("std_spec", "")).strip()
+        if raw_spec.lower() in ['nan', 'none', 'null']: raw_spec = ""
+
+        # ========================================================
         # 🔥 [新增功能] 規格缺漏檢查 (Missing Spec Check)
         # ========================================================
         # 條件：有標題(title存在) 且 沒規格(raw_spec為空)
@@ -18,3 +39,165 @@
             # 既然沒規格，後面的數值比對也不用做了，直接跳下一題
             continue 
         # ========================================================
+
+        # 2. 檢查是否有數據 (如果連數據都沒有，通常是空行，跳過)
+        ds = str(item.get("ds", ""))
+        if not ds: continue
+        
+        raw_entries = [p.split(":") for p in ds.split("|") if ":" in p]
+        
+        # 3. 讀取分類與邏輯 (以下維持原有力學)
+        cat = str(item.get("category", "")).strip()
+        logic = item.get("sl", {})
+        l_type = logic.get("lt", "") 
+        
+        # 豁免檢查
+        t_upper = title.upper()
+        if any(k in t_upper for k in ["動平衡", "BALANCING", "熱處理", "HEAT"]):
+            continue
+            
+        if "SKIP" in str(l_type).upper() or "EXEMPT" in str(l_type).upper() or "豁免" in str(l_type):
+            continue
+
+        # --- 以下為原本的數值提取與檢查邏輯 (保持不變) ---
+        
+        mm_nums = [float(n) for n in re.findall(r"(\d+\.?\d*)\s*mm", raw_spec)]
+        all_nums = [float(n) for n in re.findall(r"(\d+\.?\d*)", raw_spec)]
+        noise = [350.0, 300.0, 200.0, 145.0, 130.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+        clean_std = [n for n in all_nums if (n in mm_nums) or (n not in noise and n > 5)]
+
+        s_ranges = []
+        spec_parts = re.split(r"[\n\r]|[一二三四五六]|[（(]\d+[)）]|[;；]", raw_spec)
+        
+        for part in spec_parts:
+            part = part.replace("+-", "±").replace("＋－", "±")
+            
+            if "±" in part:
+                left_str, right_str = part.split("±", 1)
+                left_str = left_str.replace(" ", "")
+                right_str = right_str.replace(" ", "")
+                left_nums = re.findall(r"(\d+\.?\d*)", left_str)
+                right_nums = re.findall(r"(\d+\.?\d*)", right_str)
+                
+                if left_nums and right_nums:
+                    b = float(left_nums[-1]) 
+                    o = float(right_nums[0])
+                    s_ranges.append([round(b - o, 4), round(b + o, 4)])
+                    continue 
+            
+            clean_part = part.replace("mm", "_").replace("MM", "_").replace(" ", "").replace("\n", "").strip()
+            if not clean_part: continue
+            
+            tilde_matches = list(re.finditer(r"(\d+\.?\d*)\s*[_]*\s*[~～-]\s*[_]*\s*(\d+\.?\d*)", clean_part))
+            has_valid_tilde = False
+            if tilde_matches:
+                for match in tilde_matches:
+                    n1 = float(match.group(1))
+                    n2 = float(match.group(2))
+                    if abs(n1 - n2) < max(n1, n2) * 0.6:
+                        s_ranges.append([round(min(n1, n2), 4), round(max(n1, n2), 4)])
+                        has_valid_tilde = True
+            if has_valid_tilde: continue
+
+            all_numbers = re.findall(r"[-+]?\d+\.?\d*", clean_part)
+            if not all_numbers: continue
+            try:
+                bases = []
+                offsets = []
+                for token in all_numbers:
+                    val = float(token)
+                    if val > 10.0: bases.append(val)
+                    elif abs(val) < 10.0: offsets.append(val)
+                if bases:
+                    for b in bases:
+                        if offsets:
+                            endpoints = [round(b + o, 4) for o in offsets]
+                            if len(endpoints) == 1: endpoints.append(b)
+                            s_ranges.append([min(endpoints), max(endpoints)])
+                        else:
+                            s_ranges.append([b, b])
+            except: continue
+                    
+        if l_type in ["range", "max_limit", "min_limit"]:
+            un_regen_target = None
+        else:
+            s_threshold = logic.get("t", 0)
+            un_regen_target = None
+            if l_type in ["un_regen", "未再生"] or ("未再生" in (cat + title) and not any(k in (cat + title) for k in ["軸頸", "軸頭", "軸位"])):
+                cands = [n for n in clean_std if n >= 120.0]
+                if s_threshold and float(s_threshold) >= 120.0: cands.append(float(s_threshold))
+                if cands: un_regen_target = max(cands)
+
+        for entry in raw_entries:
+            if len(entry) < 2: continue
+            rid = str(entry[0]).strip().replace(" ", "")
+            val_raw = str(entry[1]).strip().replace(" ", "")
+            
+            if not val_raw or val_raw in ["N/A", "nan", "M10"]: continue
+
+            try:
+                is_passed, reason, t_used, engine_label = True, "", "N/A", "未知"
+
+                if "[!]" in val_raw:
+                    is_passed = False
+                    reason = "🛑數據損壞(壞軌)"
+                    val_str = "[!]"
+                    val = -999.0 
+                else:
+                    v_m = re.findall(r"\d+\.?\d*", val_raw)
+                    val_str = v_m[0] if v_m else val_raw
+                    val = float(val_str)
+
+                if val_str != "[!]":
+                    is_two_dec = "." in val_str and len(val_str.split(".")[-1]) == 2
+                    is_pure_int = "." not in val_str
+                else:
+                    is_two_dec, is_pure_int = True, True 
+
+                if "min_limit" in str(l_type) or "銲補" in (cat + title):
+                    engine_label = "銲補"
+                    if not is_pure_int: is_passed, reason = False, "應為純整數"
+                    elif clean_std:
+                        t_used = min(clean_std, key=lambda x: abs(x - val))
+                        if val < t_used: is_passed, reason = False, "數值不足"
+                
+                elif un_regen_target is not None:
+                    engine_label = "未再生"
+                    t_used = un_regen_target
+                    if val <= t_used:
+                        if not is_pure_int: is_passed, reason = False, "應為整數"
+                    elif not is_two_dec: 
+                        is_passed, reason = False, "應填兩位小數"
+
+                elif str(l_type) == "max_limit" or (any(k in (cat + title) for k in ["軸頸", "軸頭", "軸位"]) and ("未再生" in (cat + title))):
+                    engine_label = "軸頸(上限)"
+                    candidates = clean_std
+                    target = max(candidates) if candidates else 0
+                    t_used = target
+                    if target > 0:
+                        if not is_pure_int: is_passed, reason = False, "應為純整數"
+                        elif val > target: is_passed, reason = False, f"超過上限 {target}"
+
+                elif str(l_type) == "range" or (any(x in (cat + title) for x in ["再生", "精加工", "研磨", "車修", "組裝", "拆裝", "真圓度"]) and "未再生" not in (cat + title)):
+                    engine_label = "精加工"
+                    if not is_two_dec:
+                        is_passed, reason = False, "應填兩位小數"
+                    elif s_ranges:
+                        t_used = str(s_ranges)
+                        if not any(r[0] <= val <= r[1] for r in s_ranges): 
+                            is_passed, reason = False, "不在區間內"
+
+                if not is_passed:
+                    key = (page_num, raw_title, reason)
+                    if key not in grouped_errors:
+                        grouped_errors[key] = {
+                            "page": page_num, "item": raw_title, 
+                            "issue_type": f"異常({engine_label})", 
+                            "common_reason": reason, "failures": [],
+                            "source": "🐍 工程引擎"
+                        }
+                    grouped_errors[key]["failures"].append({"id": rid, "val": val_str, "target": f"基準:{t_used}"})
+                    
+            except: continue
+                
+    return list(grouped_errors.values())
