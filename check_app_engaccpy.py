@@ -786,14 +786,21 @@ def python_numerical_audit(dimension_data):
             
             if "±" in part:
                 left_str, right_str = part.split("±", 1)
+                # 清洗雜訊
                 left_str = left_str.replace(" ", "")
                 right_str = right_str.replace(" ", "")
+                
+                # 提取數字
                 left_nums = re.findall(r"(\d+\.?\d*)", left_str)
                 right_nums = re.findall(r"(\d+\.?\d*)", right_str)
                 
-                if left_nums and right_nums:
-                    b = float(left_nums[-1]) 
-                    o = float(right_nums[0])
+                # 🔥 修改重點：只要求右邊(公差)必須有數字
+                if right_nums:
+                    # 如果左邊沒數字 (例如: 真圓度±0.1)，基準值(b)設為 0
+                    b = float(left_nums[-1]) if left_nums else 0.0
+                    o = float(right_nums[0]) # 取右邊第一個數字當公差
+                    
+                    # 計算範圍 [基準-公差, 基準+公差]
                     s_ranges.append([round(b - o, 4), round(b + o, 4)])
                     continue 
             
